@@ -1,34 +1,28 @@
 """
-Product search via pgvector semantic similarity + result formatting.
+Product search via direct DB query (ILIKE keyword matching).
 """
 from __future__ import annotations
 
 import re
 
-import httpx
 from loguru import logger
 
-from app.config import settings
 from app.db.supabase import get_client
 
-_EMBED_URL = "https://openrouter.ai/api/v1/embeddings"
-_EMBED_MODEL = "openai/text-embedding-3-small"
+_STOPWORDS = {
+    "cho", "tôi", "em", "anh", "chị", "bác", "về", "của", "và", "hoặc",
+    "có", "không", "một", "cái", "bộ", "hỏi", "muốn", "xem", "cần",
+    "được", "thì", "là", "ở", "tại", "với", "các", "những", "này",
+    "loại", "sản", "phẩm", "đá", "hàng",
+}
 
+_SELECT_COLS = (
+    "id, ma_sp, ten_sp, the_loai, danh_muc, kich_thuoc, "
+    "gia_da_xanh_den, gia_da_xanh_reu, gia_da_xam_bd, gia_da_grn_an_do, "
+    "mo_ta, ghi_chu, tags, ton_kho, ban_chay"
+)
 
-# ---------------------------------------------------------------------------
-# Embedding
-# ---------------------------------------------------------------------------
-
-async def embed_query(text: str) -> list[float]:
-    """Embed a search query via OpenRouter."""
-    async with httpx.AsyncClient(timeout=15) as client:
-        r = await client.post(
-            _EMBED_URL,
-            headers={"Authorization": f"Bearer {settings.openrouter_api_key}"},
-            json={"model": _EMBED_MODEL, "input": text},
-        )
-        r.raise_for_status()
-        return r.json()["data"][0]["embedding"]
+_TEXT_COLS = ["ten_sp", "mo_ta", "the_loai", "danh_muc", "ghi_chu", "kich_thuoc"]
 
 
 # ---------------------------------------------------------------------------
@@ -41,17 +35,14 @@ def _parse_budget(budget_text: str | None) -> int | None:
         return None
     text = budget_text.lower().replace(" ", "").replace(",", ".")
 
-    # Millions: "2tr", "1.5triệu", "2m"
     m = re.search(r"(\d+(?:\.\d+)?)\s*(?:tr(?:iệu)?|m(?:illion)?)\b", text)
     if m:
         return int(float(m.group(1)) * 1_000_000)
 
-    # Thousands: "500k", "300nghìn"
     m = re.search(r"(\d+(?:\.\d+)?)\s*(?:k|nghìn|ngàn)\b", text)
     if m:
         return int(float(m.group(1)) * 1_000)
 
-    # Plain number heuristic
     m = re.search(r"(\d{4,})", text)
     if m:
         return int(m.group(1))
@@ -59,36 +50,71 @@ def _parse_budget(budget_text: str | None) -> int | None:
     return None
 
 
+def _extract_keywords(query: str) -> list[str]:
+    """Extract meaningful keywords from query, max 4."""
+    words = re.sub(r"[.,?!]", " ", query.lower()).split()
+    return [w for w in words if len(w) >= 2 and w not in _STOPWORDS][:4]
+
+
 # ---------------------------------------------------------------------------
 # Search
 # ---------------------------------------------------------------------------
 
-async def search_products(query: str, slots: dict, n: int = 5) -> list[dict]:
+async def search_products(query: str, slots: dict, n: int = 6) -> list[dict]:
     """
-    Embed query and call match_products RPC.
-    Returns products ordered by cosine similarity (best match first).
+    Text-based DB search: each keyword must appear in at least one product text column.
+    Falls back to bestsellers if no results found.
     """
-    try:
-        embedding = await embed_query(query)
-    except Exception:
-        logger.exception("embed_query failed query={!r}", query[:80])
-        return []
+    client = get_client()
+    keywords = _extract_keywords(query)
 
-    params = {
-        "query_embedding": embedding,
-        "match_count": n,
-        "filter_the_loai": slots.get("product_type"),
-        "filter_danh_muc": None,
-        "filter_price_max": _parse_budget(slots.get("budget")),
-    }
+    # Also extract hints from slots
+    the_loai = slots.get("product_type") or slots.get("stone_type") or slots.get("project_type")
+    budget = _parse_budget(slots.get("budget"))
 
+    products = _run_query(client, keywords, the_loai, budget, n)
+
+    # Fallback 1: drop keywords one by one if no results
+    kws = list(keywords)
+    while not products and len(kws) > 1:
+        kws = kws[:-1]
+        products = _run_query(client, kws, the_loai, budget, n)
+
+    # Fallback 2: bestsellers
+    if not products:
+        products = _run_query(client, [], the_loai, budget, n)
+
+    logger.info("search found {} products query={!r} keywords={}", len(products), query[:50], keywords)
+    return products
+
+
+def _run_query(client, keywords: list[str], the_loai: str | None, budget: int | None, n: int) -> list[dict]:
+    """Build and execute one Supabase query."""
     try:
-        result = get_client().rpc("match_products", params).execute()
-        products = result.data or []
-        logger.info("search found {} products query={!r}", len(products), query[:50])
-        return products
+        q = client.table("products").select(_SELECT_COLS)
+
+        # AND across keywords: each keyword must match at least one column
+        for kw in keywords:
+            or_parts = ",".join(f"{col}.ilike.%{kw}%" for col in _TEXT_COLS)
+            q = q.or_(or_parts)
+
+        # the_loai hard filter from slot
+        if the_loai:
+            q = q.ilike("the_loai", f"%{the_loai}%")
+
+        # Budget: at least one price column must be within budget
+        if budget:
+            price_cols = [
+                "gia_da_xanh_den", "gia_da_xanh_reu",
+                "gia_da_xam_bd", "gia_da_grn_an_do",
+            ]
+            price_filter = ",".join(f"{col}.lte.{budget}" for col in price_cols)
+            q = q.or_(price_filter)
+
+        result = q.order("ban_chay", desc=True).limit(n).execute()
+        return result.data or []
     except Exception:
-        logger.exception("match_products RPC failed")
+        logger.exception("DB query failed keywords={} the_loai={}", keywords, the_loai)
         return []
 
 
@@ -97,7 +123,6 @@ async def search_products(query: str, slots: dict, n: int = 5) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def _best_price(p: dict) -> int | None:
-    """Return the lowest non-null price across stone variants."""
     candidates = [
         p.get("gia_da_xanh_den"),
         p.get("gia_da_xanh_reu"),
@@ -109,7 +134,6 @@ def _best_price(p: dict) -> int | None:
 
 
 def format_results(products: list[dict]) -> str:
-    """Format product list as concise Messenger-friendly text."""
     if not products:
         return (
             "Em chưa tìm thấy sản phẩm phù hợp ạ. "
@@ -140,7 +164,6 @@ def format_results(products: list[dict]) -> str:
 
 
 def format_products_for_llm(products: list[dict]) -> str:
-    """Compact product list for injection into LLM system context."""
     if not products:
         return "Không tìm thấy sản phẩm phù hợp."
     lines = ["Sản phẩm gợi ý từ kho hàng Hồn Đá:"]
@@ -148,7 +171,9 @@ def format_products_for_llm(products: list[dict]) -> str:
         price = _best_price(p)
         price_str = f"{price:,}₫" if price else "Liên hệ"
         desc = p.get("mo_ta") or ""
-        line = f"- {p['ten_sp']} | {p.get('kich_thuoc','')}" \
-               f" | Từ {price_str} | {desc[:60]}"
+        line = (
+            f"- {p['ten_sp']} | {p.get('kich_thuoc', '')} "
+            f"| Từ {price_str} | {desc[:60]}"
+        )
         lines.append(line)
     return "\n".join(lines)

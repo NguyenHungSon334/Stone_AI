@@ -6,8 +6,8 @@ class Settings(BaseSettings):
     supabase_url: str
     supabase_key: str
     supabase_service_key: str = ""
-    messenger_verify_token: str
-    messenger_page_token: str
+    messenger_verify_token: str = "placeholder"
+    messenger_page_token: str = "placeholder"
     messenger_app_secret: str = ""
     sentry_dsn: str = ""
     cost_cap_per_user_day: float = 0.50

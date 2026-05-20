@@ -8,7 +8,7 @@ from loguru import logger
 from app.config import settings
 
 
-GRAPH_API = "https://graph.facebook.com/v19.0"
+GRAPH_API = "https://graph.facebook.com/v25.0"
 
 
 def verify_signature(body: bytes, x_hub_signature: str) -> bool:

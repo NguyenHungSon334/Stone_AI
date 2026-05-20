@@ -227,9 +227,10 @@ async def chat(
 
 
 _GUARD_SYSTEM = (
-    "Bạn là bộ lọc an toàn. Phân loại tin nhắn của người dùng.\n"
-    "Trả về 'safe' nếu bình thường.\n"
-    "Trả về 'unsafe' nếu có: bạo lực, nội dung tình dục, lừa đảo, hướng dẫn gây hại.\n"
+    "Bạn là bộ lọc an toàn cho chatbot tư vấn đá lăng mộ (Hồn Đá). "
+    "Khách hàng hỏi về: mộ, lăng, lăng tộc, kích thước, giá đá, thi công. Những chủ đề này LUÔN an toàn.\n"
+    "Trả về 'safe' nếu tin nhắn bình thường hoặc liên quan đến đá/lăng mộ/xây dựng.\n"
+    "Trả về 'unsafe' CHỈ khi có: bạo lực rõ ràng, nội dung tình dục, lừa đảo tài chính, hướng dẫn gây hại.\n"
     "Chỉ trả về đúng một từ: safe hoặc unsafe. Không giải thích."
 )
 
@@ -247,3 +248,27 @@ async def classify(prompt: str) -> str:
         max_tokens=10,
     )
     return reply.lower().strip()
+
+
+# ---------------------------------------------------------------------------
+# Embeddings
+# ---------------------------------------------------------------------------
+
+_EMBED_URL = "https://openrouter.ai/api/v1/embeddings"
+_EMBED_MODEL = "openai/text-embedding-3-small"
+
+
+async def embed(text: str) -> list[float]:
+    """Generate 1536-dim embedding via OpenRouter. Raises RuntimeError on failure."""
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.post(
+            _EMBED_URL,
+            headers={
+                "Authorization": f"Bearer {settings.openrouter_api_key}",
+                "HTTP-Referer": "https://spiritstone.vn",
+            },
+            json={"model": _EMBED_MODEL, "input": text[:8000]},
+        )
+        if r.status_code != 200:
+            raise RuntimeError(f"embed failed status={r.status_code} body={r.text[:200]}")
+        return r.json()["data"][0]["embedding"]

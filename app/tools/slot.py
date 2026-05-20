@@ -18,6 +18,11 @@ _SLOTS = frozenset({
     "crane_access",  # xe cẩu vào được (true/false/unknown)
     "timeline",      # tháng/năm dự kiến
     "name",          # tên khách
+    # Search filters
+    "budget",        # ngân sách ("50 triệu", "100tr", "dưới 200 triệu")
+    "chieu_dai",     # kích thước chiều dài ("1200mm", "1.2m", "120cm")
+    "chieu_cao",     # kích thước chiều cao
+    "chieu_rong",    # kích thước chiều rộng
 })
 
 _SYSTEM = """Trích xuất thông tin từ tin nhắn khách hàng về công trình đá lăng mộ. Chỉ lấy thông tin được đề cập rõ ràng, không suy đoán.
@@ -30,6 +35,10 @@ Trả về JSON với các trường (bỏ qua nếu không có):
 - crane_access: xe cẩu có vào được không ("có", "không", hoặc bỏ qua nếu chưa biết)
 - timeline: thời gian dự kiến thi công (ví dụ: "tháng 8/2025")
 - name: tên khách hàng
+- budget: ngân sách tối đa (ví dụ: "50 triệu", "100tr", "dưới 200 triệu") — trích nguyên văn
+- chieu_dai: chiều dài yêu cầu (ví dụ: "1200mm", "1.2m") — trích nguyên văn nếu có
+- chieu_cao: chiều cao yêu cầu — trích nguyên văn nếu có
+- chieu_rong: chiều rộng yêu cầu — trích nguyên văn nếu có
 
 Chỉ trả về JSON, không giải thích."""
 

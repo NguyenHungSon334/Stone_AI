@@ -80,10 +80,8 @@ async def _execute_tool(
         return "Đã lưu thông tin khách hàng."
 
     if name == "search_products":
-        products = await search_products(
-            args["query"],
-            {k: args.get(k) for k in ("stone_type", "project_type")},
-        )
+        slots = {k: args[k] for k in ("stone_type", "project_type", "budget", "chieu_dai", "chieu_cao", "chieu_rong") if args.get(k)}
+        products = await search_products(args["query"], slots)
         if products:
             return format_products_for_llm(products)
         return "Không tìm thấy sản phẩm phù hợp."
@@ -151,7 +149,8 @@ async def run(sender_id: str, user_text: str) -> None:
             "tool_calls": tool_calls,
         }
         follow_up = messages + [assistant_turn] + tool_results
-        text_reply2, _, cost2 = await llm_call_with_tools(follow_up, TOOLS)
+        # Force text response — pass empty tools to prevent another tool loop
+        text_reply2, _, cost2 = await llm_call_with_tools(follow_up, [])
         cost += cost2
         if text_reply2:
             text_reply = text_reply2

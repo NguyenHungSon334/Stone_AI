@@ -76,11 +76,27 @@ TOOLS: list[dict] = [
                     },
                     "stone_type": {
                         "type": "string",
-                        "description": "Lọc theo loại đá nếu khách đã chỉ định",
+                        "description": "Lọc theo loại đá nếu khách đã chỉ định (xanh rêu, xanh đen, granite)",
                     },
                     "project_type": {
                         "type": "string",
-                        "description": "Loại công trình nếu có",
+                        "description": "Loại công trình (mộ đơn, lăng tộc, mộ, cổng...)",
+                    },
+                    "budget": {
+                        "type": "string",
+                        "description": "Ngân sách tối đa nếu khách đề cập (ví dụ: '50 triệu', '200tr')",
+                    },
+                    "chieu_dai": {
+                        "type": "string",
+                        "description": "Chiều dài tối đa yêu cầu (ví dụ: '1200mm', '1.2m')",
+                    },
+                    "chieu_cao": {
+                        "type": "string",
+                        "description": "Chiều cao tối đa yêu cầu",
+                    },
+                    "chieu_rong": {
+                        "type": "string",
+                        "description": "Chiều rộng tối đa yêu cầu",
                     },
                 },
                 "required": ["query"],

@@ -24,17 +24,20 @@ PHONG CÁCH GIAO TIẾP
 - Sai: **Vị trí có xe cẩu vào được không?** — Đúng: Vị trí có xe cẩu vào được không ạ?
 
 CÁCH DẪN DẮT HỘI THOẠI
-Bước 1 — Lắng nghe & tìm hiểu nhu cầu:
-  Hỏi thăm về công trình (mộ đơn lẻ hay khu lăng gia tộc?), loại đá muốn dùng, hạng mục cần làm.
-  Trả lời câu hỏi của khách một cách cụ thể, không né tránh.
 
-Bước 2 — Xin thông tin liên hệ (khi đã hiểu nhu cầu):
-  Sau khi biết sơ bộ nhu cầu, hoặc khi khách hỏi giá cụ thể, xin SĐT/Zalo để:
-  a) Gửi bảng giá và ảnh mẫu phù hợp
-  b) Để chuyên gia gọi lại tư vấn chi tiết hơn
-  Lý do tự nhiên: "giá phụ thuộc kích thước Lỗ Ban và địa hình thực tế, em cần thêm thông tin để báo chính xác"
+Bước 1 — Tư vấn trước, hỏi sau (BẮT BUỘC):
+  Luôn trả lời câu hỏi của khách TRƯỚC. Nếu khách hỏi giá, gọi search_products và báo giá ngay.
+  Nếu khách hỏi về loại đá, giải thích sự khác biệt cụ thể.
+  KHÔNG được từ chối trả lời hay chuyển sang hỏi SĐT khi khách đang hỏi thông tin.
+  Hỏi thêm để hiểu nhu cầu: mộ đơn hay lăng tộc, loại đá nào, hạng mục gì.
 
-Bước 3 — Thu thập thông tin (sau khi có SĐT, hỏi từng câu):
+Bước 2 — Xin thông tin liên hệ (CHỈ sau khi đã tư vấn ít nhất 3-4 lượt):
+  Điều kiện: đã trả lời câu hỏi của khách VÀ đã biết sơ bộ loại công trình hoặc nhu cầu.
+  Khi đó mới xin SĐT/Zalo để gửi bảng giá chi tiết và để chuyên gia hỗ trợ thêm.
+  Lý do tự nhiên: "giá chính xác phụ thuộc kích thước Lỗ Ban và địa hình thực tế"
+  TUYỆT ĐỐI không xin SĐT ở lượt đầu hoặc khi chưa tư vấn gì cho khách.
+
+Bước 3 — Thu thập thông tin (sau khi có SĐT, hỏi từng câu một):
   Hạng mục cụ thể → tỉnh/huyện thi công → xe cẩu vào được không → thời gian dự kiến
 
 Bước 4 — Chốt & chuyển giao:
@@ -48,8 +51,8 @@ SẢN PHẨM
 - Giá EXW tại xưởng, tính theo kích thước Lỗ Ban và điều kiện lắp đặt thực tế
 
 SỬ DỤNG TOOLS (QUAN TRỌNG)
-- Khi khách cung cấp bất kỳ thông tin nào (tên, SĐT, địa điểm, loại đá, hạng mục, xe cẩu, thời gian) → GỌI update_customer NGAY, không chờ đủ thông tin
-- Khi khách hỏi giá hoặc muốn xem sản phẩm → GỌI search_products để tra kho, không tự ước giá
+- Khi khách hỏi giá hoặc muốn xem sản phẩm → GỌI search_products NGAY, không tự ước giá, không hỏi SĐT trước
+- Khi khách cung cấp bất kỳ thông tin nào (tên, SĐT, địa điểm, loại đá, hạng mục, xe cẩu, thời gian) → GỌI update_customer NGAY
 - Có thể gọi update_customer nhiều lần trong một cuộc trò chuyện khi có thông tin mới"""
 
 
@@ -85,10 +88,13 @@ def _context_note(ctx: "ConversationContext") -> str:
         parts.append(f"SĐT/Zalo: {s['phone']} (ĐÃ CÓ — không cần xin lại)")
     else:
         turn_count = len(ctx.history) // 2
-        if turn_count >= 2:
-            parts.append("SĐT: CHƯA CÓ — nên xin SĐT/Zalo trong lượt này nếu tự nhiên")
+        has_project_info = bool(s.get("project_type") or s.get("items") or s.get("stone_type"))
+        if turn_count >= 4 and has_project_info:
+            parts.append("SĐT: CHƯA CÓ — đã tư vấn đủ, có thể xin SĐT/Zalo để chuyên gia hỗ trợ thêm")
+        elif turn_count >= 6:
+            parts.append("SĐT: CHƯA CÓ — cuộc trò chuyện đã dài, nên xin SĐT/Zalo nếu tự nhiên")
         else:
-            parts.append("SĐT: CHƯA CÓ — tìm hiểu nhu cầu trước")
+            parts.append("SĐT: CHƯA CÓ — ưu tiên trả lời câu hỏi và tư vấn trước, CHƯA xin SĐT")
 
     if s.get("project_type"):
         parts.append(f"Loại công trình: {s['project_type']}")

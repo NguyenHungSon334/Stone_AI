@@ -7,6 +7,7 @@ from typing import Literal
 import httpx
 from loguru import logger
 from app.config import settings
+from app.http_client import get_http_client
 
 # ---------------------------------------------------------------------------
 # Model registry
@@ -50,7 +51,6 @@ async def llm_call(
     alias: ModelAlias = "fast",
     temperature: float = 0.7,
     max_tokens: int = 512,
-    client: httpx.AsyncClient | None = None,
 ) -> tuple[str, float]:
     """
     Call OpenRouter and return (reply_text, cost_usd).
@@ -70,61 +70,54 @@ async def llm_call(
         "X-Title": "SpiritStone AI",
     }
 
-    owned_client = client is None
-    if owned_client:
-        client = httpx.AsyncClient(timeout=30)
-
+    client = get_http_client()
     last_error: Exception | None = None
-    try:
-        for attempt in range(MAX_RETRIES):
-            try:
-                t0 = time.monotonic()
-                r = await client.post(OPENROUTER_URL, headers=headers, json=payload)
-                elapsed = time.monotonic() - t0
+    for attempt in range(MAX_RETRIES):
+        try:
+            t0 = time.monotonic()
+            r = await client.post(OPENROUTER_URL, headers=headers, json=payload)
+            elapsed = time.monotonic() - t0
 
-                if r.status_code == 429:
-                    retry_after = float(r.headers.get("retry-after", RETRY_DELAYS[attempt]))
-                    logger.warning("OpenRouter rate-limited model={} retry_after={:.1f}s", model_id, retry_after)
-                    await asyncio.sleep(retry_after)
-                    continue
+            if r.status_code == 429:
+                retry_after = float(r.headers.get("retry-after", RETRY_DELAYS[attempt]))
+                logger.warning("OpenRouter rate-limited model={} retry_after={:.1f}s", model_id, retry_after)
+                await asyncio.sleep(retry_after)
+                continue
 
-                if 400 <= r.status_code < 500:
-                    # 4xx = client error, fail fast without retry
-                    logger.error("OpenRouter 4xx model={} status={} body={}", model_id, r.status_code, r.text)
-                    raise RuntimeError(f"OpenRouter {r.status_code}: {r.text}")
+            if 400 <= r.status_code < 500:
+                # 4xx = client error, fail fast without retry
+                logger.error("OpenRouter 4xx model={} status={} body={}", model_id, r.status_code, r.text)
+                raise RuntimeError(f"OpenRouter {r.status_code}: {r.text}")
 
-                if r.status_code >= 500:
-                    logger.warning("OpenRouter 5xx model={} status={} body={}", model_id, r.status_code, r.text)
-                    raise httpx.HTTPStatusError(r.text, request=r.request, response=r)
+            if r.status_code >= 500:
+                logger.warning("OpenRouter 5xx model={} status={} body={}", model_id, r.status_code, r.text)
+                raise httpx.HTTPStatusError(r.text, request=r.request, response=r)
 
-                r.raise_for_status()
-                data = r.json()
+            r.raise_for_status()
+            data = r.json()
 
-                reply = data["choices"][0]["message"]["content"].strip()
-                usage = data.get("usage", {})
-                cost = calc_cost(
-                    model_id,
-                    usage.get("prompt_tokens", 0),
-                    usage.get("completion_tokens", 0),
-                )
-                logger.info(
-                    "llm model={} alias={} tokens={}/{} cost=${:.5f} latency={:.2f}s",
-                    model_id, alias,
-                    usage.get("prompt_tokens", 0),
-                    usage.get("completion_tokens", 0),
-                    cost, elapsed,
-                )
-                return reply, cost
+            reply = data["choices"][0]["message"]["content"].strip()
+            usage = data.get("usage", {})
+            cost = calc_cost(
+                model_id,
+                usage.get("prompt_tokens", 0),
+                usage.get("completion_tokens", 0),
+            )
+            logger.info(
+                "llm model={} alias={} tokens={}/{} cost=${:.5f} latency={:.2f}s",
+                model_id, alias,
+                usage.get("prompt_tokens", 0),
+                usage.get("completion_tokens", 0),
+                cost, elapsed,
+            )
+            return reply, cost
 
-            except (httpx.TimeoutException, httpx.NetworkError, httpx.HTTPStatusError) as e:
-                last_error = e
-                if attempt < MAX_RETRIES - 1:
-                    delay = RETRY_DELAYS[attempt]
-                    logger.warning("llm error attempt={} model={} err={} retry in {}s", attempt + 1, model_id, e, delay)
-                    await asyncio.sleep(delay)
-    finally:
-        if owned_client:
-            await client.aclose()
+        except (httpx.TimeoutException, httpx.NetworkError, httpx.HTTPStatusError) as e:
+            last_error = e
+            if attempt < MAX_RETRIES - 1:
+                delay = RETRY_DELAYS[attempt]
+                logger.warning("llm error attempt={} model={} err={} retry in {}s", attempt + 1, model_id, e, delay)
+                await asyncio.sleep(delay)
 
     raise RuntimeError(f"llm_call failed after {MAX_RETRIES} attempts: {last_error}")
 
@@ -137,77 +130,84 @@ async def llm_call_with_tools(
     messages: list[dict],
     tools: list[dict],
     alias: ModelAlias = "smart",
-    temperature: float = 0.7,
-    max_tokens: int = 500,
+    temperature: float = 0.3,
+    max_tokens: int = 1000,
 ) -> tuple[str | None, list[dict], float]:
     """
-    Call OpenRouter with tools. Returns (text | None, tool_calls, cost_usd).
+    Call OpenRouter with optional tools. Returns (text | None, tool_calls, cost_usd).
     text is None when model only emitted tool_calls with no accompanying text.
+    When tools is empty, sends a plain completion request (no tool params).
     """
     model_id = MODELS[alias]
-    payload = {
+    payload: dict = {
         "model": model_id,
         "messages": messages,
         "temperature": temperature,
         "max_tokens": max_tokens,
-        "tools": tools,
-        "tool_choice": "auto",
     }
+    if tools:
+        payload["tools"] = tools
+        payload["tool_choice"] = "auto"
+
     headers = {
         "Authorization": f"Bearer {settings.openrouter_api_key}",
         "HTTP-Referer": "https://spiritstone.vn",
         "X-Title": "SpiritStone AI",
     }
 
+    client = get_http_client()
     last_error: Exception | None = None
-    async with httpx.AsyncClient(timeout=30) as client:
-        for attempt in range(MAX_RETRIES):
-            try:
-                t0 = time.monotonic()
-                r = await client.post(OPENROUTER_URL, headers=headers, json=payload)
-                elapsed = time.monotonic() - t0
+    for attempt in range(MAX_RETRIES):
+        try:
+            t0 = time.monotonic()
+            r = await client.post(OPENROUTER_URL, headers=headers, json=payload)
+            elapsed = time.monotonic() - t0
 
-                if r.status_code == 429:
-                    retry_after = float(r.headers.get("retry-after", RETRY_DELAYS[attempt]))
-                    logger.warning("OpenRouter rate-limited model={} retry_after={:.1f}s", model_id, retry_after)
-                    await asyncio.sleep(retry_after)
-                    continue
+            if r.status_code == 429:
+                retry_after = float(r.headers.get("retry-after", RETRY_DELAYS[attempt]))
+                logger.warning("OpenRouter rate-limited model={} retry_after={:.1f}s", model_id, retry_after)
+                await asyncio.sleep(retry_after)
+                continue
 
-                if 400 <= r.status_code < 500:
-                    logger.error("OpenRouter 4xx model={} status={} body={}", model_id, r.status_code, r.text)
-                    raise RuntimeError(f"OpenRouter {r.status_code}: {r.text}")
+            if 400 <= r.status_code < 500:
+                logger.error("OpenRouter 4xx model={} status={} body={}", model_id, r.status_code, r.text)
+                raise RuntimeError(f"OpenRouter {r.status_code}: {r.text}")
 
-                if r.status_code >= 500:
-                    logger.warning("OpenRouter 5xx model={} status={} body={}", model_id, r.status_code, r.text)
-                    raise httpx.HTTPStatusError(r.text, request=r.request, response=r)
+            if r.status_code >= 500:
+                logger.warning("OpenRouter 5xx model={} status={} body={}", model_id, r.status_code, r.text)
+                raise httpx.HTTPStatusError(r.text, request=r.request, response=r)
 
-                r.raise_for_status()
-                data = r.json()
-                msg = data["choices"][0]["message"]
-                usage = data.get("usage", {})
-                cost = calc_cost(
-                    model_id,
-                    usage.get("prompt_tokens", 0),
-                    usage.get("completion_tokens", 0),
-                )
+            r.raise_for_status()
+            data = r.json()
+            msg = data["choices"][0]["message"]
+            usage = data.get("usage", {})
+            cost = calc_cost(
+                model_id,
+                usage.get("prompt_tokens", 0),
+                usage.get("completion_tokens", 0),
+            )
 
-                tool_calls: list[dict] = msg.get("tool_calls") or []
-                text = (msg.get("content") or "").strip() or None
+            tool_calls: list[dict] = msg.get("tool_calls") or []
+            raw_text = (msg.get("content") or "").strip()
+            finish_reason = data["choices"][0].get("finish_reason")
+            if finish_reason == "length" and raw_text:
+                raw_text += "\n(Em xin lỗi, tin nhắn quá dài. Bác vui lòng hỏi thêm để em tiếp tục ạ!)"
+            text = raw_text or None
 
-                logger.info(
-                    "llm_tools model={} tools={} cost=${:.5f} latency={:.2f}s",
-                    model_id,
-                    [tc["function"]["name"] for tc in tool_calls],
-                    cost, elapsed,
-                )
-                return text, tool_calls, cost
+            logger.info(
+                "llm_tools model={} alias={} tools={} cost=${:.5f} latency={:.2f}s",
+                model_id, alias,
+                [tc["function"]["name"] for tc in tool_calls],
+                cost, elapsed,
+            )
+            return text, tool_calls, cost
 
-            except (httpx.TimeoutException, httpx.NetworkError, httpx.HTTPStatusError) as e:
-                last_error = e
-                if attempt < MAX_RETRIES - 1:
-                    delay = RETRY_DELAYS[attempt]
-                    logger.warning("llm_tools error attempt={} err={} retry in {}s", attempt + 1, e, delay)
-                    await asyncio.sleep(delay)
+        except (httpx.TimeoutException, httpx.NetworkError, httpx.HTTPStatusError) as e:
+            last_error = e
+            if attempt < MAX_RETRIES - 1:
+                delay = RETRY_DELAYS[attempt]
+                logger.warning("llm_tools error attempt={} err={} retry in {}s", attempt + 1, e, delay)
+                await asyncio.sleep(delay)
 
     raise RuntimeError(f"llm_call_with_tools failed after {MAX_RETRIES} attempts: {last_error}")
 
@@ -259,16 +259,29 @@ _EMBED_MODEL = "openai/text-embedding-3-small"
 
 
 async def embed(text: str) -> list[float]:
-    """Generate 1536-dim embedding via OpenRouter. Raises RuntimeError on failure."""
-    async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.post(
-            _EMBED_URL,
-            headers={
-                "Authorization": f"Bearer {settings.openrouter_api_key}",
-                "HTTP-Referer": "https://spiritstone.vn",
-            },
-            json={"model": _EMBED_MODEL, "input": text[:8000]},
-        )
-        if r.status_code != 200:
-            raise RuntimeError(f"embed failed status={r.status_code} body={r.text[:200]}")
-        return r.json()["data"][0]["embedding"]
+    """Generate 1536-dim embedding via OpenRouter. Retries on transient errors."""
+    client = get_http_client()
+    headers = {
+        "Authorization": f"Bearer {settings.openrouter_api_key}",
+        "HTTP-Referer": "https://spiritstone.vn",
+    }
+    last_error: Exception | None = None
+    for attempt in range(MAX_RETRIES):
+        try:
+            r = await client.post(
+                _EMBED_URL,
+                headers=headers,
+                json={"model": _EMBED_MODEL, "input": text[:8000]},
+            )
+            if r.status_code == 200:
+                return r.json()["data"][0]["embedding"]
+            if 400 <= r.status_code < 500:
+                raise RuntimeError(f"embed failed status={r.status_code} body={r.text[:200]}")
+            # 5xx — retry
+            last_error = RuntimeError(f"embed 5xx status={r.status_code}")
+        except (httpx.TimeoutException, httpx.NetworkError) as e:
+            last_error = e
+        if attempt < MAX_RETRIES - 1:
+            await asyncio.sleep(RETRY_DELAYS[attempt])
+            logger.warning("embed retry attempt={} err={}", attempt + 1, last_error)
+    raise RuntimeError(f"embed failed after {MAX_RETRIES} attempts: {last_error}")

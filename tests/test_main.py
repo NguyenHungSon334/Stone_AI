@@ -101,7 +101,7 @@ def _page_body(sender_id: str = "u1", text: str = "hello") -> dict:
 
 def test_webhook_post_queues_message(client):
     with (
-        patch("app.main.extract_messages", return_value=[{"sender_id": "u1", "text": "xin chào"}]),
+        patch("app.main.extract_messages", return_value=[{"sender_id": "u1", "text": "xin chào", "timestamp": 1}]),
         patch("app.main.is_rate_limited", return_value=False),
         patch("app.orchestrator.run", new_callable=AsyncMock),
     ):
@@ -133,8 +133,8 @@ def test_webhook_post_not_page_event(client):
 
 def test_webhook_post_multiple_events(client):
     events = [
-        {"sender_id": "u1", "text": "hello"},
-        {"sender_id": "u2", "text": "hi"},
+        {"sender_id": "u10", "text": "hello", "timestamp": 1001},
+        {"sender_id": "u11", "text": "hi", "timestamp": 1002},
     ]
     with (
         patch("app.main.extract_messages", return_value=events),

@@ -9,6 +9,7 @@ Strategy:
 """
 from __future__ import annotations
 
+import asyncio
 import re
 
 from loguru import logger
@@ -31,6 +32,22 @@ _STOPWORDS = {
 }
 
 # Customer-facing the_loai names (exact values in DB)
+# stone_type slot value → price column that is non-null for that stone
+_STONE_COL_MAP: dict[str, str] = {
+    "xanh đen":  "gia_da_xanh_den",
+    "xanh den":  "gia_da_xanh_den",
+    "đen":       "gia_da_xanh_den",
+    "xanh rêu":  "gia_da_xanh_reu",
+    "xanh reu":  "gia_da_xanh_reu",
+    "xanh":      "gia_da_xanh_reu",
+    "xám":       "gia_da_xam_bd",
+    "xam":       "gia_da_xam_bd",
+    "granite":   "gia_da_grn_an_do",
+    "ấn độ":     "gia_da_grn_an_do",
+    "an do":     "gia_da_grn_an_do",
+    "ấn":        "gia_da_grn_an_do",
+}
+
 _THE_LOAI_MAP = {
     "mộ": "Mộ",
     "mo": "Mộ",
@@ -101,6 +118,14 @@ def _resolve_the_loai(slots: dict) -> str | None:
     return _THE_LOAI_MAP.get(key)  # None if not in map → no filter
 
 
+def _resolve_stone_col(slots: dict) -> str | None:
+    """Map stone_type slot to the DB price column for that stone variety."""
+    raw = slots.get("stone_type")
+    if not raw:
+        return None
+    return _STONE_COL_MAP.get(raw.lower().strip())
+
+
 def _extract_keywords(query: str) -> list[str]:
     words = re.sub(r"[.,?!]", " ", query.lower()).split()
     return [w for w in words if len(w) >= 2 and w not in _STOPWORDS][:4]
@@ -110,16 +135,21 @@ def _extract_keywords(query: str) -> list[str]:
 # SQL filters builder
 # ---------------------------------------------------------------------------
 
-def _apply_sql_filters(q, the_loai: str | None, budget: int | None, sizes: dict) -> object:
+def _apply_sql_filters(
+    q, the_loai: str | None, budget: int | None, sizes: dict, stone_col: str | None = None
+) -> object:
     if the_loai:
         q = q.ilike("the_loai", f"%{the_loai}%")
 
+    if stone_col:
+        # Only return products available in this stone variety
+        q = q.not_.is_(stone_col, "null")
+
     if budget:
-        price_cols = [
-            "gia_da_xanh_den", "gia_da_xanh_reu",
-            "gia_da_xam_bd", "gia_da_grn_an_do",
-        ]
-        # at least one price must be ≤ budget
+        price_cols = (
+            [stone_col] if stone_col
+            else ["gia_da_xanh_den", "gia_da_xanh_reu", "gia_da_xam_bd", "gia_da_grn_an_do"]
+        )
         q = q.or_(",".join(f"{c}.lte.{budget}" for c in price_cols))
 
     if sizes.get("chieu_dai_max"):
@@ -136,13 +166,16 @@ def _apply_sql_filters(q, the_loai: str | None, budget: int | None, sizes: dict)
 # Search layers
 # ---------------------------------------------------------------------------
 
+_SIMILARITY_THRESHOLD = 0.30
+
+
 async def _semantic_search(
     query: str,
     the_loai: str | None,
     budget: int | None,
     n: int,
 ) -> list[dict]:
-    """pgvector semantic search via match_products RPC."""
+    """pgvector semantic search via match_products RPC. Filters by similarity threshold."""
     client = get_client()
     try:
         vector = await embed(query)
@@ -154,8 +187,11 @@ async def _semantic_search(
             params["filter_the_loai"] = the_loai
         if budget:
             params["filter_price_max"] = budget
-        result = client.rpc("match_products", params).execute()
-        return result.data or []
+        result = await asyncio.to_thread(
+            lambda: client.rpc("match_products", params).execute()
+        )
+        rows = result.data or []
+        return [r for r in rows if (r.get("similarity") or 0) >= _SIMILARITY_THRESHOLD]
     except Exception:
         logger.exception("semantic_search failed query={!r}", query[:50])
         return []
@@ -167,14 +203,15 @@ def _ilike_search(
     budget: int | None,
     sizes: dict,
     n: int,
+    stone_col: str | None = None,
 ) -> list[dict]:
-    """Keyword ILIKE on search_text column (pg_trgm accelerated)."""
+    """Single query: OR across all keywords on search_text (pg_trgm accelerated)."""
     client = get_client()
     try:
         q = client.table("products").select(_SELECT_COLS)
-        for kw in keywords:
-            q = q.ilike("search_text", f"%{kw}%")
-        q = _apply_sql_filters(q, the_loai, budget, sizes)
+        if keywords:
+            q = q.or_(",".join(f"search_text.ilike.%{kw}%" for kw in keywords))
+        q = _apply_sql_filters(q, the_loai, budget, sizes, stone_col)
         result = q.order("ban_chay", desc=True).limit(n).execute()
         return result.data or []
     except Exception:
@@ -209,12 +246,18 @@ def _filter_by_size(products: list[dict], sizes: dict) -> list[dict]:
 async def search_products(query: str, slots: dict, n: int = 6) -> list[dict]:
     """
     Hybrid search:
-      1. Semantic (pgvector) → post-filter by dimensions
+      1. Semantic (pgvector) → post-filter by stone type and dimensions
       2. ILIKE fallback (pg_trgm on search_text)
       3. Bestseller fallback with SQL filters only
     """
-    the_loai = _resolve_the_loai(slots)
-    budget   = _parse_budget(slots.get("budget"))
+    the_loai  = _resolve_the_loai(slots)
+    stone_col = _resolve_stone_col(slots)
+    budget    = _parse_budget(slots.get("budget"))
+
+    # Augment query with stone type for better semantic matching
+    semantic_query = query
+    if slots.get("stone_type"):
+        semantic_query = f"{slots['stone_type']} {query}"
 
     sizes = {
         "chieu_dai_max":  _parse_size_mm(slots.get("chieu_dai")),
@@ -223,29 +266,34 @@ async def search_products(query: str, slots: dict, n: int = 6) -> list[dict]:
     }
     sizes = {k: v for k, v in sizes.items() if v}  # drop None
 
-    # Layer 1: Semantic search
-    products = await _semantic_search(query, the_loai, budget, n)
-    if products and sizes:
-        products = _filter_by_size(products, sizes)
+    keywords = _extract_keywords(query)
 
-    # Layer 2: ILIKE fallback
+    # Layer 1: Semantic search — skip when query has fewer than 2 meaningful keywords
+    if len(keywords) >= 2:
+        products = await _semantic_search(semantic_query, the_loai, budget, n)
+        # Post-filter by stone type: only keep rows with a price for that stone
+        if products and stone_col:
+            products = [p for p in products if p.get(stone_col)]
+        if products and sizes:
+            products = _filter_by_size(products, sizes)
+    else:
+        products = []
+
+    # Layer 2: ILIKE fallback — single OR query across all keywords
     if not products:
-        keywords = _extract_keywords(query)
-        products = _ilike_search(keywords, the_loai, budget, sizes, n)
+        products = await asyncio.to_thread(
+            _ilike_search, keywords, the_loai, budget, sizes, n, stone_col
+        )
 
-        # progressively drop keywords if still no results
-        kws = list(keywords)
-        while not products and len(kws) > 1:
-            kws = kws[:-1]
-            products = _ilike_search(kws, the_loai, budget, sizes, n)
-
-    # Layer 3: bestseller fallback (SQL filters only)
+    # Layer 3: bestseller fallback (SQL filters only, no keyword constraint)
     if not products:
-        products = _ilike_search([], the_loai, budget, sizes, n)
+        products = await asyncio.to_thread(
+            _ilike_search, [], the_loai, budget, sizes, n, stone_col
+        )
 
     logger.info(
-        "search found={} query={!r} the_loai={} budget={} sizes={}",
-        len(products), query[:50], the_loai, budget, sizes,
+        "search found={} query={!r} the_loai={} stone_col={} budget={} sizes={}",
+        len(products), query[:50], the_loai, stone_col, budget, sizes,
     )
     return products
 
@@ -283,41 +331,40 @@ def format_results(products: list[dict]) -> str:
 
         line = f"{i}. {name}"
         if size:
-            # Show first line of kich_thuoc only
             first_line = size.split("\n")[0]
             line += f" ({first_line})"
-        line += f"\n   Gia tu {price_str}"
+        line += f"\n   Giá từ {price_str}"
         if desc_str:
             line += f"\n   {desc_str}"
         lines.append(line)
 
     if len(products) > 3:
-        lines.append(f"\n...va {len(products) - 3} san pham khac. Anh/chi muon xem them khong a?")
+        lines.append(f"\n...và {len(products) - 3} sản phẩm khác. Anh/chị muốn xem thêm không ạ?")
 
     return "\n".join(lines)
 
 
 def format_products_for_llm(products: list[dict]) -> str:
     if not products:
-        return "Khong tim thay san pham phu hop."
-    lines = ["San pham goi y tu kho hang Hon Da:"]
+        return "Không tìm thấy sản phẩm phù hợp."
+    lines = ["Sản phẩm gợi ý từ kho hàng Hồn Đá:"]
     for p in products[:5]:
         price = _best_price(p)
-        price_str = f"{price:,}d" if price else "Lien he"
+        price_str = f"{price:,}đ" if price else "Liên hệ"
         dai  = p.get("chieu_dai_mm")
         cao  = p.get("chieu_cao_mm")
         rong = p.get("chieu_rong_mm")
         dim_str = ""
         if dai or cao or rong:
             parts = []
-            if dai:  parts.append(f"dai {dai}mm")
-            if rong: parts.append(f"rong {rong}mm")
+            if dai:  parts.append(f"dài {dai}mm")
+            if rong: parts.append(f"rộng {rong}mm")
             if cao:  parts.append(f"cao {cao}mm")
             dim_str = " | " + ", ".join(parts)
         mo_ta = p.get("mo_ta") or ""
         line = (
             f"- {p['ten_sp']} | {p.get('the_loai', '')}{dim_str} "
-            f"| Tu {price_str} | {mo_ta[:60]}"
+            f"| Từ {price_str} | {mo_ta[:80]}"
         )
         lines.append(line)
     return "\n".join(lines)

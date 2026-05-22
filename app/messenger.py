@@ -1,14 +1,36 @@
 """
 Facebook Messenger webhook handler and send utilities.
 """
+import asyncio
 import hashlib
 import hmac
-import httpx
 from loguru import logger
 from app.config import settings
+from app.http_client import get_http_client
+
+_SEND_RETRIES = 2
 
 
 GRAPH_API = "https://graph.facebook.com/v25.0"
+_MSG_MAX = 1900  # Messenger hard limit is 2000; stay safely under
+
+
+def _split_message(text: str) -> list[str]:
+    """Split text into chunks ≤ _MSG_MAX chars, breaking at newlines then sentence boundaries."""
+    if len(text) <= _MSG_MAX:
+        return [text]
+    chunks: list[str] = []
+    while len(text) > _MSG_MAX:
+        split_at = text.rfind("\n", 0, _MSG_MAX)
+        if split_at == -1:
+            split_at = text.rfind(". ", 0, _MSG_MAX)
+        if split_at == -1:
+            split_at = _MSG_MAX
+        chunks.append(text[:split_at].rstrip())
+        text = text[split_at:].lstrip()
+    if text:
+        chunks.append(text)
+    return chunks
 
 
 def verify_signature(body: bytes, x_hub_signature: str) -> bool:
@@ -25,44 +47,57 @@ def verify_signature(body: bytes, x_hub_signature: str) -> bool:
 
 
 async def send_text(recipient_id: str, text: str) -> None:
-    """Send a plain text message via Messenger Send API."""
+    """Send a plain text message via Messenger Send API, splitting if over limit."""
+    for chunk in _split_message(text):
+        await _send_chunk(recipient_id, chunk)
+
+
+async def _send_chunk(recipient_id: str, text: str) -> None:
     payload = {
         "recipient": {"id": recipient_id},
         "message": {"text": text},
         "messaging_type": "RESPONSE",
     }
-    async with httpx.AsyncClient(timeout=10) as client:
-        r = await client.post(
-            f"{GRAPH_API}/me/messages",
-            params={"access_token": settings.messenger_page_token},
-            json=payload,
-        )
-        if r.status_code != 200:
-            logger.error(
-                "Messenger send failed psid={} status={} body={}",
-                recipient_id, r.status_code, r.text,
+    last_err: Exception | None = None
+    for attempt in range(_SEND_RETRIES + 1):
+        try:
+            r = await get_http_client().post(
+                f"{GRAPH_API}/me/messages",
+                params={"access_token": settings.messenger_page_token},
+                json=payload,
             )
-            r.raise_for_status()
+            if r.status_code == 200:
+                return
+            if 400 <= r.status_code < 500:
+                logger.error("Messenger send 4xx psid={} status={} body={}", recipient_id, r.status_code, r.text)
+                r.raise_for_status()
+            logger.warning("Messenger send 5xx psid={} status={} attempt={}", recipient_id, r.status_code, attempt + 1)
+            last_err = Exception(f"status {r.status_code}")
+        except Exception as e:
+            import httpx
+            if not isinstance(e, (httpx.TimeoutException, httpx.NetworkError)):
+                raise
+            logger.warning("Messenger send network error psid={} attempt={} err={}", recipient_id, attempt + 1, e)
+            last_err = e
+        if attempt < _SEND_RETRIES:
+            await asyncio.sleep(1.0)
+    raise RuntimeError(f"Messenger send failed after {_SEND_RETRIES + 1} attempts: {last_err}")
 
 
-async def send_quick_replies(recipient_id: str, text: str, options: list[str]) -> None:
-    """Send text with quick reply buttons (max 13)."""
-    quick_replies = [
-        {"content_type": "text", "title": opt, "payload": opt}
-        for opt in options[:13]
-    ]
+async def send_typing_on(recipient_id: str) -> None:
+    """Send typing indicator to show the bot is processing."""
     payload = {
         "recipient": {"id": recipient_id},
-        "message": {"text": text, "quick_replies": quick_replies},
-        "messaging_type": "RESPONSE",
+        "sender_action": "typing_on",
     }
-    async with httpx.AsyncClient(timeout=10) as client:
-        r = await client.post(
+    try:
+        await get_http_client().post(
             f"{GRAPH_API}/me/messages",
             params={"access_token": settings.messenger_page_token},
             json=payload,
         )
-        r.raise_for_status()
+    except Exception:
+        pass  # non-critical — never fail a message over a missing typing indicator
 
 
 def extract_messages(body: dict) -> list[dict]:

@@ -6,6 +6,7 @@ Messages stored in append-only messages table.
 """
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import dataclass, field
 from datetime import date
@@ -51,16 +52,16 @@ class ConversationContext:
 # Load / save conversation
 # ---------------------------------------------------------------------------
 
-async def load_context(messenger_user_id: str, history_limit: int = 10) -> ConversationContext:
+async def load_context(messenger_user_id: str, history_limit: int = 14) -> ConversationContext:
     """
     Load conversation state + recent message history for a user.
     Creates a new conversation row if this is the first contact.
     """
     db = get_client()
 
-    # Upsert conversation (creates if not exists, returns existing if exists)
-    result = (
-        db.table("conversations")
+    # Must run first to ensure the row exists before parallel selects
+    await asyncio.to_thread(
+        lambda: db.table("conversations")
         .upsert(
             {"messenger_user_id": messenger_user_id},
             on_conflict="messenger_user_id",
@@ -69,26 +70,32 @@ async def load_context(messenger_user_id: str, history_limit: int = 10) -> Conve
         .execute()
     )
 
-    # Fetch conversation row
-    row = (
-        db.table("conversations")
-        .select("*")
-        .eq("messenger_user_id", messenger_user_id)
-        .single()
-        .execute()
-    )
-    data = row.data
+    def _fetch_conv():
+        return (
+            db.table("conversations")
+            .select("*")
+            .eq("messenger_user_id", messenger_user_id)
+            .single()
+            .execute()
+        )
 
-    # Fetch recent messages (chronological order for LLM context)
-    msgs_result = (
-        db.table("messages")
-        .select("role,content,tool_name,tool_input")
-        .eq("messenger_user_id", messenger_user_id)
-        .order("created_at", desc=True)
-        .limit(history_limit)
-        .execute()
+    def _fetch_msgs():
+        return (
+            db.table("messages")
+            .select("role,content,tool_name,tool_input")
+            .eq("messenger_user_id", messenger_user_id)
+            .order("created_at", desc=True)
+            .limit(history_limit)
+            .execute()
+        )
+
+    # Fetch conversation state and recent messages in parallel
+    row_result, msgs_result = await asyncio.gather(
+        asyncio.to_thread(_fetch_conv),
+        asyncio.to_thread(_fetch_msgs),
     )
-    # Reverse so oldest-first for LLM context window
+
+    data = row_result.data
     raw_msgs = list(reversed(msgs_result.data or []))
     history = [
         {"role": m["role"], "content": m["content"] or ""}
@@ -114,16 +121,18 @@ async def load_context(messenger_user_id: str, history_limit: int = 10) -> Conve
 async def save_context(ctx: ConversationContext) -> None:
     """Persist updated conversation state (not messages — use append_message for that)."""
     db = get_client()
-    db.table("conversations").update({
-        "name": ctx.name,
-        "state": ctx.state,
-        "filled_slots": ctx.filled_slots,
-        "intent": ctx.intent,
-        "personality": ctx.personality,
-        "is_escalated": ctx.is_escalated,
-        "assigned_agent": ctx.assigned_agent,
-        "updated_at": "now()",
-    }).eq("messenger_user_id", ctx.messenger_user_id).execute()
+    await asyncio.to_thread(
+        lambda: db.table("conversations").update({
+            "name": ctx.name,
+            "state": ctx.state,
+            "filled_slots": ctx.filled_slots,
+            "intent": ctx.intent,
+            "personality": ctx.personality,
+            "is_escalated": ctx.is_escalated,
+            "assigned_agent": ctx.assigned_agent,
+            "updated_at": "now()",
+        }).eq("messenger_user_id", ctx.messenger_user_id).execute()
+    )
     logger.debug("save_context user={} state={}", ctx.messenger_user_id, ctx.state)
 
 
@@ -137,18 +146,20 @@ async def append_message(
 ) -> None:
     """Append one message to the audit log."""
     db = get_client()
-    db.table("messages").insert({
-        "messenger_user_id": messenger_user_id,
-        "role": msg.role,
-        "content": msg.content,
-        "tool_name": msg.tool_name,
-        "tool_input": msg.tool_input,
-        "model_used": msg.model_used,
-        "tokens_input": msg.tokens_input,
-        "tokens_output": msg.tokens_output,
-        "cost_usd": msg.cost_usd,
-        "latency_ms": msg.latency_ms,
-    }).execute()
+    await asyncio.to_thread(
+        lambda: db.table("messages").insert({
+            "messenger_user_id": messenger_user_id,
+            "role": msg.role,
+            "content": msg.content,
+            "tool_name": msg.tool_name,
+            "tool_input": msg.tool_input,
+            "model_used": msg.model_used,
+            "tokens_input": msg.tokens_input,
+            "tokens_output": msg.tokens_output,
+            "cost_usd": msg.cost_usd,
+            "latency_ms": msg.latency_ms,
+        }).execute()
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -158,21 +169,30 @@ async def append_message(
 async def get_daily_cost(messenger_user_id: str) -> float:
     """Return total cost_usd spent by this user today (UTC)."""
     db = get_client()
-    try:
-        result = db.rpc(
-            "get_daily_cost",
-            {"p_user_id": messenger_user_id},
-        ).execute()
-        if result.data is not None:
-            return float(result.data)
-    except Exception:
-        pass
-    # Fallback: manual sum via postgrest filter
-    rows = (
-        db.table("messages")
-        .select("cost_usd")
-        .eq("messenger_user_id", messenger_user_id)
-        .gte("created_at", date.today().isoformat())
-        .execute()
-    )
-    return sum(r["cost_usd"] or 0 for r in (rows.data or []))
+
+    def _query() -> float:
+        try:
+            result = db.rpc(
+                "get_daily_cost",
+                {"p_user_id": messenger_user_id},
+            ).execute()
+            if result.data is not None:
+                return float(result.data)
+        except Exception:
+            pass
+        # Fallback: manual sum via postgrest filter
+        try:
+            rows = (
+                db.table("messages")
+                .select("cost_usd")
+                .eq("messenger_user_id", messenger_user_id)
+                .gte("created_at", date.today().isoformat())
+                .execute()
+            )
+            return sum(r["cost_usd"] or 0 for r in (rows.data or []))
+        except Exception:
+            # Fail open: if DB is unreachable, allow the user through rather than blocking
+            logger.warning("get_daily_cost DB unavailable, failing open user={}", messenger_user_id)
+            return 0.0
+
+    return await asyncio.to_thread(_query)

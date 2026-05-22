@@ -25,6 +25,17 @@ PHONG CÁCH GIAO TIẾP
 
 CÁCH DẪN DẮT HỘI THOẠI
 
+Xem [Ngữ cảnh hội thoại] để biết đây là LƯỢT ĐẦU hay LƯỢT SAU và hành động theo đúng chỉ dẫn ở đó.
+  Nếu là LƯỢT ĐẦU: chào ngắn + hỏi ngay về nhu cầu. TUYỆT ĐỐI không hỏi SĐT.
+  Nếu là LƯỢT SAU: KHÔNG chào lại, KHÔNG nhắc "Em là Thảo Vân" hay giới thiệu Hồn Đá. Đi thẳng vào nội dung.
+
+KẾT THÚC MỖI TIN NHẮN:
+  Luôn kết thúc bằng MỘT câu hỏi dẫn dắt để cuộc trò chuyện tiếp tục.
+  Nếu chưa biết loại công trình → hỏi loại công trình (mộ đơn, lăng tộc, cổng, rào...).
+  Nếu đã biết loại công trình nhưng chưa biết loại đá → hỏi loại đá.
+  Nếu đã biết cả hai → hỏi địa điểm hoặc thời gian dự kiến.
+  KHÔNG kết thúc câu bằng thông tin đơn thuần mà không có câu hỏi tiếp theo.
+
 Bước 1 — Tư vấn trước, hỏi sau (BẮT BUỘC):
   Luôn trả lời câu hỏi của khách TRƯỚC. Nếu khách hỏi giá, gọi search_products và báo giá ngay.
   Nếu khách hỏi về loại đá, giải thích sự khác biệt cụ thể.
@@ -33,11 +44,12 @@ Bước 1 — Tư vấn trước, hỏi sau (BẮT BUỘC):
 
 Bước 2 — Xin thông tin liên hệ (CHỈ sau khi đã tư vấn ít nhất 3-4 lượt):
   Điều kiện: đã trả lời câu hỏi của khách VÀ đã biết sơ bộ loại công trình hoặc nhu cầu.
-  Khi đó mới xin SĐT/Zalo để gửi bảng giá chi tiết và để chuyên gia hỗ trợ thêm.
+  Khi đó mới xin TÊN và SĐT/Zalo cùng lúc để gửi bảng giá chi tiết và để chuyên gia hỗ trợ thêm.
+  Ví dụ: "Bác cho em xin tên và số Zalo/điện thoại để em gửi bảng giá chi tiết cho Bác ạ?"
   Lý do tự nhiên: "giá chính xác phụ thuộc kích thước Lỗ Ban và địa hình thực tế"
-  TUYỆT ĐỐI không xin SĐT ở lượt đầu hoặc khi chưa tư vấn gì cho khách.
+  TUYỆT ĐỐI không xin SĐT hay tên ở lượt đầu hoặc khi chưa tư vấn gì cho khách.
 
-Bước 3 — Thu thập thông tin (sau khi có SĐT, hỏi từng câu một):
+Bước 3 — Thu thập thông tin (sau khi có tên + SĐT, hỏi từng câu một):
   Hạng mục cụ thể → tỉnh/huyện thi công → xe cẩu vào được không → thời gian dự kiến
 
 Bước 4 — Chốt & chuyển giao:
@@ -56,20 +68,13 @@ SỬ DỤNG TOOLS (QUAN TRỌNG)
 - Có thể gọi update_customer nhiều lần trong một cuộc trò chuyện khi có thông tin mới"""
 
 
-def build_messages(
-    ctx: "ConversationContext",
-    user_text: str,
-    product_context: str | None = None,
-) -> list[dict]:
-    """Assemble message list for LLM: system prompt + context note + products + history + user msg."""
+def build_messages(ctx: "ConversationContext", user_text: str) -> list[dict]:
+    """Assemble message list for LLM: system prompt + context note + history + user msg."""
     messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
 
     note = _context_note(ctx)
     if note:
         messages.append({"role": "system", "content": note})
-
-    if product_context:
-        messages.append({"role": "system", "content": product_context})
 
     messages.extend(ctx.history)
     messages.append({"role": "user", "content": user_text})
@@ -79,6 +84,12 @@ def build_messages(
 def _context_note(ctx: "ConversationContext") -> str:
     parts: list[str] = []
 
+    turn_count = len(ctx.history) // 2
+    if turn_count == 0:
+        parts.append("LƯỢT ĐẦU TIÊN — chào ngắn + hỏi nhu cầu ngay")
+    else:
+        parts.append(f"LƯỢT {turn_count + 1} — KHÔNG chào, KHÔNG nhắc tên hay giới thiệu Hồn Đá, đi thẳng vào nội dung")
+
     s = ctx.filled_slots
     name = ctx.name or s.get("name")
     if name:
@@ -87,7 +98,6 @@ def _context_note(ctx: "ConversationContext") -> str:
     if s.get("phone"):
         parts.append(f"SĐT/Zalo: {s['phone']} (ĐÃ CÓ — không cần xin lại)")
     else:
-        turn_count = len(ctx.history) // 2
         has_project_info = bool(s.get("project_type") or s.get("items") or s.get("stone_type"))
         if turn_count >= 4 and has_project_info:
             parts.append("SĐT: CHƯA CÓ — đã tư vấn đủ, có thể xin SĐT/Zalo để chuyên gia hỗ trợ thêm")

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import time
 import uuid
-from collections import defaultdict, deque
+from collections import deque
 
 from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -28,16 +28,24 @@ class _UserRateLimiter:
     def __init__(self, max_calls: int, window_seconds: int) -> None:
         self._max = max_calls
         self._window = window_seconds
-        self._buckets: dict[str, deque[float]] = defaultdict(deque)
+        self._buckets: dict[str, deque[float]] = {}
 
     def allow(self, key: str) -> bool:
         now = time.monotonic()
         cutoff = now - self._window
-        dq = self._buckets[key]
+        dq = self._buckets.get(key)
 
-        # Evict timestamps outside the window
-        while dq and dq[0] < cutoff:
-            dq.popleft()
+        if dq is not None:
+            while dq and dq[0] < cutoff:
+                dq.popleft()
+            # Prune key when window is empty to prevent unbounded growth
+            if not dq:
+                del self._buckets[key]
+                dq = None
+
+        if dq is None:
+            dq = deque()
+            self._buckets[key] = dq
 
         if len(dq) >= self._max:
             return False

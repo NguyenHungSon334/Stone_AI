@@ -1,4 +1,4 @@
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -13,12 +13,12 @@ class Settings(BaseSettings):
     cost_cap_per_user_day: float = 0.50
     rate_limit_per_minute: int = 20
     admin_api_key: str = ""
+    admin_messenger_psid: str = ""  # set to notify admin on Messenger when escalation occurs
     environment: str = "development"
     dev_username: str = "honđa"
     dev_password: str = "spiritstone2025"
 
-    class Config:
-        env_file = ".env"
+    model_config = SettingsConfigDict(env_file=".env")
 
 
 settings = Settings()

@@ -1,3 +1,5 @@
+import asyncio
+import time
 from contextlib import asynccontextmanager
 
 import sentry_sdk
@@ -9,8 +11,32 @@ from sentry_sdk.integrations.loguru import LoguruIntegration
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.admin import router as admin_router
+
+# ---------------------------------------------------------------------------
+# Webhook deduplication
+# ---------------------------------------------------------------------------
+
+# { (sender_id, timestamp_ms): seen_at } — prevents double-processing Messenger retries
+_seen_events: dict[tuple[str, int], float] = {}
+_DEDUP_TTL = 60.0  # seconds
+
+
+def _is_duplicate(sender_id: str, timestamp_ms: int) -> bool:
+    key = (sender_id, timestamp_ms)
+    now = time.monotonic()
+    # Evict stale entries
+    stale = [k for k, t in _seen_events.items() if now - t > _DEDUP_TTL]
+    for k in stale:
+        del _seen_events[k]
+    if key in _seen_events:
+        return True
+    _seen_events[key] = now
+    return False
+
+
 from app.config import settings
 from app import orchestrator
+from app.http_client import close_http_client
 from app.logging_setup import configure_logging
 from app.messenger import extract_messages, send_text, verify_signature
 from app.middleware import RequestIdMiddleware, is_rate_limited
@@ -36,7 +62,17 @@ async def lifespan(app: FastAPI):
         logger.info("Sentry initialised env={}", settings.environment)
 
     logger.info("SpiritStone AI starting env={}", settings.environment)
+
+    # Warm up embedding model to avoid cold-start latency on first user message
+    try:
+        from app.llm import embed
+        await embed("warm up")
+        logger.info("embedding warm-up done")
+    except Exception:
+        logger.warning("embedding warm-up failed (non-fatal)")
+
     yield
+    await close_http_client()
     logger.info("SpiritStone AI shutdown")
 
 
@@ -112,16 +148,29 @@ async def webhook_receive(request: Request, background_tasks: BackgroundTasks):
         if is_rate_limited(event["sender_id"]):
             logger.warning("rate limited sender={}", event["sender_id"])
             continue
+        if _is_duplicate(event["sender_id"], event["timestamp"]):
+            logger.warning("duplicate event sender={} ts={}", event["sender_id"], event["timestamp"])
+            continue
         background_tasks.add_task(handle_message, event["sender_id"], event["text"])
         queued += 1
 
     return {"status": "ok", "queued": queued}
 
 
+_HANDLE_TIMEOUT = 25.0
+_TIMEOUT_REPLY = "Em xin lỗi, xử lý quá lâu. Anh/chị vui lòng thử lại sau ạ!"
+
+
 async def handle_message(sender_id: str, text: str) -> None:
     logger.info("msg sender={} text={!r}", sender_id, text)
     try:
-        await orchestrator.run(sender_id, text)
+        await asyncio.wait_for(orchestrator.run(sender_id, text), timeout=_HANDLE_TIMEOUT)
+    except asyncio.TimeoutError:
+        logger.error("handle_message timeout sender={}", sender_id)
+        try:
+            await send_text(sender_id, _TIMEOUT_REPLY)
+        except Exception:
+            pass
     except Exception:
         logger.exception("handle_message failed sender={}", sender_id)
         try:

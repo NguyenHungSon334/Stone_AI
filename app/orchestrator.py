@@ -154,8 +154,19 @@ async def run(sender_id: str, user_text: str) -> None:
         get_daily_cost(sender_id),
     )
 
-    # --- Safety ---
-    if await is_unsafe(user_text):
+    # --- Cost cap ---
+    if daily_cost >= settings.cost_cap_per_user_day:
+        logger.warning("cost cap hit sender={}", sender_id)
+        await send_text(sender_id, _COST_CAP_REPLY)
+        return
+
+    # --- Safety + Escalation in parallel (escalation takes priority over safety) ---
+    unsafe, escalate = await asyncio.gather(
+        is_unsafe(user_text),
+        should_escalate(user_text, ctx),
+    )
+
+    if not escalate and unsafe:
         await send_text(sender_id, UNSAFE_REPLY)
         await asyncio.gather(
             append_message(sender_id, Message(role="user", content=user_text)),
@@ -163,14 +174,7 @@ async def run(sender_id: str, user_text: str) -> None:
         )
         return
 
-    # --- Cost cap ---
-    if daily_cost >= settings.cost_cap_per_user_day:
-        logger.warning("cost cap hit sender={}", sender_id)
-        await send_text(sender_id, _COST_CAP_REPLY)
-        return
-
-    # --- Escalation check (AI intent + fast-path heuristics) ---
-    if await should_escalate(user_text, ctx):
+    if escalate:
         first_escalation = not ctx.is_escalated
         reply = ALREADY_ESCALATED if ctx.is_escalated else ESCALATE_NOTIFY
         ctx.is_escalated = True

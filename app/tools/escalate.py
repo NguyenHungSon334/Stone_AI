@@ -3,14 +3,21 @@ Escalation detection — frustration keywords, repetition, explicit requests.
 """
 from __future__ import annotations
 
+import unicodedata
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from app.context import ConversationContext
 
+
+def _normalize(text: str) -> str:
+    """NFC-normalize so Messenger NFD text matches hardcoded NFC keywords."""
+    return unicodedata.normalize("NFC", text)
+
 # Explicit "I want a human" signals
 _HUMAN_REQUEST = [
     "gặp người thật", "người thật", "nhân viên thật", "nói chuyện với người",
+    "gặp người khác", "gặp nhân viên",
     "con người", "manager", "quản lý", "giám sát", "supervisor",
     "khiếu nại", "complaint", "chuyển máy", "gặp trực tiếp",
 ]
@@ -28,7 +35,7 @@ def should_escalate(user_text: str, ctx: "ConversationContext") -> bool:
     Return True when the message warrants human escalation.
     Checks: explicit human request, frustration keywords, punctuation anger, repetition.
     """
-    text = user_text.lower()
+    text = _normalize(user_text.lower())
 
     # Explicit escalation request
     if any(kw in text for kw in _HUMAN_REQUEST):
@@ -48,7 +55,7 @@ def should_escalate(user_text: str, ctx: "ConversationContext") -> bool:
 
     # Message repetition: same text sent 2+ times in recent history
     recent_user_msgs = [
-        m["content"].strip().lower()
+        _normalize(m["content"].strip().lower())
         for m in ctx.history[-6:]
         if m.get("role") == "user"
     ]

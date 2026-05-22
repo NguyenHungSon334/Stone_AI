@@ -17,7 +17,7 @@ from app.llm import ModelAlias, llm_call_with_tools, chat
 from app.messenger import send_text, send_typing_on
 from app.prompt import build_messages
 from app.tools.definitions import TOOLS
-from app.tools.escalate import should_escalate, ESCALATE_NOTIFY, ALREADY_ESCALATED
+from app.tools.escalate import should_escalate, ESCALATE_NOTIFY
 from app.tools.update_customer import update_customer
 from app.tools.search import search_products, format_products_for_llm
 
@@ -176,19 +176,24 @@ async def run(sender_id: str, user_text: str) -> None:
 
     if escalate:
         first_escalation = not ctx.is_escalated
-        reply = ALREADY_ESCALATED if ctx.is_escalated else ESCALATE_NOTIFY
         ctx.is_escalated = True
         ctx.state = "escalated"
-        await send_text(sender_id, reply)
-        if first_escalation:
-            await _notify_admin_escalation(sender_id, user_text)
         elapsed_ms = int((time.monotonic() - t0) * 1000)
-        await asyncio.gather(
-            save_context(ctx),
-            append_message(sender_id, Message(role="user", content=user_text)),
-            append_message(sender_id, Message(role="assistant", content=reply, latency_ms=elapsed_ms)),
-        )
-        logger.info("escalated sender={}", sender_id)
+        if first_escalation:
+            await send_text(sender_id, ESCALATE_NOTIFY)
+            await _notify_admin_escalation(sender_id, user_text)
+            await asyncio.gather(
+                save_context(ctx),
+                append_message(sender_id, Message(role="user", content=user_text)),
+                append_message(sender_id, Message(role="assistant", content=ESCALATE_NOTIFY, latency_ms=elapsed_ms)),
+            )
+        else:
+            # Already escalated — human agent is handling; save message silently
+            await asyncio.gather(
+                save_context(ctx),
+                append_message(sender_id, Message(role="user", content=user_text)),
+            )
+        logger.info("escalated sender={} first={}", sender_id, first_escalation)
         return
 
     # --- Personality (heuristic, zero cost) ---

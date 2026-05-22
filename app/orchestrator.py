@@ -60,11 +60,56 @@ _FAST_EXACT = frozenset({
 # Model routing
 # ---------------------------------------------------------------------------
 
-async def _notify_admin_escalation(sender_id: str, user_text: str) -> None:
+_SLOT_LABELS: dict[str, str] = {
+    "stone_type": "Loại đá",
+    "project_type": "Loại công trình",
+    "budget": "Ngân sách",
+    "chieu_dai": "Chiều dài",
+    "chieu_rong": "Chiều rộng",
+    "chieu_cao": "Chiều cao",
+    "name": "Tên KH",
+    "phone": "SĐT",
+    "address": "Địa chỉ",
+}
+
+
+def _build_escalation_summary(
+    sender_id: str,
+    user_text: str,
+    ctx: "ConversationContext",
+) -> str:
+    customer = ctx.name or f"Khách #{sender_id[-6:]}"
+    lines = [f"🔔 ESCALATION — {customer} cần hỗ trợ trực tiếp"]
+
+    if ctx.filled_slots:
+        slot_lines = [
+            f"  • {_SLOT_LABELS.get(k, k)}: {v}"
+            for k, v in ctx.filled_slots.items()
+            if v
+        ]
+        if slot_lines:
+            lines.append("\nThông tin đã thu thập:")
+            lines.extend(slot_lines)
+
+    recent = [m for m in ctx.history[-8:] if m.get("role") == "user"][-3:]
+    if recent:
+        lines.append("\nTin nhắn gần nhất của khách:")
+        for m in recent:
+            lines.append(f"  › {m['content'][:120]}")
+
+    lines.append(f"\nTin nhắn kích hoạt: {user_text[:200]}")
+    return "\n".join(lines)
+
+
+async def _notify_admin_escalation(
+    sender_id: str,
+    user_text: str,
+    ctx: "ConversationContext",
+) -> None:
     """Ping admin PSID on Messenger when a user first escalates."""
     if not settings.admin_messenger_psid:
         return
-    msg = f"[ESCALATION] Khách {sender_id} cần hỗ trợ trực tiếp:\n{user_text[:300]}"
+    msg = _build_escalation_summary(sender_id, user_text, ctx)
     try:
         await send_text(settings.admin_messenger_psid, msg)
     except Exception:
@@ -181,7 +226,7 @@ async def run(sender_id: str, user_text: str) -> None:
         elapsed_ms = int((time.monotonic() - t0) * 1000)
         if first_escalation:
             await send_text(sender_id, ESCALATE_NOTIFY)
-            await _notify_admin_escalation(sender_id, user_text)
+            await _notify_admin_escalation(sender_id, user_text, ctx)
             await asyncio.gather(
                 save_context(ctx),
                 append_message(sender_id, Message(role="user", content=user_text)),

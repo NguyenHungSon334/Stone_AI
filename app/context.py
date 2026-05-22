@@ -7,7 +7,6 @@ Messages stored in append-only messages table.
 from __future__ import annotations
 
 import asyncio
-import time
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
@@ -57,11 +56,11 @@ async def load_context(messenger_user_id: str, history_limit: int = 14) -> Conve
     Load conversation state + recent message history for a user.
     Creates a new conversation row if this is the first contact.
     """
-    db = get_client()
+    db = await get_client()
 
     # Must run first to ensure the row exists before parallel selects
-    await asyncio.to_thread(
-        lambda: db.table("conversations")
+    await (
+        db.table("conversations")
         .upsert(
             {"messenger_user_id": messenger_user_id},
             on_conflict="messenger_user_id",
@@ -70,29 +69,18 @@ async def load_context(messenger_user_id: str, history_limit: int = 14) -> Conve
         .execute()
     )
 
-    def _fetch_conv():
-        return (
-            db.table("conversations")
-            .select("*")
-            .eq("messenger_user_id", messenger_user_id)
-            .single()
-            .execute()
-        )
-
-    def _fetch_msgs():
-        return (
-            db.table("messages")
-            .select("role,content,tool_name,tool_input")
-            .eq("messenger_user_id", messenger_user_id)
-            .order("created_at", desc=True)
-            .limit(history_limit)
-            .execute()
-        )
-
-    # Fetch conversation state and recent messages in parallel
     row_result, msgs_result = await asyncio.gather(
-        asyncio.to_thread(_fetch_conv),
-        asyncio.to_thread(_fetch_msgs),
+        db.table("conversations")
+        .select("*")
+        .eq("messenger_user_id", messenger_user_id)
+        .single()
+        .execute(),
+        db.table("messages")
+        .select("role,content,tool_name,tool_input")
+        .eq("messenger_user_id", messenger_user_id)
+        .order("created_at", desc=True)
+        .limit(history_limit)
+        .execute(),
     )
 
     data = row_result.data
@@ -120,9 +108,9 @@ async def load_context(messenger_user_id: str, history_limit: int = 14) -> Conve
 
 async def save_context(ctx: ConversationContext) -> None:
     """Persist updated conversation state (not messages — use append_message for that)."""
-    db = get_client()
-    await asyncio.to_thread(
-        lambda: db.table("conversations").update({
+    db = await get_client()
+    await (
+        db.table("conversations").update({
             "name": ctx.name,
             "state": ctx.state,
             "filled_slots": ctx.filled_slots,
@@ -145,9 +133,9 @@ async def append_message(
     msg: Message,
 ) -> None:
     """Append one message to the audit log."""
-    db = get_client()
-    await asyncio.to_thread(
-        lambda: db.table("messages").insert({
+    db = await get_client()
+    await (
+        db.table("messages").insert({
             "messenger_user_id": messenger_user_id,
             "role": msg.role,
             "content": msg.content,
@@ -168,31 +156,26 @@ async def append_message(
 
 async def get_daily_cost(messenger_user_id: str) -> float:
     """Return total cost_usd spent by this user today (UTC)."""
-    db = get_client()
-
-    def _query() -> float:
-        try:
-            result = db.rpc(
-                "get_daily_cost",
-                {"p_user_id": messenger_user_id},
-            ).execute()
-            if result.data is not None:
-                return float(result.data)
-        except Exception:
-            pass
-        # Fallback: manual sum via postgrest filter
-        try:
-            rows = (
-                db.table("messages")
-                .select("cost_usd")
-                .eq("messenger_user_id", messenger_user_id)
-                .gte("created_at", date.today().isoformat())
-                .execute()
-            )
-            return sum(r["cost_usd"] or 0 for r in (rows.data or []))
-        except Exception:
-            # Fail open: if DB is unreachable, allow the user through rather than blocking
-            logger.warning("get_daily_cost DB unavailable, failing open user={}", messenger_user_id)
-            return 0.0
-
-    return await asyncio.to_thread(_query)
+    db = await get_client()
+    try:
+        result = await db.rpc(
+            "get_daily_cost",
+            {"p_user_id": messenger_user_id},
+        ).execute()
+        if result.data is not None:
+            return float(result.data)
+    except Exception:
+        pass
+    # Fallback: manual sum via postgrest filter
+    try:
+        rows = await (
+            db.table("messages")
+            .select("cost_usd")
+            .eq("messenger_user_id", messenger_user_id)
+            .gte("created_at", date.today().isoformat())
+            .execute()
+        )
+        return sum(r["cost_usd"] or 0 for r in (rows.data or []))
+    except Exception:
+        logger.warning("get_daily_cost DB unavailable, failing open user={}", messenger_user_id)
+        return 0.0

@@ -107,7 +107,8 @@ async def health():
 async def ready():
     from app.db.supabase import get_client
     try:
-        get_client().table("conversations").select("messenger_user_id").limit(1).execute()
+        db = await get_client()
+        await db.table("conversations").select("messenger_user_id").limit(1).execute()
         db_ok = True
     except Exception:
         db_ok = False

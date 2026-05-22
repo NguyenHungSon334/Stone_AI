@@ -9,7 +9,6 @@ Strategy:
 """
 from __future__ import annotations
 
-import asyncio
 import re
 
 from loguru import logger
@@ -176,7 +175,7 @@ async def _semantic_search(
     n: int,
 ) -> list[dict]:
     """pgvector semantic search via match_products RPC. Filters by similarity threshold."""
-    client = get_client()
+    client = await get_client()
     try:
         vector = await embed(query)
         params: dict = {
@@ -187,9 +186,7 @@ async def _semantic_search(
             params["filter_the_loai"] = the_loai
         if budget:
             params["filter_price_max"] = budget
-        result = await asyncio.to_thread(
-            lambda: client.rpc("match_products", params).execute()
-        )
+        result = await client.rpc("match_products", params).execute()
         rows = result.data or []
         return [r for r in rows if (r.get("similarity") or 0) >= _SIMILARITY_THRESHOLD]
     except Exception:
@@ -197,7 +194,7 @@ async def _semantic_search(
         return []
 
 
-def _ilike_search(
+async def _ilike_search(
     keywords: list[str],
     the_loai: str | None,
     budget: int | None,
@@ -206,13 +203,13 @@ def _ilike_search(
     stone_col: str | None = None,
 ) -> list[dict]:
     """Single query: OR across all keywords on search_text (pg_trgm accelerated)."""
-    client = get_client()
+    client = await get_client()
     try:
         q = client.table("products").select(_SELECT_COLS)
         if keywords:
             q = q.or_(",".join(f"search_text.ilike.%{kw}%" for kw in keywords))
         q = _apply_sql_filters(q, the_loai, budget, sizes, stone_col)
-        result = q.order("ban_chay", desc=True).limit(n).execute()
+        result = await q.order("ban_chay", desc=True).limit(n).execute()
         return result.data or []
     except Exception:
         logger.exception("ilike_search failed keywords={}", keywords)
@@ -281,15 +278,11 @@ async def search_products(query: str, slots: dict, n: int = 6) -> list[dict]:
 
     # Layer 2: ILIKE fallback — single OR query across all keywords
     if not products:
-        products = await asyncio.to_thread(
-            _ilike_search, keywords, the_loai, budget, sizes, n, stone_col
-        )
+        products = await _ilike_search(keywords, the_loai, budget, sizes, n, stone_col)
 
     # Layer 3: bestseller fallback (SQL filters only, no keyword constraint)
     if not products:
-        products = await asyncio.to_thread(
-            _ilike_search, [], the_loai, budget, sizes, n, stone_col
-        )
+        products = await _ilike_search([], the_loai, budget, sizes, n, stone_col)
 
     logger.info(
         "search found={} query={!r} the_loai={} stone_col={} budget={} sizes={}",

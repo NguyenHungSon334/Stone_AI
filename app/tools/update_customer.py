@@ -28,11 +28,13 @@ async def update_customer(messenger_user_id: str, slots: dict[str, Any]) -> None
     payload["messenger_user_id"] = messenger_user_id
 
     try:
-        db = get_client()
-        db.table("customers").upsert(
-            payload,
-            on_conflict="messenger_user_id",
-        ).execute()
+        db = await get_client()
+        await (
+            db.table("customers").upsert(
+                payload,
+                on_conflict="messenger_user_id",
+            ).execute()
+        )
         logger.info("update_customer user={} fields={}", messenger_user_id, list(payload.keys()))
     except Exception:
         logger.exception("update_customer failed user={}", messenger_user_id)

@@ -35,8 +35,8 @@ def _require_auth(x_admin_key: str | None) -> None:
 async def list_escalated(x_admin_key: str | None = Header(None)):
     """List all conversations currently flagged for human escalation."""
     _require_auth(x_admin_key)
-    db = get_client()
-    result = (
+    db = await get_client()
+    result = await (
         db.table("conversations")
         .select("messenger_user_id,name,state,intent,assigned_agent,updated_at")
         .eq("is_escalated", True)
@@ -54,15 +54,15 @@ async def get_conversation(
 ):
     """Fetch conversation metadata + recent messages for a user."""
     _require_auth(x_admin_key)
-    db = get_client()
-    conv = (
+    db = await get_client()
+    conv = await (
         db.table("conversations")
         .select("*")
         .eq("messenger_user_id", user_id)
         .single()
         .execute()
     )
-    msgs = (
+    msgs = await (
         db.table("messages")
         .select("role,content,tool_name,model_used,cost_usd,latency_ms,created_at")
         .eq("messenger_user_id", user_id)
@@ -87,14 +87,16 @@ async def admin_reply(
     """Send a human-agent reply to the user via Messenger and log it."""
     _require_auth(x_admin_key)
     await send_text(user_id, body.text)
-    db = get_client()
-    db.table("messages").insert({
-        "messenger_user_id": user_id,
-        "role": "assistant",
-        "content": body.text,
-        "tool_name": "human_agent",
-        "model_used": body.agent_name,
-    }).execute()
+    db = await get_client()
+    await (
+        db.table("messages").insert({
+            "messenger_user_id": user_id,
+            "role": "assistant",
+            "content": body.text,
+            "tool_name": "human_agent",
+            "model_used": body.agent_name,
+        }).execute()
+    )
     return {"status": "sent"}
 
 

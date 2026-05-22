@@ -169,8 +169,8 @@ async def run(sender_id: str, user_text: str) -> None:
         await send_text(sender_id, _COST_CAP_REPLY)
         return
 
-    # --- Escalation check (heuristic, zero LLM cost) ---
-    if should_escalate(user_text, ctx):
+    # --- Escalation check (AI intent + fast-path heuristics) ---
+    if await should_escalate(user_text, ctx):
         first_escalation = not ctx.is_escalated
         reply = ALREADY_ESCALATED if ctx.is_escalated else ESCALATE_NOTIFY
         ctx.is_escalated = True

@@ -1,68 +1,72 @@
 """
-Escalation detection — frustration keywords, repetition, explicit requests.
+Escalation detection — AI intent classification with fast-path heuristics.
 """
 from __future__ import annotations
 
 import unicodedata
 from typing import TYPE_CHECKING
 
+from app.llm import chat
+
 if TYPE_CHECKING:
     from app.context import ConversationContext
 
 
 def _normalize(text: str) -> str:
-    """NFC-normalize so Messenger NFD text matches hardcoded NFC keywords."""
+    """NFC-normalize so Messenger NFD text matches Python NFC source strings."""
     return unicodedata.normalize("NFC", text)
 
-# Explicit "I want a human" signals
-_HUMAN_REQUEST = [
-    "gặp người thật", "người thật", "nhân viên thật", "nói chuyện với người",
-    "gặp người khác", "gặp nhân viên",
-    "con người", "manager", "quản lý", "giám sát", "supervisor",
-    "khiếu nại", "complaint", "chuyển máy", "gặp trực tiếp",
-]
 
-# Frustration / anger signals
-_FRUSTRATION = [
-    "tức", "bực", "chán", "điên", "vô dụng", "không giúp được",
-    "không hiểu gì", "tệ quá", "dở quá", "stupid", "useless", "terrible",
-    "không ổn", "sai hết", "sai rồi", "lại sai", "sai mãi",
-]
+_ESCALATE_SYSTEM = (
+    "Bạn phân loại ý định của khách hàng khi nhắn tin cho chatbot bán đá lăng mộ.\n"
+    "Trả về 'escalate' nếu khách:\n"
+    "- Muốn gặp/nói chuyện với nhân viên, người thật, con người\n"
+    "- Yêu cầu hỗ trợ từ người (không phải bot)\n"
+    "- Tức giận, bực bội, thất vọng rõ ràng với dịch vụ\n"
+    "- Khiếu nại, muốn gặp quản lý/supervisor\n"
+    "Trả về 'normal' cho mọi trường hợp khác.\n"
+    "Chỉ trả về đúng một từ: escalate hoặc normal. Không giải thích."
+)
 
 
-def should_escalate(user_text: str, ctx: "ConversationContext") -> bool:
+async def should_escalate(user_text: str, ctx: "ConversationContext") -> bool:
     """
     Return True when the message warrants human escalation.
-    Checks: explicit human request, frustration keywords, punctuation anger, repetition.
+    Uses AI intent classification with fast-path heuristics for free checks.
     """
-    text = _normalize(user_text.lower())
-
-    # Explicit escalation request
-    if any(kw in text for kw in _HUMAN_REQUEST):
-        return True
-
     # Already escalated — stay escalated until admin resolves
     if ctx.is_escalated:
         return True
 
-    # Multiple frustration signals in one message
-    if sum(1 for kw in _FRUSTRATION if kw in text) >= 2:
-        return True
+    text = _normalize(user_text)
 
-    # Anger punctuation: "!!!!" or "????"
+    # Anger punctuation fast-path (free, no LLM)
     if text.count("!") >= 4 or text.count("?") >= 4:
         return True
 
-    # Message repetition: same text sent 2+ times in recent history
+    # Message repetition fast-path (free, no LLM)
+    normalized = _normalize(user_text.strip().lower())
     recent_user_msgs = [
         _normalize(m["content"].strip().lower())
         for m in ctx.history[-6:]
         if m.get("role") == "user"
     ]
-    if recent_user_msgs.count(text.strip()) >= 2:
+    if recent_user_msgs.count(normalized) >= 2:
         return True
 
-    return False
+    # AI intent classification
+    try:
+        reply, _ = await chat(
+            system=_ESCALATE_SYSTEM,
+            user=text,
+            alias="guard",
+            temperature=0.0,
+            max_tokens=10,
+        )
+        return reply.lower().strip() == "escalate"
+    except Exception:
+        # Fallback: don't escalate on LLM failure
+        return False
 
 
 ESCALATE_NOTIFY = (

@@ -7,7 +7,6 @@ from app.llm import classify
 
 UNSAFE_REPLY = (
     "Em xin lỗi, em không thể hỗ trợ yêu cầu này. "
-    "Anh/chị cần tư vấn sản phẩm đá gì không ạ?"
 )
 
 

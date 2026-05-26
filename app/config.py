@@ -15,6 +15,10 @@ class Settings(BaseSettings):
     admin_api_key: str = ""
     admin_messenger_psid: str = ""  # set to notify admin on Messenger when escalation occurs
     environment: str = "development"
+    lark_app_id: str = ""
+    lark_app_secret: str = ""
+    lark_bitable_app_token: str = ""
+    lark_bitable_table_id: str = ""
     dev_username: str = "honđa"
     dev_password: str = "spiritstone2025"
 

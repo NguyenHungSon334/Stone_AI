@@ -84,6 +84,40 @@ async def _send_chunk(recipient_id: str, text: str) -> None:
     raise RuntimeError(f"Messenger send failed after {_SEND_RETRIES + 1} attempts: {last_err}")
 
 
+async def _send_attachment(recipient_id: str, url: str, media_type: str) -> None:
+    """Send image or video attachment via Messenger Send API."""
+    payload = {
+        "recipient": {"id": recipient_id},
+        "message": {
+            "attachment": {
+                "type": media_type,
+                "payload": {"url": url, "is_reusable": True},
+            }
+        },
+        "messaging_type": "RESPONSE",
+    }
+    try:
+        r = await get_http_client().post(
+            f"{GRAPH_API}/me/messages",
+            params={"access_token": settings.messenger_page_token},
+            json=payload,
+        )
+        if r.status_code != 200:
+            logger.warning("send_{} failed psid={} status={} body={}", media_type, recipient_id, r.status_code, r.text)
+    except Exception:
+        logger.warning("send_{} error psid={} url={}", media_type, recipient_id, url[:80])
+
+
+async def send_image(recipient_id: str, image_url: str) -> None:
+    """Send an image attachment via Messenger Send API."""
+    await _send_attachment(recipient_id, image_url, "image")
+
+
+async def send_video(recipient_id: str, video_url: str) -> None:
+    """Send a video attachment via Messenger Send API."""
+    await _send_attachment(recipient_id, video_url, "video")
+
+
 async def send_typing_on(recipient_id: str) -> None:
     """Send typing indicator to show the bot is processing."""
     payload = {

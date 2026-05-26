@@ -14,12 +14,13 @@ from app.config import settings
 from app.context import ConversationContext, Message, append_message, get_daily_cost, load_context, save_context
 from app.guardrails import UNSAFE_REPLY, is_unsafe
 from app.llm import ModelAlias, llm_call_with_tools, chat
-from app.messenger import send_text, send_typing_on
+from app.messenger import send_text, send_typing_on, send_image, send_video
 from app.prompt import build_messages
 from app.tools.definitions import TOOLS
 from app.tools.escalate import should_escalate, ESCALATE_NOTIFY
 from app.tools.update_customer import update_customer
-from app.tools.search import search_products, format_products_for_llm
+from app.tools.search import search_products, format_products_for_llm, get_product_detail, get_price, get_media
+from app.tools.lark_media import get_product_media_urls
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -176,9 +177,83 @@ async def _execute_tool(
     if name == "search_products":
         slots = {k: args[k] for k in ("stone_type", "project_type", "budget", "chieu_dai", "chieu_cao", "chieu_rong") if args.get(k)}
         products = await search_products(args["query"], slots)
-        if products:
-            return format_products_for_llm(products)
-        return _NO_PRODUCTS_TOOL_RESULT
+        if not products:
+            return _NO_PRODUCTS_TOOL_RESULT
+        # Send image for first product: try Lark (fresh tmp_url), fallback Cloudinary
+        first = products[0]
+        ma_sp = first.get("ma_sp", "")
+        lark_media = await get_product_media_urls(ma_sp) if ma_sp else {}
+        lark_anh = lark_media.get("anh", [])
+        if lark_anh:
+            await send_image(sender_id, lark_anh[0])
+        else:
+            cloudinary = (first.get("link_anh_ma") or [])
+            if cloudinary:
+                await send_image(sender_id, cloudinary[0])
+        return format_products_for_llm(products)
+
+    if name == "get_product_detail":
+        p = get_product_detail(args["ma_sp"])
+        if not p:
+            return f"Không tìm thấy sản phẩm mã {args['ma_sp']}."
+        lines = [
+            f"Sản phẩm: {p['ten_sp']} ({p['ma_sp']})",
+            f"Thể loại: {p['the_loai']} | Danh mục: {p['danh_muc']}",
+            f"Đơn vị: {p['don_vi']}",
+        ]
+        if p.get("kich_thuoc"):
+            lines.append(f"Kích thước:\n{p['kich_thuoc']}")
+        if p.get("khoi_luong_m3"):
+            lines.append(f"Khối lượng: {p['khoi_luong_m3']} m3")
+        if p.get("trong_luong_tan"):
+            lines.append(f"Trọng lượng: {p['trong_luong_tan']} tấn")
+        if p.get("mo_ta"):
+            lines.append(f"Mô tả: {p['mo_ta']}")
+        if p.get("ghi_chu"):
+            lines.append(f"Ghi chú: {p['ghi_chu']}")
+        return "\n".join(lines)
+
+    if name == "get_price":
+        prices = get_price(args["ma_sp"], args.get("loai_da"))
+        if not prices:
+            return f"Không tìm thấy giá cho sản phẩm {args['ma_sp']}."
+        lines = [f"Giá sản phẩm {args['ma_sp']}:"]
+        for label, price in prices.items():
+            lines.append(f"  • {label}: {price:,}đ" if price else f"  • {label}: Liên hệ")
+        return "\n".join(lines)
+
+    if name == "get_media":
+        ma_sp = args["ma_sp"]
+        loai = args.get("loai", "tất cả")
+
+        # Lark tmp_urls (~10 min TTL — enough for Messenger to fetch)
+        lark = await get_product_media_urls(ma_sp)
+        anh_urls = lark.get("anh", [])
+        video_urls = lark.get("video", [])
+
+        # Fallback to Cloudinary if Lark unavailable
+        if not anh_urls:
+            csv_media = get_media(ma_sp, "anh")
+            anh_urls = csv_media.get("link_anh_ma") or csv_media.get("anh") or []
+
+        sent_anh = sent_vid = 0
+
+        if loai in ("anh", "tất cả"):
+            for url in anh_urls[:5]:
+                await send_image(sender_id, url)
+                sent_anh += 1
+
+        if loai in ("video", "tất cả"):
+            for url in video_urls[:2]:
+                await send_video(sender_id, url)
+                sent_vid += 1
+
+        parts = []
+        if sent_anh:
+            parts.append(f"Đã gửi {sent_anh} ảnh")
+        if sent_vid:
+            parts.append(f"{sent_vid} video")
+        return f"{' và '.join(parts) or 'Không tìm thấy media'} sản phẩm {ma_sp}."
 
     logger.warning("unknown tool called: {}", name)
     return f"unknown tool: {name}"

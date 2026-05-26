@@ -1,27 +1,101 @@
 """
-Hybrid product search: pgvector (semantic) + SQL (price, dimensions, the_loai).
+Product tools backed by danh_sach_san_pham.csv.
 
-Strategy:
-  1. Extract hard SQL filters from slots (the_loai, budget, dimensions)
-  2. Semantic query via pgvector (match_products RPC)
-  3. Fallback: ILIKE on search_text (pg_trgm index)
-  4. Final fallback: bestsellers with SQL filters only
+Public API
+----------
+search_product(keyword, n)          – search by name / product code
+filter_product(n, **criteria)       – filter by any field combination
+get_product_detail(ma_sp)           – full detail of one product
+get_price(ma_sp, loai_da)           – price(s) by stone type
+get_media(ma_sp, loai)              – image / video URLs
+search_products(query, slots, n)    – legacy: kept for orchestrator compat
+format_results(products)            – format for end-user display
+format_products_for_llm(products)   – format for LLM context
 """
 from __future__ import annotations
 
+import csv
 import re
+import unicodedata
+from pathlib import Path
+from typing import Any
 
 from loguru import logger
 
-from app.db.supabase import get_client
-from app.llm import embed
+_CSV_PATH = Path(__file__).parent.parent.parent / "danh_sach_san_pham.csv"
 
-_SELECT_COLS = (
-    "id, ma_sp, ten_sp, the_loai, danh_muc, kich_thuoc, "
-    "chieu_dai_mm, chieu_rong_mm, chieu_cao_mm, "
-    "gia_da_xanh_den, gia_da_xanh_reu, gia_da_xam_bd, gia_da_grn_an_do, "
-    "mo_ta, ghi_chu, tags, ton_kho, ban_chay"
-)
+# ---------------------------------------------------------------------------
+# CSV → internal model
+# ---------------------------------------------------------------------------
+
+_COL = {
+    "id":            "record_id",
+    "ma_sp":         "Mã Sản Phẩm",
+    "ten_sp":        "Tên sản phẩm",
+    "ban_chay":      "Bán chạy",
+    "anh":           "Ảnh",
+    "anh_bao_gia":   "Ảnh báo giá(1 ảnh rõ sản phẩm)",
+    "sp_uu_tien":    "sp ưu tiên",
+    "nhom_cong_viec":"Nhóm công việc",
+    "media":         "Media",
+    "mo_ta":         "Mô tả",
+    "danh_muc":      "Danh mục",
+    "the_loai":      "Thể Loại",
+    "don_vi":        "Đơn vị",
+    "quy_cach":      "Quy CáchGhép SP",
+    "kich_thuoc":    "Kích thước",
+    "khoi_luong_m3": "Khối lượng (m3)",
+    "trong_luong_tan":"Trọng lượng (tấn)",
+    "gia_xanh_den":  "Đá xanh đen",
+    "gia_xanh_reu":  "Đá xanh rêu",
+    "gia_xam_bd":    "Đá xám BĐ",
+    "gia_grn_an_do": "Đá GRN đen Ấn Độ",
+    "ghi_chu":       "Ghi chú",
+    "video":         "Video",
+    "link_anh":      "Link ảnh",
+    "link_anh_ma":   "Link ảnh có mã",
+}
+
+# stone alias → internal key
+_STONE_KEY: dict[str, str] = {
+    "xanh đen":  "gia_xanh_den",
+    "xanh den":  "gia_xanh_den",
+    "đen":       "gia_xanh_den",
+    "xanh rêu":  "gia_xanh_reu",
+    "xanh reu":  "gia_xanh_reu",
+    "xanh":      "gia_xanh_reu",
+    "xám":       "gia_xam_bd",
+    "xam":       "gia_xam_bd",
+    "granite":   "gia_grn_an_do",
+    "ấn độ":     "gia_grn_an_do",
+    "an do":     "gia_grn_an_do",
+    "ấn":        "gia_grn_an_do",
+    "grn":       "gia_grn_an_do",
+}
+
+_PRICE_KEYS = ["gia_xanh_den", "gia_xanh_reu", "gia_xam_bd", "gia_grn_an_do"]
+_PRICE_LABELS = {
+    "gia_xanh_den":  "Đá xanh đen",
+    "gia_xanh_reu":  "Đá xanh rêu",
+    "gia_xam_bd":    "Đá xám BĐ",
+    "gia_grn_an_do": "Đá GRN đen Ấn Độ",
+}
+
+_THE_LOAI_MAP = {
+    "mộ": "Mộ", "mo": "Mộ", "mộ đơn": "Mộ", "mo don": "Mộ",
+    "mộ đôi": "Mộ", "mo doi": "Mộ", "mộ tròn": "Mộ", "mo tron": "Mộ",
+    "long đình": "Long đình", "long dinh": "Long đình", "lăng": "Long đình",
+    "cuốn thư": "Cuốn thư", "cuon thu": "Cuốn thư",
+    "cổng": "Cổng", "cong": "Cổng",
+    "tam sơn": "Tam sơn", "tam son": "Tam sơn",
+    "hàng rào": "Hàng rào", "hang rao": "Hàng rào", "lan can": "Hàng rào",
+}
+
+def _norm(s: str) -> str:
+    """Lowercase + strip Vietnamese diacritics (incl. đ→d) for accent-insensitive matching."""
+    s = s.lower().replace("đ", "d").replace("Đ", "d")
+    return unicodedata.normalize("NFD", s).encode("ascii", "ignore").decode()
+
 
 _STOPWORDS = {
     "cho", "tôi", "em", "anh", "chị", "bác", "về", "của", "và", "hoặc",
@@ -30,49 +104,234 @@ _STOPWORDS = {
     "loại", "sản", "phẩm", "đá", "hàng", "giá", "bao", "nhiêu",
 }
 
-# Customer-facing the_loai names (exact values in DB)
-# stone_type slot value → price column that is non-null for that stone
-_STONE_COL_MAP: dict[str, str] = {
-    "xanh đen":  "gia_da_xanh_den",
-    "xanh den":  "gia_da_xanh_den",
-    "đen":       "gia_da_xanh_den",
-    "xanh rêu":  "gia_da_xanh_reu",
-    "xanh reu":  "gia_da_xanh_reu",
-    "xanh":      "gia_da_xanh_reu",
-    "xám":       "gia_da_xam_bd",
-    "xam":       "gia_da_xam_bd",
-    "granite":   "gia_da_grn_an_do",
-    "ấn độ":     "gia_da_grn_an_do",
-    "an do":     "gia_da_grn_an_do",
-    "ấn":        "gia_da_grn_an_do",
-}
 
-_THE_LOAI_MAP = {
-    "mộ": "Mộ",
-    "mo": "Mộ",
-    "mộ đơn": "Mộ",
-    "mo don": "Mộ",
-    "mộ đôi": "Mộ",
-    "mo doi": "Mộ",
-    "mộ tròn": "Mộ",
-    "mo tron": "Mộ",
-    "long đình": "Long đình",
-    "long dinh": "Long đình",
-    "lăng": "Long đình",
-    "cuốn thư": "Cuốn thư",
-    "cuon thu": "Cuốn thư",
-    "cổng": "Cổng",
-    "cong": "Cổng",
-    "tam sơn": "Tam sơn",
-    "tam son": "Tam sơn",
-    "hàng rào": "Hàng rào",
-    "hang rao": "Hàng rào",
-    "lan can": "Hàng rào",
-}
+def _parse_int(val: str) -> int | None:
+    if not val or not val.strip():
+        return None
+    try:
+        return int(float(val.strip().replace(",", ".")))
+    except (ValueError, TypeError):
+        return None
+
+
+def _parse_dimensions(kich_thuoc: str) -> dict[str, int]:
+    if not kich_thuoc:
+        return {}
+    dims: dict[str, int] = {}
+    m = re.search(r"chiều dài[^:]*:\s*(\d[\d.]*)\s*mm", kich_thuoc, re.IGNORECASE)
+    if m:
+        dims["chieu_dai_mm"] = int(m.group(1).replace(".", ""))
+    m = re.search(r"chiều cao[^:]*:\s*(\d[\d.]*)\s*mm", kich_thuoc, re.IGNORECASE)
+    if m:
+        dims["chieu_cao_mm"] = int(m.group(1).replace(".", ""))
+    m = re.search(r"chiều rộng[^:]*:\s*(\d[\d.]*)\s*mm", kich_thuoc, re.IGNORECASE)
+    if m:
+        dims["chieu_rong_mm"] = int(m.group(1).replace(".", ""))
+    return dims
+
+
+def _split_urls(raw: str) -> list[str]:
+    """Split URLs separated by | or newlines."""
+    urls: list[str] = []
+    for part in re.split(r"[|\n]", raw):
+        u = part.strip()
+        if u:
+            urls.append(u)
+    return urls
+
+
+def _load_products() -> list[dict]:
+    products: list[dict] = []
+    try:
+        with open(_CSV_PATH, encoding="utf-8-sig", newline="") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                kt = row.get("Kích thước", "") or ""
+                dims = _parse_dimensions(kt)
+                p: dict = {
+                    "id":             row.get("record_id", ""),
+                    "ma_sp":          row.get("Mã Sản Phẩm", ""),
+                    "ten_sp":         row.get("Tên sản phẩm", ""),
+                    "ban_chay":       bool((row.get("Bán chạy") or "").strip()),
+                    "anh":            _split_urls(row.get("Ảnh", "") or ""),
+                    "anh_bao_gia":    (row.get("Ảnh báo giá(1 ảnh rõ sản phẩm)") or "").strip(),
+                    "sp_uu_tien":     (row.get("sp ưu tiên") or "").strip(),
+                    "nhom_cong_viec": (row.get("Nhóm công việc") or "").strip(),
+                    "media":          (row.get("Media") or "").strip(),
+                    "mo_ta":          row.get("Mô tả", "") or "",
+                    "danh_muc":       row.get("Danh mục", "") or "",
+                    "the_loai":       row.get("Thể Loại", "") or "",
+                    "don_vi":         row.get("Đơn vị", "") or "",
+                    "quy_cach":       row.get("Quy CáchGhép SP", "") or "",
+                    "kich_thuoc":     kt,
+                    "khoi_luong_m3":  row.get("Khối lượng (m3)", "") or "",
+                    "trong_luong_tan": row.get("Trọng lượng (tấn)", "") or "",
+                    "gia_xanh_den":   _parse_int(row.get("Đá xanh đen", "")),
+                    "gia_xanh_reu":   _parse_int(row.get("Đá xanh rêu", "")),
+                    "gia_xam_bd":     _parse_int(row.get("Đá xám BĐ", "")),
+                    "gia_grn_an_do":  _parse_int(row.get("Đá GRN đen Ấn Độ", "")),
+                    "ghi_chu":        row.get("Ghi chú", "") or "",
+                    "video":          _split_urls(row.get("Video", "") or ""),
+                    "link_anh":       _split_urls(row.get("Link ảnh", "") or ""),
+                    "link_anh_ma":    _split_urls(row.get("Link ảnh có mã", "") or ""),
+                    **dims,
+                }
+                products.append(p)
+        logger.info("Loaded {} products from CSV", len(products))
+    except Exception:
+        logger.exception("Failed to load products from CSV: {}", _CSV_PATH)
+    return products
+
+
+_PRODUCTS: list[dict] = _load_products()
+_BY_MA: dict[str, dict] = {p["ma_sp"].upper(): p for p in _PRODUCTS if p["ma_sp"]}
 
 
 # ---------------------------------------------------------------------------
-# Slot parsers
+# search_product
+# ---------------------------------------------------------------------------
+
+def search_product(keyword: str, n: int = 10) -> list[dict]:
+    """Search by keyword matched against name and product code."""
+    kw = _norm(keyword)
+    results = [
+        p for p in _PRODUCTS
+        if kw in _norm(p["ten_sp"]) or kw in _norm(p["ma_sp"])
+    ]
+    logger.info("search_product keyword={!r} found={}", keyword, len(results))
+    return results[:n]
+
+
+# ---------------------------------------------------------------------------
+# filter_product
+# ---------------------------------------------------------------------------
+
+def filter_product(n: int = 20, **criteria: Any) -> list[dict]:
+    """
+    Filter products by any field combination.
+
+    Supported criteria keys (all optional):
+        danh_muc, the_loai, don_vi, ban_chay (bool),
+        ma_sp, ten_sp, mo_ta, ghi_chu, quy_cach,
+        sp_uu_tien, nhom_cong_viec,
+        gia_xanh_den_max, gia_xanh_reu_max,
+        gia_xam_bd_max, gia_grn_an_do_max,
+        gia_max (applies to all price cols),
+        chieu_dai_max, chieu_cao_max, chieu_rong_max (mm)
+
+    String comparisons are case-insensitive substring matches.
+    """
+    results = list(_PRODUCTS)
+
+    for key, val in criteria.items():
+        if val is None:
+            continue
+
+        # boolean fields
+        if key == "ban_chay":
+            results = [p for p in results if bool(p.get("ban_chay")) == bool(val)]
+
+        # price ceiling: any stone
+        elif key == "gia_max":
+            ceiling = int(val)
+            results = [
+                p for p in results
+                if any((p.get(c) or 0) and p[c] <= ceiling for c in _PRICE_KEYS)
+            ]
+
+        # price ceiling: specific stone
+        elif key in ("gia_xanh_den_max", "gia_xanh_reu_max", "gia_xam_bd_max", "gia_grn_an_do_max"):
+            col = key[:-4]  # strip '_max'
+            ceiling = int(val)
+            results = [p for p in results if (p.get(col) or 0) and p[col] <= ceiling]
+
+        # dimension ceilings
+        elif key == "chieu_dai_max":
+            results = [p for p in results if not p.get("chieu_dai_mm") or p["chieu_dai_mm"] <= int(val)]
+        elif key == "chieu_cao_max":
+            results = [p for p in results if not p.get("chieu_cao_mm") or p["chieu_cao_mm"] <= int(val)]
+        elif key == "chieu_rong_max":
+            results = [p for p in results if not p.get("chieu_rong_mm") or p["chieu_rong_mm"] <= int(val)]
+
+        # string fields: accent-insensitive substring
+        elif key in ("danh_muc", "the_loai", "don_vi", "ma_sp", "ten_sp",
+                     "mo_ta", "ghi_chu", "quy_cach", "sp_uu_tien", "nhom_cong_viec"):
+            needle = _norm(str(val))
+            results = [p for p in results if needle in _norm(p.get(key) or "")]
+
+        else:
+            logger.warning("filter_product: unknown criterion '{}' ignored", key)
+
+    # bestsellers first
+    results.sort(key=lambda p: not p.get("ban_chay"))
+    logger.info("filter_product criteria={} found={}", criteria, len(results))
+    return results[:n]
+
+
+# ---------------------------------------------------------------------------
+# get_product_detail
+# ---------------------------------------------------------------------------
+
+def get_product_detail(ma_sp: str) -> dict | None:
+    """Return full product dict for a given product code, or None."""
+    return _BY_MA.get(ma_sp.upper().strip())
+
+
+# ---------------------------------------------------------------------------
+# get_price
+# ---------------------------------------------------------------------------
+
+def get_price(ma_sp: str, loai_da: str | None = None) -> dict[str, int | None]:
+    """
+    Return price(s) for a product.
+
+    loai_da: optional stone alias (e.g. 'xanh đen').
+    Returns dict mapping stone label → price (None if unavailable).
+    """
+    p = _BY_MA.get(ma_sp.upper().strip())
+    if not p:
+        return {}
+
+    if loai_da:
+        key = _STONE_KEY.get(loai_da.lower().strip())
+        if key:
+            return {_PRICE_LABELS[key]: p.get(key)}
+        return {}
+
+    return {_PRICE_LABELS[k]: p.get(k) for k in _PRICE_KEYS}
+
+
+# ---------------------------------------------------------------------------
+# get_media
+# ---------------------------------------------------------------------------
+
+def get_media(ma_sp: str, loai: str = "tất cả") -> dict[str, Any]:
+    """
+    Return media URLs for a product.
+
+    loai: 'ảnh' | 'video' | 'tất cả' (default)
+    """
+    p = _BY_MA.get(ma_sp.upper().strip())
+    if not p:
+        return {}
+
+    loai = loai.lower().strip()
+    result: dict[str, Any] = {}
+
+    if loai in ("ảnh", "anh", "tất cả", "tat ca", "all", ""):
+        result["anh"] = p.get("anh", [])
+        result["anh_bao_gia"] = p.get("anh_bao_gia", "")  # Lark URL — may expire
+        result["link_anh"] = p.get("link_anh", [])
+        result["link_anh_ma"] = p.get("link_anh_ma", [])  # Cloudinary — reliable
+
+    if loai in ("video", "tất cả", "tat ca", "all", ""):
+        result["video"] = p.get("video", [])
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Legacy: search_products (slots-based, used by orchestrator)
 # ---------------------------------------------------------------------------
 
 def _parse_budget(budget_text: str | None) -> int | None:
@@ -92,7 +351,6 @@ def _parse_budget(budget_text: str | None) -> int | None:
 
 
 def _parse_size_mm(raw: str | None) -> int | None:
-    """Parse '1200mm' or '1.2m' or '120cm' → int mm."""
     if not raw:
         return None
     raw = raw.lower().strip()
@@ -109,200 +367,59 @@ def _parse_size_mm(raw: str | None) -> int | None:
     return None
 
 
-def _resolve_the_loai(slots: dict) -> str | None:
-    raw = slots.get("product_type") or slots.get("project_type")
-    if not raw:
-        return None
-    key = raw.lower().strip()
-    return _THE_LOAI_MAP.get(key)  # None if not in map → no filter
-
-
-def _resolve_stone_col(slots: dict) -> str | None:
-    """Map stone_type slot to the DB price column for that stone variety."""
-    raw = slots.get("stone_type")
-    if not raw:
-        return None
-    return _STONE_COL_MAP.get(raw.lower().strip())
-
-
 def _extract_keywords(query: str) -> list[str]:
     words = re.sub(r"[.,?!]", " ", query.lower()).split()
     return [w for w in words if len(w) >= 2 and w not in _STOPWORDS][:4]
 
 
-# ---------------------------------------------------------------------------
-# SQL filters builder
-# ---------------------------------------------------------------------------
-
-def _apply_sql_filters(
-    q, the_loai: str | None, budget: int | None, sizes: dict, stone_col: str | None = None
-) -> object:
-    if the_loai:
-        q = q.ilike("the_loai", f"%{the_loai}%")
-
-    if stone_col:
-        # Only return products available in this stone variety
-        q = q.not_.is_(stone_col, "null")
-
-    if budget:
-        price_cols = (
-            [stone_col] if stone_col
-            else ["gia_da_xanh_den", "gia_da_xanh_reu", "gia_da_xam_bd", "gia_da_grn_an_do"]
-        )
-        q = q.or_(",".join(f"{c}.lte.{budget}" for c in price_cols))
-
-    if sizes.get("chieu_dai_max"):
-        q = q.lte("chieu_dai_mm", sizes["chieu_dai_max"])
-    if sizes.get("chieu_cao_max"):
-        q = q.lte("chieu_cao_mm", sizes["chieu_cao_max"])
-    if sizes.get("chieu_rong_max"):
-        q = q.lte("chieu_rong_mm", sizes["chieu_rong_max"])
-
-    return q
-
-
-# ---------------------------------------------------------------------------
-# Search layers
-# ---------------------------------------------------------------------------
-
-_SIMILARITY_THRESHOLD = 0.30
-
-
-async def _semantic_search(
-    query: str,
-    the_loai: str | None,
-    budget: int | None,
-    n: int,
-) -> list[dict]:
-    """pgvector semantic search via match_products RPC. Filters by similarity threshold."""
-    client = await get_client()
-    try:
-        vector = await embed(query)
-        params: dict = {
-            "query_embedding": vector,
-            "match_count": n * 2,
-        }
-        if the_loai:
-            params["filter_the_loai"] = the_loai
-        if budget:
-            params["filter_price_max"] = budget
-        result = await client.rpc("match_products", params).execute()
-        rows = result.data or []
-        return [r for r in rows if (r.get("similarity") or 0) >= _SIMILARITY_THRESHOLD]
-    except Exception:
-        logger.exception("semantic_search failed query={!r}", query[:50])
-        return []
-
-
-async def _ilike_search(
-    keywords: list[str],
-    the_loai: str | None,
-    budget: int | None,
-    sizes: dict,
-    n: int,
-    stone_col: str | None = None,
-) -> list[dict]:
-    """Single query: OR across all keywords on search_text (pg_trgm accelerated)."""
-    client = await get_client()
-    try:
-        q = client.table("products").select(_SELECT_COLS)
-        if keywords:
-            q = q.or_(",".join(f"search_text.ilike.%{kw}%" for kw in keywords))
-        q = _apply_sql_filters(q, the_loai, budget, sizes, stone_col)
-        result = await q.order("ban_chay", desc=True).limit(n).execute()
-        return result.data or []
-    except Exception:
-        logger.exception("ilike_search failed keywords={}", keywords)
-        return []
-
-
-def _filter_by_size(products: list[dict], sizes: dict) -> list[dict]:
-    """Post-filter semantic results by dimension constraints."""
-    out = []
-    for p in products:
-        if sizes.get("chieu_dai_max"):
-            v = p.get("chieu_dai_mm")
-            if v and v > sizes["chieu_dai_max"]:
-                continue
-        if sizes.get("chieu_cao_max"):
-            v = p.get("chieu_cao_mm")
-            if v and v > sizes["chieu_cao_max"]:
-                continue
-        if sizes.get("chieu_rong_max"):
-            v = p.get("chieu_rong_mm")
-            if v and v > sizes["chieu_rong_max"]:
-                continue
-        out.append(p)
-    return out
-
-
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
-
 async def search_products(query: str, slots: dict, n: int = 6) -> list[dict]:
-    """
-    Hybrid search:
-      1. Semantic (pgvector) → post-filter by stone type and dimensions
-      2. ILIKE fallback (pg_trgm on search_text)
-      3. Bestseller fallback with SQL filters only
-    """
-    the_loai  = _resolve_the_loai(slots)
-    stone_col = _resolve_stone_col(slots)
-    budget    = _parse_budget(slots.get("budget"))
+    """Legacy orchestrator entry-point. Delegates to filter_product + keyword scoring."""
+    raw_type = slots.get("product_type") or slots.get("project_type") or ""
+    the_loai = _THE_LOAI_MAP.get(raw_type.lower().strip()) if raw_type else None
 
-    # Augment query with stone type for better semantic matching
-    semantic_query = query
-    if slots.get("stone_type"):
-        semantic_query = f"{slots['stone_type']} {query}"
+    raw_stone = slots.get("stone_type") or ""
+    stone_key = _STONE_KEY.get(raw_stone.lower().strip()) if raw_stone else None
 
-    sizes = {
-        "chieu_dai_max":  _parse_size_mm(slots.get("chieu_dai")),
-        "chieu_cao_max":  _parse_size_mm(slots.get("chieu_cao")),
-        "chieu_rong_max": _parse_size_mm(slots.get("chieu_rong")),
-    }
-    sizes = {k: v for k, v in sizes.items() if v}  # drop None
+    budget = _parse_budget(slots.get("budget"))
+
+    criteria: dict[str, Any] = {}
+    if the_loai:
+        criteria["the_loai"] = the_loai
+    if budget:
+        if stone_key:
+            criteria[f"{stone_key}_max"] = budget
+        else:
+            criteria["gia_max"] = budget
+
+    for slot_key, dim_key in [("chieu_dai", "chieu_dai_max"), ("chieu_cao", "chieu_cao_max"), ("chieu_rong", "chieu_rong_max")]:
+        v = _parse_size_mm(slots.get(slot_key))
+        if v:
+            criteria[dim_key] = v
+
+    results = filter_product(n=50, **criteria)
+
+    if stone_key:
+        results = [p for p in results if p.get(stone_key)]
 
     keywords = _extract_keywords(query)
 
-    # Layer 1: Semantic search — skip when query has fewer than 2 meaningful keywords
-    if len(keywords) >= 2:
-        products = await _semantic_search(semantic_query, the_loai, budget, n)
-        # Post-filter by stone type: only keep rows with a price for that stone
-        if products and stone_col:
-            products = [p for p in products if p.get(stone_col)]
-        if products and sizes:
-            products = _filter_by_size(products, sizes)
-    else:
-        products = []
+    def _score(p: dict) -> int:
+        text = " ".join(filter(None, [
+            p.get("ten_sp"), p.get("ma_sp"), p.get("mo_ta"),
+            p.get("ghi_chu"), p.get("the_loai"), p.get("danh_muc"),
+        ])).lower()
+        return sum(1 for kw in keywords if kw in text)
 
-    # Layer 2: ILIKE fallback — single OR query across all keywords
-    if not products:
-        products = await _ilike_search(keywords, the_loai, budget, sizes, n, stone_col)
-
-    # Layer 3: bestseller fallback (SQL filters only, no keyword constraint)
-    if not products:
-        products = await _ilike_search([], the_loai, budget, sizes, n, stone_col)
-
-    logger.info(
-        "search found={} query={!r} the_loai={} stone_col={} budget={} sizes={}",
-        len(products), query[:50], the_loai, stone_col, budget, sizes,
-    )
-    return products
+    results.sort(key=lambda p: (-_score(p), not p.get("ban_chay")))
+    return results[:n]
 
 
 # ---------------------------------------------------------------------------
-# Formatting
+# Formatting helpers
 # ---------------------------------------------------------------------------
 
 def _best_price(p: dict) -> int | None:
-    candidates = [
-        p.get("gia_da_xanh_den"),
-        p.get("gia_da_xanh_reu"),
-        p.get("gia_da_xam_bd"),
-        p.get("gia_da_grn_an_do"),
-    ]
-    valid = [c for c in candidates if c]
+    valid = [p[k] for k in _PRICE_KEYS if p.get(k)]
     return min(valid) if valid else None
 
 
@@ -315,16 +432,16 @@ def format_results(products: list[dict]) -> str:
 
     lines = ["Em tìm thấy một số sản phẩm phù hợp:\n"]
     for i, p in enumerate(products[:3], 1):
-        name  = p.get("ten_sp", "")
-        size  = p.get("kich_thuoc", "")
+        name = p.get("ten_sp", "")
+        size = p.get("kich_thuoc", "")
         price = _best_price(p)
         price_str = f"{price:,}₫" if price else "Liên hệ"
-        desc  = p.get("mo_ta") or p.get("ghi_chu") or ""
+        desc = p.get("mo_ta") or p.get("ghi_chu") or ""
         desc_str = (desc[:80] + "…") if len(desc) > 80 else desc
 
         line = f"{i}. {name}"
         if size:
-            first_line = size.split("\n")[0]
+            first_line = size.split("\n")[0].lstrip("- ").strip()
             line += f" ({first_line})"
         line += f"\n   Giá từ {price_str}"
         if desc_str:
@@ -347,17 +464,14 @@ def format_products_for_llm(products: list[dict]) -> str:
         dai  = p.get("chieu_dai_mm")
         cao  = p.get("chieu_cao_mm")
         rong = p.get("chieu_rong_mm")
-        dim_str = ""
-        if dai or cao or rong:
-            parts = []
-            if dai:  parts.append(f"dài {dai}mm")
-            if rong: parts.append(f"rộng {rong}mm")
-            if cao:  parts.append(f"cao {cao}mm")
-            dim_str = " | " + ", ".join(parts)
+        parts = []
+        if dai:  parts.append(f"dài {dai}mm")
+        if rong: parts.append(f"rộng {rong}mm")
+        if cao:  parts.append(f"cao {cao}mm")
+        dim_str = (" | " + ", ".join(parts)) if parts else ""
         mo_ta = p.get("mo_ta") or ""
-        line = (
-            f"- {p['ten_sp']} | {p.get('the_loai', '')}{dim_str} "
+        lines.append(
+            f"- {p['ten_sp']} ({p.get('ma_sp', '')}) | {p.get('the_loai', '')}{dim_str} "
             f"| Từ {price_str} | {mo_ta[:80]}"
         )
-        lines.append(line)
     return "\n".join(lines)

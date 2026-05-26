@@ -61,6 +61,75 @@ TOOLS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "get_product_detail",
+            "description": (
+                "Lấy toàn bộ thông tin chi tiết của 1 sản phẩm theo mã sản phẩm. "
+                "Gọi khi khách hỏi cụ thể về 1 sản phẩm (kích thước, mô tả, khối lượng...)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ma_sp": {
+                        "type": "string",
+                        "description": "Mã sản phẩm (ví dụ: LD01, M05)",
+                    },
+                },
+                "required": ["ma_sp"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_price",
+            "description": (
+                "Lấy giá theo từng loại đá của sản phẩm. "
+                "Gọi khi khách hỏi giá cụ thể của 1 sản phẩm."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ma_sp": {
+                        "type": "string",
+                        "description": "Mã sản phẩm",
+                    },
+                    "loai_da": {
+                        "type": "string",
+                        "description": "Loại đá (xanh đen, xanh rêu, xám, granite). Bỏ trống để lấy tất cả.",
+                    },
+                },
+                "required": ["ma_sp"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_media",
+            "description": (
+                "Lấy ảnh và video của sản phẩm để gửi cho khách xem. "
+                "Gọi khi khách muốn xem ảnh, hình mẫu sản phẩm."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ma_sp": {
+                        "type": "string",
+                        "description": "Mã sản phẩm",
+                    },
+                    "loai": {
+                        "type": "string",
+                        "enum": ["ảnh", "video", "tất cả"],
+                        "description": "Loại media cần lấy",
+                    },
+                },
+                "required": ["ma_sp"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "search_products",
             "description": (
                 "Tìm sản phẩm đá lăng mộ trong kho Hồn Đá khi khách hỏi về "

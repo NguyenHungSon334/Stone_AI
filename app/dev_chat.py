@@ -120,6 +120,8 @@ _HTML = """<!DOCTYPE html>
   .msg.bot { background: #f0ebe8; color: #333; align-self: flex-start; border-bottom-left-radius: 4px; }
   .msg.user { background: #6d4c41; color: #fff; align-self: flex-end; border-bottom-right-radius: 4px; }
   .msg.thinking { background: #f0ebe8; color: #999; align-self: flex-start; font-style: italic; }
+  .msg.bot img { max-width: 100%; border-radius: 10px; display: block; margin-top: 6px; }
+  .msg.bot video { max-width: 100%; border-radius: 10px; display: block; margin-top: 6px; }
   .label { font-size: 11px; color: #999; margin-bottom: 2px; padding: 0 4px; }
   .label.right { text-align: right; }
   .input-row {
@@ -213,13 +215,28 @@ function startChat() {
   input.focus();
 }
 
-function addMsg(text, cls) {
+function addMsg(text, cls, images, videos) {
   const label = document.createElement('div');
   label.className = 'label' + (cls === 'user' ? ' right' : '');
   label.textContent = cls === 'user' ? displayName.textContent || 'Bạn' : 'Hồn Đá AI';
   const div = document.createElement('div');
   div.className = 'msg ' + cls;
   div.textContent = text;
+  if (images && images.length) {
+    images.forEach(url => {
+      const img = document.createElement('img');
+      img.src = url;
+      img.alt = 'Ảnh sản phẩm';
+      div.appendChild(img);
+    });
+  }
+  if (videos && videos.length) {
+    videos.forEach(url => {
+      const v = document.createElement('video');
+      v.src = url; v.controls = true;
+      div.appendChild(v);
+    });
+  }
   msgs.appendChild(label);
   msgs.appendChild(div);
   msgs.scrollTop = msgs.scrollHeight;
@@ -243,7 +260,7 @@ async function send() {
     });
     const data = await res.json();
     thinking.remove();
-    addMsg(data.reply || '(không có phản hồi)', 'bot');
+    addMsg(data.reply || '(không có phản hồi)', 'bot', data.images || [], data.videos || []);
   } catch (e) {
     thinking.textContent = 'Lỗi kết nối: ' + e.message;
     thinking.style.color = '#e53935';
@@ -280,12 +297,26 @@ async def chat(req: ChatRequest):
     """
     from unittest.mock import patch, AsyncMock
 
-    captured: list[str] = []
+    captured_text: list[str] = []
+    captured_images: list[str] = []
+    captured_videos: list[str] = []
 
-    async def _capture(sender_id: str, text: str) -> None:
-        captured.append(text)
+    async def _capture_text(sender_id: str, text: str) -> None:
+        captured_text.append(text)
 
-    with patch("app.orchestrator.send_text", side_effect=_capture):
+    async def _capture_image(sender_id: str, url: str) -> None:
+        captured_images.append(url)
+
+    async def _capture_video(sender_id: str, url: str) -> None:
+        captured_videos.append(url)
+
+    with patch("app.orchestrator.send_text", side_effect=_capture_text), \
+         patch("app.orchestrator.send_image", side_effect=_capture_image), \
+         patch("app.orchestrator.send_video", side_effect=_capture_video):
         await orchestrator.run(req.sender_id, req.text)
 
-    return {"reply": "\n\n".join(captured) if captured else ""}
+    return {
+        "reply": "\n\n".join(captured_text) if captured_text else "",
+        "images": captured_images,
+        "videos": captured_videos,
+    }

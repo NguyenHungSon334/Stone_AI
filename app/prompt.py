@@ -70,13 +70,20 @@ SỬ DỤNG TOOLS (QUAN TRỌNG)
 - Có thể gọi update_customer nhiều lần trong một cuộc trò chuyện khi có thông tin mới"""
 
 
-def build_messages(ctx: "ConversationContext", user_text: str) -> list[dict]:
-    """Assemble message list for LLM: system prompt + context note + history + user msg."""
+def build_messages(
+    ctx: "ConversationContext",
+    user_text: str,
+    plan: str = "",
+) -> list[dict]:
+    """Assemble message list for LLM: system prompt + context note + plan + history + user msg."""
     messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
 
     note = _context_note(ctx)
     if note:
         messages.append({"role": "system", "content": note})
+
+    if plan:
+        messages.append({"role": "system", "content": f"[KẾ HOẠCH TRẢ LỜI]\n{plan}\n\nThực hiện đúng HANH_DONG và ARGS ở trên."})
 
     messages.extend(ctx.history)
     messages.append({"role": "user", "content": user_text})

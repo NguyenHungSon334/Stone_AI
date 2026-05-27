@@ -21,6 +21,7 @@ from app.tools.escalate import should_escalate, ESCALATE_NOTIFY
 from app.tools.update_customer import update_customer
 from app.tools.search import search_products, format_products_for_llm, get_product_detail, get_price, get_media
 from app.tools.lark_media import get_product_media_urls
+from app.planner import plan_response
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -321,8 +322,18 @@ async def run(sender_id: str, user_text: str) -> None:
     # Escalated users get no tools (they're waiting for a human agent)
     tools = [] if ctx.is_escalated else TOOLS
     alias = _pick_alias(user_text, is_first_turn=len(ctx.history) == 0)
-    messages = build_messages(ctx, user_text)
-    await send_typing_on(sender_id)
+
+    # Run planner + typing indicator in parallel (planner is fast model, ~0.5s)
+    plan = ""
+    if alias == "smart" and tools:
+        (plan, _) = await asyncio.gather(
+            plan_response(user_text, ctx),
+            send_typing_on(sender_id),
+        )
+    else:
+        await send_typing_on(sender_id)
+
+    messages = build_messages(ctx, user_text, plan=plan)
     text_reply, tool_calls, cost = await llm_call_with_tools(messages, tools, alias=alias, temperature=0.0)
 
     # --- Execute tools, send results back for final reply ---

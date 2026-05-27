@@ -205,20 +205,6 @@ async def _execute_tool(
         products = await search_products(args["query"], slots)
         if not products:
             return _NO_PRODUCTS_TOOL_RESULT
-        # Send one image per product (top 3), dedup by ma_sp so retries don't re-send
-        for product in products[:3]:
-            ma_sp = product.get("ma_sp", "")
-            if not ma_sp or ma_sp in sent_ma_sp:
-                continue
-            sent_ma_sp.add(ma_sp)
-            lark_media = await get_product_media_urls(ma_sp)
-            lark_anh = lark_media.get("anh", [])
-            if lark_anh:
-                await send_image(sender_id, lark_anh[0])
-            else:
-                cloudinary = product.get("link_anh_ma") or []
-                if cloudinary:
-                    await send_image(sender_id, cloudinary[0])
         return format_products_for_llm(products)
 
     if name == "get_product_detail":

@@ -22,6 +22,7 @@ from app.tools.update_customer import update_customer
 from app.tools.search import search_products, format_products_for_llm, get_product_detail, get_price, get_media
 from app.tools.lark_media import get_product_media_urls
 from app.planner import plan_response
+from app.evaluator import evaluate_response
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -334,39 +335,81 @@ async def run(sender_id: str, user_text: str) -> None:
         await send_typing_on(sender_id)
 
     messages = build_messages(ctx, user_text, plan=plan)
-    text_reply, tool_calls, cost = await llm_call_with_tools(messages, tools, alias=alias, temperature=0.0)
 
-    # --- Execute tools, send results back for final reply ---
-    if tool_calls:
-        # Execute tools in parallel
-        results = await asyncio.gather(
-            *[_execute_tool(tc, sender_id, ctx) for tc in tool_calls]
+    # --- Generate → Evaluate → Retry loop (max _MAX_EVAL_RETRIES) ---
+    _MAX_EVAL_RETRIES = 2
+    cost = 0.0
+    tool_calls: list[dict] = []
+    text_reply: str | None = None
+    tool_results_summary = ""
+
+    for attempt in range(_MAX_EVAL_RETRIES + 1):
+        text_reply, tool_calls, call_cost = await llm_call_with_tools(
+            messages, tools, alias=alias, temperature=0.0,
         )
-        tool_results = [
-            {"role": "tool", "tool_call_id": tc["id"], "content": result}
-            for tc, result in zip(tool_calls, results)
-        ]
+        cost += call_cost
 
-        # Skip 2nd LLM call when all calls were search_products and all returned no results
-        only_empty_searches = (
-            all(tc["function"]["name"] == "search_products" for tc in tool_calls)
-            and all(r["content"] == _NO_PRODUCTS_TOOL_RESULT for r in tool_results)
+        # --- Execute tools ---
+        if tool_calls:
+            results = await asyncio.gather(
+                *[_execute_tool(tc, sender_id, ctx) for tc in tool_calls]
+            )
+            tool_results = [
+                {"role": "tool", "tool_call_id": tc["id"], "content": result}
+                for tc, result in zip(tool_calls, results)
+            ]
+            tool_results_summary = " | ".join(r["content"][:80] for r in tool_results)
+
+            only_empty_searches = (
+                all(tc["function"]["name"] == "search_products" for tc in tool_calls)
+                and all(r["content"] == _NO_PRODUCTS_TOOL_RESULT for r in tool_results)
+            )
+
+            if only_empty_searches:
+                text_reply = _NO_PRODUCTS_REPLY
+            else:
+                assistant_turn = {
+                    "role": "assistant",
+                    "content": text_reply,
+                    "tool_calls": tool_calls,
+                }
+                follow_up = messages + [assistant_turn] + tool_results
+                text_reply2, _, cost2 = await llm_call_with_tools(
+                    follow_up, [], alias="smart", temperature=0.3,
+                )
+                cost += cost2
+                if text_reply2:
+                    text_reply = text_reply2
+
+        candidate = text_reply or _FALLBACK_REPLY
+
+        # Skip evaluation on last attempt or for fast/simple turns
+        if attempt == _MAX_EVAL_RETRIES or alias != "smart" or not plan:
+            text_reply = candidate
+            break
+
+        tool_names_called = [tc["function"]["name"] for tc in tool_calls]
+        passed, feedback = await evaluate_response(
+            user_text=user_text,
+            plan=plan,
+            response=candidate,
+            tools_called=tool_names_called,
+            tool_results_summary=tool_results_summary,
         )
 
-        if only_empty_searches:
-            text_reply = _NO_PRODUCTS_REPLY
-        else:
-            assistant_turn = {
-                "role": "assistant",
-                "content": text_reply,
-                "tool_calls": tool_calls,
-            }
-            follow_up = messages + [assistant_turn] + tool_results
-            # Use smart model — this turn presents product recommendations to customer
-            text_reply2, _, cost2 = await llm_call_with_tools(follow_up, [], alias="smart", temperature=0.3)
-            cost += cost2
-            if text_reply2:
-                text_reply = text_reply2
+        if passed:
+            text_reply = candidate
+            break
+
+        # Inject evaluator feedback and retry
+        logger.warning("evaluator FAIL attempt={} feedback={!r} — retrying", attempt + 1, feedback)
+        retry_note = (
+            f"[ĐÁNH GIÁ LẦN {attempt + 1}]\n"
+            f"Câu trả lời vừa rồi CHƯA ĐẠT. Lý do: {feedback}\n"
+            f"Hãy trả lời lại đúng theo kế hoạch ban đầu."
+        )
+        messages = build_messages(ctx, user_text, plan=plan)
+        messages.append({"role": "system", "content": retry_note})
 
     reply = text_reply or _FALLBACK_REPLY
     ctx.state = "active"

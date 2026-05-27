@@ -129,6 +129,6 @@ async def resolve_escalation(
     await send_text(
         user_id,
         "Cảm ơn anh/chị đã liên hệ Hồn Đá! "
-        "Em có thể tiếp tục hỗ trợ anh/chị về sản phẩm đá không ạ?",
+        "Em có thể tiếp tục hỗ trợ anh/chị về sản phẩm nào không ạ?",
     )
     return {"status": "resolved"}

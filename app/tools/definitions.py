@@ -149,7 +149,7 @@ TOOLS: list[dict] = [
                     },
                     "project_type": {
                         "type": "string",
-                        "description": "Loại công trình (mộ đơn, lăng tộc, mộ, cổng...)",
+                        "description": "Loại sản phẩm cụ thể như khách nêu, bao gồm hình dạng nếu có. Ví dụ: 'mộ tròn', 'mộ 2 cấp', 'long đình', 'cổng'. KHÔNG tự suy ra thành 'mộ đơn' khi khách nói 'mộ tròn'.",
                     },
                     "budget": {
                         "type": "string",

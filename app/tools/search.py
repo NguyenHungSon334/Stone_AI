@@ -382,9 +382,19 @@ async def search_products(query: str, slots: dict, n: int = 6) -> list[dict]:
 
     budget = _parse_budget(slots.get("budget"))
 
+    # Shape/style keywords that appear in product names (ten_sp)
+    _SHAPE_KW = {"tron", "cuon thu", "long dinh", "tam son", "hang rao"}
+
     criteria: dict[str, Any] = {}
     if the_loai:
         criteria["the_loai"] = the_loai
+        # If raw_type contains a known shape keyword, add ten_sp filter
+        if raw_type:
+            type_norm = _norm(raw_type)
+            for kw in _SHAPE_KW:
+                if kw in type_norm:
+                    criteria["ten_sp"] = kw
+                    break
     if budget:
         if stone_key:
             criteria[f"{stone_key}_max"] = budget

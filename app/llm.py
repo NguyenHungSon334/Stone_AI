@@ -155,6 +155,15 @@ async def llm_call_with_tools(
         "X-Title": "SpiritStone AI",
     }
 
+    # Log input: last user message + tool names available
+    user_msgs = [m for m in messages if m.get("role") == "user"]
+    last_user = user_msgs[-1]["content"][:200] if user_msgs else ""
+    tool_names_avail = [t["function"]["name"] for t in tools] if tools else []
+    logger.debug(
+        "llm_tools INPUT alias={} tools_avail={} last_user={!r} total_msgs={}",
+        alias, tool_names_avail, last_user, len(messages),
+    )
+
     client = get_http_client()
     last_error: Exception | None = None
     for attempt in range(MAX_RETRIES):
@@ -194,11 +203,14 @@ async def llm_call_with_tools(
                 raw_text += "\n(Em xin lỗi, tin nhắn quá dài. Bác vui lòng hỏi thêm để em tiếp tục ạ!)"
             text = raw_text or None
 
+            # Log output: tool calls made + reply preview
+            called_tools = [
+                f"{tc['function']['name']}({tc['function']['arguments'][:80]})"
+                for tc in tool_calls
+            ]
             logger.info(
-                "llm_tools model={} alias={} tools={} cost=${:.5f} latency={:.2f}s",
-                model_id, alias,
-                [tc["function"]["name"] for tc in tool_calls],
-                cost, elapsed,
+                "llm_tools OUTPUT alias={} tools_called={} reply={!r} cost=${:.5f} latency={:.2f}s",
+                alias, called_tools, (text or "")[:150], cost, elapsed,
             )
             return text, tool_calls, cost
 

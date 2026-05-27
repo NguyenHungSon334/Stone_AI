@@ -76,6 +76,15 @@ _SLOT_LABELS: dict[str, str] = {
 }
 
 
+def _plan_needs_second_tool(plan: str) -> bool:
+    """Return True when plan lists ≥2 tools (e.g. search_products, get_media)."""
+    for line in plan.splitlines():
+        if line.startswith("TOOLS:"):
+            tools_str = line[6:].strip()
+            return tools_str != "none" and "," in tools_str
+    return False
+
+
 def _build_escalation_summary(
     sender_id: str,
     user_text: str,
@@ -316,11 +325,15 @@ async def run(sender_id: str, user_text: str) -> None:
         logger.info("escalated (silent) sender={}", sender_id)
         return
 
-    # --- Safety + Escalation in parallel ---
-    unsafe, escalate = await asyncio.gather(
-        is_unsafe(user_text),
-        should_escalate(user_text, ctx),
-    )
+    # --- Safety + Escalation in parallel (skip for known-safe acks) ---
+    _text_lower = user_text.strip().lower()
+    if _text_lower in _FAST_EXACT:
+        unsafe, escalate = False, False
+    else:
+        unsafe, escalate = await asyncio.gather(
+            is_unsafe(user_text),
+            should_escalate(user_text, ctx),
+        )
 
     if not escalate and unsafe:
         await send_text(sender_id, UNSAFE_REPLY)
@@ -405,9 +418,10 @@ async def run(sender_id: str, user_text: str) -> None:
                     "tool_calls": tool_calls,
                 }
                 follow_up = messages + [assistant_turn] + tool_results
-                # Pass tools to allow a second round (e.g. get_media after search_products)
+                # Pass tools only when plan requires a second tool call (e.g. search then get_media)
+                follow_up_tools = tools if _plan_needs_second_tool(plan) else []
                 text_reply2, tool_calls2, cost2 = await llm_call_with_tools(
-                    follow_up, tools, alias="smart", temperature=0.3,
+                    follow_up, follow_up_tools, alias="smart", temperature=0.3, max_tokens=500,
                 )
                 cost += cost2
 
@@ -421,7 +435,7 @@ async def run(sender_id: str, user_text: str) -> None:
                     ]
                     assistant_turn2 = {"role": "assistant", "content": text_reply2, "tool_calls": tool_calls2}
                     follow_up2 = follow_up + [assistant_turn2] + tool_results2
-                    text_reply2, _, cost3 = await llm_call_with_tools(follow_up2, [], alias="smart", temperature=0.3)
+                    text_reply2, _, cost3 = await llm_call_with_tools(follow_up2, [], alias="smart", temperature=0.3, max_tokens=500)
                     cost += cost3
 
                 if text_reply2:
@@ -429,12 +443,12 @@ async def run(sender_id: str, user_text: str) -> None:
 
         candidate = text_reply or _FALLBACK_REPLY
 
-        # Skip evaluation on last attempt or for fast/simple turns
-        if attempt == _MAX_EVAL_RETRIES or alias != "smart" or not plan:
+        tool_names_called = [tc["function"]["name"] for tc in tool_calls]
+        # Skip evaluation on last attempt, fast turns, or CRM-only updates (nothing to evaluate)
+        only_crm = set(tool_names_called) <= {"update_customer"}
+        if attempt == _MAX_EVAL_RETRIES or alias != "smart" or not plan or only_crm:
             text_reply = candidate
             break
-
-        tool_names_called = [tc["function"]["name"] for tc in tool_calls]
         passed, rerun_search, feedback = await evaluate_response(
             user_text=user_text,
             plan=plan,

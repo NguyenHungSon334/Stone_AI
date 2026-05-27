@@ -151,7 +151,6 @@ async def webhook_receive(request: Request, background_tasks: BackgroundTasks):
 
 
 _HANDLE_TIMEOUT = 25.0
-_TIMEOUT_REPLY = "Em xin lỗi, xử lý quá lâu. Anh/chị vui lòng thử lại sau ạ!"
 
 
 async def handle_message(sender_id: str, text: str) -> None:
@@ -160,13 +159,7 @@ async def handle_message(sender_id: str, text: str) -> None:
         await asyncio.wait_for(orchestrator.run(sender_id, text), timeout=_HANDLE_TIMEOUT)
     except asyncio.TimeoutError:
         logger.error("handle_message timeout sender={}", sender_id)
-        try:
-            await send_text(sender_id, _TIMEOUT_REPLY)
-        except Exception:
-            pass
-    except Exception:
+        await orchestrator._notify_admin_error(sender_id, "timeout", f"user_text={text[:200]!r}")
+    except Exception as e:
         logger.exception("handle_message failed sender={}", sender_id)
-        try:
-            await send_text(sender_id, "Em xin lỗi, đã có lỗi xảy ra. Anh/chị vui lòng thử lại ạ!")
-        except Exception:
-            pass
+        await orchestrator._notify_admin_error(sender_id, "exception", str(e)[:300])

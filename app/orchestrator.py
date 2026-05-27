@@ -113,6 +113,17 @@ def _build_escalation_summary(
     return "\n".join(lines)
 
 
+async def _notify_admin_error(sender_id: str, error_type: str, detail: str) -> None:
+    """Notify admin on Messenger when an error occurs (instead of sending fallback to customer)."""
+    if not settings.admin_messenger_psid:
+        return
+    msg = f"ERROR [{error_type}]\nSender: {sender_id}\nDetail: {detail[:300]}"
+    try:
+        await send_text(settings.admin_messenger_psid, msg)
+    except Exception:
+        logger.warning("admin error notification failed sender={}", sender_id)
+
+
 async def _notify_admin_escalation(
     sender_id: str,
     user_text: str,
@@ -495,10 +506,15 @@ async def run(sender_id: str, user_text: str) -> None:
                 messages = build_messages(ctx, user_text, plan=plan)
                 messages.append({"role": "system", "content": retry_note})
 
-    reply = text_reply or _FALLBACK_REPLY
     ctx.state = "active"
 
-    # --- Respond ---
+    # --- Respond (LLM failure → notify admin silently, no fallback to customer) ---
+    if not text_reply:
+        await _notify_admin_error(sender_id, "llm_no_reply", f"user_text={user_text[:200]!r}")
+        logger.error("orchestrator llm returned no reply sender={}", sender_id)
+        return
+
+    reply = text_reply
     await send_text(sender_id, reply)
 
     # --- Persist (all three writes in parallel after reply is sent) ---

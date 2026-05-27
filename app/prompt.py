@@ -66,6 +66,7 @@ SẢN PHẨM
 
 SỬ DỤNG TOOLS (QUAN TRỌNG)
 - Khi khách hỏi giá, muốn xem sản phẩm, hoặc nêu loại sản phẩm cụ thể (ví dụ: "mộ tròn", "mộ xanh đen", "mua mộ", "cần cổng đá") → GỌI search_products NGAY với đầy đủ thông tin khách đã nêu. Không hỏi thêm trước khi search, không tự ước giá.
+- Khi khách hỏi xem ảnh, hình mẫu, minh họa sản phẩm → GỌI get_media NGAY với mã SP đã biết. Nếu chưa có mã SP, gọi search_products trước rồi gọi get_media với mã SP từ kết quả đầu tiên. KHÔNG tự mô tả ảnh bằng text.
 - Khi khách cung cấp bất kỳ thông tin nào (tên, SĐT, địa điểm, loại đá, hạng mục, xe cẩu, thời gian) → GỌI update_customer NGAY
 - Có thể gọi update_customer nhiều lần trong một cuộc trò chuyện khi có thông tin mới"""
 

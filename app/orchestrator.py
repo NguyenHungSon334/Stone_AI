@@ -395,10 +395,25 @@ async def run(sender_id: str, user_text: str) -> None:
                     "tool_calls": tool_calls,
                 }
                 follow_up = messages + [assistant_turn] + tool_results
-                text_reply2, _, cost2 = await llm_call_with_tools(
-                    follow_up, [], alias="smart", temperature=0.3,
+                # Pass tools to allow a second round (e.g. get_media after search_products)
+                text_reply2, tool_calls2, cost2 = await llm_call_with_tools(
+                    follow_up, tools, alias="smart", temperature=0.3,
                 )
                 cost += cost2
+
+                if tool_calls2:
+                    results2 = await asyncio.gather(
+                        *[_execute_tool(tc, sender_id, ctx, sent_urls=sent_urls, sent_ma_sp=sent_ma_sp) for tc in tool_calls2]
+                    )
+                    tool_results2 = [
+                        {"role": "tool", "tool_call_id": tc["id"], "content": r}
+                        for tc, r in zip(tool_calls2, results2)
+                    ]
+                    assistant_turn2 = {"role": "assistant", "content": text_reply2, "tool_calls": tool_calls2}
+                    follow_up2 = follow_up + [assistant_turn2] + tool_results2
+                    text_reply2, _, cost3 = await llm_call_with_tools(follow_up2, [], alias="smart", temperature=0.3)
+                    cost += cost3
+
                 if text_reply2:
                     text_reply = text_reply2
 

@@ -157,12 +157,30 @@ def _update_personality(ctx: ConversationContext, user_text: str) -> None:
 # Tool execution
 # ---------------------------------------------------------------------------
 
+async def _send_image_dedup(sender_id: str, url: str, sent_urls: set[str]) -> None:
+    """Send image only if URL not already sent this turn."""
+    if not url or url in sent_urls:
+        return
+    sent_urls.add(url)
+    await send_image(sender_id, url)
+
+
+async def _send_video_dedup(sender_id: str, url: str, sent_urls: set[str]) -> None:
+    """Send video only if URL not already sent this turn."""
+    if not url or url in sent_urls:
+        return
+    sent_urls.add(url)
+    await send_video(sender_id, url)
+
+
 async def _execute_tool(
     tool_call: dict,
     sender_id: str,
     ctx: ConversationContext,
-    skip_media: bool = False,
+    sent_urls: set[str] | None = None,
 ) -> str:
+    if sent_urls is None:
+        sent_urls = set()
     name = tool_call["function"]["name"]
     try:
         args = json.loads(tool_call["function"]["arguments"])
@@ -182,18 +200,16 @@ async def _execute_tool(
         products = await search_products(args["query"], slots)
         if not products:
             return _NO_PRODUCTS_TOOL_RESULT
-        # Send image for first product (skip on retry to avoid duplicate sends)
-        if not skip_media:
-            first = products[0]
-            ma_sp = first.get("ma_sp", "")
-            lark_media = await get_product_media_urls(ma_sp) if ma_sp else {}
-            lark_anh = lark_media.get("anh", [])
-            if lark_anh:
-                await send_image(sender_id, lark_anh[0])
-            else:
-                cloudinary = (first.get("link_anh_ma") or [])
-                if cloudinary:
-                    await send_image(sender_id, cloudinary[0])
+        first = products[0]
+        ma_sp = first.get("ma_sp", "")
+        lark_media = await get_product_media_urls(ma_sp) if ma_sp else {}
+        lark_anh = lark_media.get("anh", [])
+        if lark_anh:
+            await _send_image_dedup(sender_id, lark_anh[0], sent_urls)
+        else:
+            cloudinary = (first.get("link_anh_ma") or [])
+            if cloudinary:
+                await _send_image_dedup(sender_id, cloudinary[0], sent_urls)
         return format_products_for_llm(products)
 
     if name == "get_product_detail":
@@ -244,13 +260,17 @@ async def _execute_tool(
 
         if loai in ("anh", "tất cả"):
             for url in anh_urls[:5]:
-                await send_image(sender_id, url)
-                sent_anh += 1
+                before = len(sent_urls)
+                await _send_image_dedup(sender_id, url, sent_urls)
+                if len(sent_urls) > before:
+                    sent_anh += 1
 
         if loai in ("video", "tất cả"):
             for url in video_urls[:2]:
-                await send_video(sender_id, url)
-                sent_vid += 1
+                before = len(sent_urls)
+                await _send_video_dedup(sender_id, url, sent_urls)
+                if len(sent_urls) > before:
+                    sent_vid += 1
 
         parts = []
         if sent_anh:
@@ -345,7 +365,8 @@ async def run(sender_id: str, user_text: str) -> None:
     text_reply: str | None = None
     tool_results: list[dict] = []
     tool_results_summary = ""
-    is_retry = False  # True after first attempt — skip media re-sends
+    sent_urls: set[str] = set()  # dedup media across all attempts this turn
+    is_retry = False
 
     for attempt in range(_MAX_EVAL_RETRIES + 1):
         text_reply, tool_calls, call_cost = await llm_call_with_tools(
@@ -356,7 +377,7 @@ async def run(sender_id: str, user_text: str) -> None:
         # --- Execute tools ---
         if tool_calls:
             results = await asyncio.gather(
-                *[_execute_tool(tc, sender_id, ctx, skip_media=is_retry) for tc in tool_calls]
+                *[_execute_tool(tc, sender_id, ctx, sent_urls=sent_urls) for tc in tool_calls]
             )
             tool_results = [
                 {"role": "tool", "tool_call_id": tc["id"], "content": result}
@@ -417,14 +438,11 @@ async def run(sender_id: str, user_text: str) -> None:
         )
 
         if rerun_search:
-            # Re-run full generate+tool cycle with fresh messages + feedback
-            # skip_media=True so we don't re-send images already delivered
-            is_retry = True
+            # Re-run full generate+tool cycle; sent_urls dedup prevents re-sending media
             messages = build_messages(ctx, user_text, plan=plan)
             messages.append({"role": "system", "content": retry_note})
         else:
             # Data is OK — only regenerate final text using existing tool results
-            is_retry = True
             if tool_calls and tool_results:
                 assistant_turn = {
                     "role": "assistant",
@@ -437,8 +455,7 @@ async def run(sender_id: str, user_text: str) -> None:
                     + tool_results
                     + [{"role": "system", "content": retry_note}]
                 )
-                # Clear tool_calls so the next loop iteration skips tool execution
-                tool_calls = []
+                tool_calls = []  # prevent re-execution next iteration
             else:
                 messages = build_messages(ctx, user_text, plan=plan)
                 messages.append({"role": "system", "content": retry_note})

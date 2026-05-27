@@ -161,6 +161,7 @@ async def _execute_tool(
     tool_call: dict,
     sender_id: str,
     ctx: ConversationContext,
+    skip_media: bool = False,
 ) -> str:
     name = tool_call["function"]["name"]
     try:
@@ -181,17 +182,18 @@ async def _execute_tool(
         products = await search_products(args["query"], slots)
         if not products:
             return _NO_PRODUCTS_TOOL_RESULT
-        # Send image for first product: try Lark (fresh tmp_url), fallback Cloudinary
-        first = products[0]
-        ma_sp = first.get("ma_sp", "")
-        lark_media = await get_product_media_urls(ma_sp) if ma_sp else {}
-        lark_anh = lark_media.get("anh", [])
-        if lark_anh:
-            await send_image(sender_id, lark_anh[0])
-        else:
-            cloudinary = (first.get("link_anh_ma") or [])
-            if cloudinary:
-                await send_image(sender_id, cloudinary[0])
+        # Send image for first product (skip on retry to avoid duplicate sends)
+        if not skip_media:
+            first = products[0]
+            ma_sp = first.get("ma_sp", "")
+            lark_media = await get_product_media_urls(ma_sp) if ma_sp else {}
+            lark_anh = lark_media.get("anh", [])
+            if lark_anh:
+                await send_image(sender_id, lark_anh[0])
+            else:
+                cloudinary = (first.get("link_anh_ma") or [])
+                if cloudinary:
+                    await send_image(sender_id, cloudinary[0])
         return format_products_for_llm(products)
 
     if name == "get_product_detail":
@@ -337,11 +339,13 @@ async def run(sender_id: str, user_text: str) -> None:
     messages = build_messages(ctx, user_text, plan=plan)
 
     # --- Generate → Evaluate → Retry loop (max _MAX_EVAL_RETRIES) ---
-    _MAX_EVAL_RETRIES = 2
+    _MAX_EVAL_RETRIES = 3
     cost = 0.0
     tool_calls: list[dict] = []
     text_reply: str | None = None
+    tool_results: list[dict] = []
     tool_results_summary = ""
+    is_retry = False  # True after first attempt — skip media re-sends
 
     for attempt in range(_MAX_EVAL_RETRIES + 1):
         text_reply, tool_calls, call_cost = await llm_call_with_tools(
@@ -352,7 +356,7 @@ async def run(sender_id: str, user_text: str) -> None:
         # --- Execute tools ---
         if tool_calls:
             results = await asyncio.gather(
-                *[_execute_tool(tc, sender_id, ctx) for tc in tool_calls]
+                *[_execute_tool(tc, sender_id, ctx, skip_media=is_retry) for tc in tool_calls]
             )
             tool_results = [
                 {"role": "tool", "tool_call_id": tc["id"], "content": result}
@@ -389,7 +393,7 @@ async def run(sender_id: str, user_text: str) -> None:
             break
 
         tool_names_called = [tc["function"]["name"] for tc in tool_calls]
-        passed, feedback = await evaluate_response(
+        passed, rerun_search, feedback = await evaluate_response(
             user_text=user_text,
             plan=plan,
             response=candidate,
@@ -401,15 +405,43 @@ async def run(sender_id: str, user_text: str) -> None:
             text_reply = candidate
             break
 
-        # Inject evaluator feedback and retry
-        logger.warning("evaluator FAIL attempt={} feedback={!r} — retrying", attempt + 1, feedback)
+        # Inject evaluator feedback and rebuild messages for retry
+        logger.warning(
+            "evaluator FAIL attempt={} rerun_search={} feedback={!r} — retrying",
+            attempt + 1, rerun_search, feedback,
+        )
         retry_note = (
             f"[ĐÁNH GIÁ LẦN {attempt + 1}]\n"
             f"Câu trả lời vừa rồi CHƯA ĐẠT. Lý do: {feedback}\n"
             f"Hãy trả lời lại đúng theo kế hoạch ban đầu."
         )
-        messages = build_messages(ctx, user_text, plan=plan)
-        messages.append({"role": "system", "content": retry_note})
+
+        if rerun_search:
+            # Re-run full generate+tool cycle with fresh messages + feedback
+            # skip_media=True so we don't re-send images already delivered
+            is_retry = True
+            messages = build_messages(ctx, user_text, plan=plan)
+            messages.append({"role": "system", "content": retry_note})
+        else:
+            # Data is OK — only regenerate final text using existing tool results
+            is_retry = True
+            if tool_calls and tool_results:
+                assistant_turn = {
+                    "role": "assistant",
+                    "content": text_reply,
+                    "tool_calls": tool_calls,
+                }
+                messages = (
+                    build_messages(ctx, user_text, plan=plan)
+                    + [assistant_turn]
+                    + tool_results
+                    + [{"role": "system", "content": retry_note}]
+                )
+                # Clear tool_calls so the next loop iteration skips tool execution
+                tool_calls = []
+            else:
+                messages = build_messages(ctx, user_text, plan=plan)
+                messages.append({"role": "system", "content": retry_note})
 
     reply = text_reply or _FALLBACK_REPLY
     ctx.state = "active"

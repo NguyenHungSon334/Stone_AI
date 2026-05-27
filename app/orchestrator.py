@@ -205,6 +205,16 @@ async def _execute_tool(
         products = await search_products(args["query"], slots)
         if not products:
             return _NO_PRODUCTS_TOOL_RESULT
+        # Send all images + videos of top-1 product (once per ma_sp across retries)
+        top = products[0]
+        ma_sp = top.get("ma_sp", "")
+        if ma_sp and ma_sp not in sent_ma_sp:
+            sent_ma_sp.add(ma_sp)
+            lark = await get_product_media_urls(ma_sp)
+            for url in lark.get("anh", []):
+                await _send_image_dedup(sender_id, url, sent_urls)
+            for url in lark.get("video", []):
+                await _send_video_dedup(sender_id, url, sent_urls)
         return format_products_for_llm(products)
 
     if name == "get_product_detail":

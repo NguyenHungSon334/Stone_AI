@@ -84,7 +84,7 @@ def build_messages(
         messages.append({"role": "system", "content": note})
 
     if plan:
-        messages.append({"role": "system", "content": f"[KẾ HOẠCH TRẢ LỜI]\n{plan}\n\nThực hiện đúng HANH_DONG và ARGS ở trên."})
+        messages.append({"role": "system", "content": f"[KẾ HOẠCH TRẢ LỜI]\n{plan}\n\nBẮT BUỘC: Gọi đúng các tools trong field TOOLS ở trên với ARGS đã chỉ định."})
 
     messages.extend(ctx.history)
     messages.append({"role": "user", "content": user_text})

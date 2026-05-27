@@ -15,24 +15,31 @@ _PLANNER_SYSTEM = """Bạn phân tích tin nhắn khách hàng cho bot tư vấn
 
 INTENT: <mua_san_pham | hoi_gia | hoi_chi_tiet | xem_anh_video | chao_hoi | thac_mac_khac>
 SAN_PHAM: <loại sản phẩm + hình dạng + loại đá + kích thước nếu có, hoặc "chưa rõ">
-HANH_DONG: <goi_search_products | goi_get_detail | goi_get_media | chi_tra_loi | hoi_them_truoc>
-ARGS: <tham số cụ thể: query, project_type, stone_type, ma_sp, v.v.>
+TOOLS: <danh sách tên tool thực cần gọi, phân cách bằng dấu phẩy, hoặc "none">
+ARGS: <tham số cụ thể cho từng tool: query, project_type, stone_type, ma_sp, v.v.>
 HUONG_TRA_LOI: <tập trung gợi ý điểm gì, câu hỏi tiếp theo nên hỏi gì>
 
-Quy tắc phân loại HANH_DONG:
-- goi_search_products: khách nêu loại sản phẩm (mộ tròn, cổng...) hoặc hỏi giá/mẫu/so sánh
-- goi_get_detail: khách hỏi chi tiết 1 sản phẩm cụ thể (đã biết mã SP)
-- goi_get_media: khách muốn xem ảnh/video
-- chi_tra_loi: câu hỏi chung về đá/quy trình không cần tra kho
-- hoi_them_truoc: chưa đủ thông tin để search (ví dụ chỉ nói "mua đá" không biết loại gì)
+Tên tools thực tế (dùng đúng tên này):
+- search_products: khách nêu loại sản phẩm (mộ tròn, cổng...) hoặc hỏi giá/mẫu/so sánh
+- get_product_detail: khách hỏi chi tiết 1 sản phẩm cụ thể (đã biết mã SP)
+- get_media: khách muốn xem ảnh/hình mẫu/video. Nếu chưa có mã SP thì dùng search_products trước, sau đó get_media
+- update_customer: khách cung cấp tên, SĐT, địa điểm, loại đá, hạng mục
+- none: câu hỏi chung về đá/quy trình không cần tra kho, hoặc chưa đủ thông tin để search
 
 Ví dụ:
 Khách: "tôi muốn mua mộ tròn đá xanh đen"
 INTENT: mua_san_pham
 SAN_PHAM: mộ tròn, đá xanh đen
-HANH_DONG: goi_search_products
+TOOLS: search_products
 ARGS: query="mộ tròn đá xanh đen", project_type="mộ tròn", stone_type="xanh đen"
-HUONG_TRA_LOI: gợi ý sản phẩm mộ tròn xanh đen cụ thể, hỏi thêm kích thước hoặc địa điểm"""
+HUONG_TRA_LOI: gợi ý sản phẩm mộ tròn xanh đen cụ thể, hỏi thêm kích thước hoặc địa điểm
+
+Khách: "cho tôi xem ảnh mẫu"
+INTENT: xem_anh_video
+SAN_PHAM: chưa rõ
+TOOLS: search_products, get_media
+ARGS: query="sản phẩm đá lăng mộ", ma_sp=(dùng mã SP từ kết quả search)
+HUONG_TRA_LOI: tìm sản phẩm phù hợp với ngữ cảnh, gửi ảnh ngay"""
 
 
 async def plan_response(user_text: str, ctx: ConversationContext) -> str:

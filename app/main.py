@@ -63,14 +63,6 @@ async def lifespan(app: FastAPI):
 
     logger.info("SpiritStone AI starting env={}", settings.environment)
 
-    # Warm up embedding model to avoid cold-start latency on first user message
-    try:
-        from app.llm import embed
-        await embed("warm up")
-        logger.info("embedding warm-up done")
-    except Exception:
-        logger.warning("embedding warm-up failed (non-fatal)")
-
     yield
     await close_http_client()
     logger.info("SpiritStone AI shutdown")

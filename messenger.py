@@ -385,7 +385,9 @@ async def _process(psid: str, text: str) -> None:
         return
     async with _SEM:
         await send_action(psid, "typing_on")
-        is_new = brain.is_new_customer(psid)           # check TRƯỚC khi brain ghi lịch sử
+        # to_thread: is_new_customer có thể chạm Firebase (cache miss) - offload để
+        # Firebase chậm/chết không block event loop (mọi khách khác đứng).
+        is_new = await asyncio.to_thread(brain.is_new_customer, psid)  # TRƯỚC khi brain ghi lịch sử
         t0 = time.monotonic()
         try:
             reply = await brain.answer(psid, text)

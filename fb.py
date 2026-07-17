@@ -36,7 +36,10 @@ def _init() -> bool:
             import firebase_admin
             from firebase_admin import credentials
             cred = credentials.Certificate(config.FIREBASE_CRED)
-            _app = firebase_admin.initialize_app(cred, {"databaseURL": config.FIREBASE_DB_URL})
+            # httpTimeout: default 120s quá dài - Firebase chậm/chết sẽ treo op tới 2 phút.
+            # 10s: hỏng nhanh, cache local đỡ, write nền chết lặng lẽ (tự lành lượt sau).
+            _app = firebase_admin.initialize_app(
+                cred, {"databaseURL": config.FIREBASE_DB_URL, "httpTimeout": 10})
         except Exception as e:
             print(f"[fb] init lỗi: {type(e).__name__}: {e}", file=sys.stderr)
             _app = None

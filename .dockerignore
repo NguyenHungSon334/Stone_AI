@@ -1,6 +1,9 @@
 # Không nhét vào image: secret, dữ liệu runtime, rác build.
 .env
 .env.bak
+firebase-key.json
+*-firebase-adminsdk-*.json
+hon-da-c0444-67c2f3e5de10.json
 data/
 conversations/
 stats/

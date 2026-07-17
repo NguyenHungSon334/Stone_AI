@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import config
+import fb
 
 _STATS_DIR = config.ROOT / "stats"
 _EVENTS = _STATS_DIR / "events.jsonl"
@@ -30,6 +31,7 @@ def log_event(kind: str, psid: str, duration_s: float | None = None, note: str =
             _STATS_DIR.mkdir(parents=True, exist_ok=True)
             with _EVENTS.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        fb.mirror_event(row)
     except Exception as e:
         print(f"[stats] ghi lỗi: {type(e).__name__}: {e}", file=sys.stderr)
 
@@ -43,6 +45,7 @@ def log_usage(psid: str, tok_in: int, tok_out: int) -> None:
             _STATS_DIR.mkdir(parents=True, exist_ok=True)
             with _EVENTS.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        fb.mirror_event(row)
     except Exception as e:
         print(f"[stats] ghi usage lỗi: {type(e).__name__}: {e}", file=sys.stderr)
 

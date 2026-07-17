@@ -11,6 +11,9 @@ services:
       - PYTHONIOENCODING=utf-8
     volumes:
       - ./.env:/app/.env                              # cấu hình + secret (sửa qua dashboard)
+      # Firebase (nguồn chính conversations + stats): scp key lên VPS cạnh compose.
+      # .env đã đặt FIREBASE_CRED khớp tên file dưới + FIREBASE_DB_URL.
+      - ./hon-da-c0444-67c2f3e5de10.json:/app/hon-da-c0444-67c2f3e5de10.json:ro
       - ./data/conversations:/app/conversations       # lịch sử chat + <psid>.crm.json
       - ./data/stats:/app/stats                       # thống kê token/chi phí/sự kiện
       - ./data/docs:/app/Document_ChatBot_Mess        # persona + bảng sản phẩm (seed lần đầu)

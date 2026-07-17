@@ -20,6 +20,7 @@ from google import genai
 from google.genai import types
 
 import config
+import fb
 import stats
 from bot_tools import lark_image
 from bot_tools.find_by_price import parse_money, render, rows_by_ids, search
@@ -182,8 +183,11 @@ def _psid_path(psid: str) -> Path:
 
 
 def is_new_customer(psid: str) -> bool:
-    """Khách chưa có file lịch sử = lần đầu nhắn. Messenger dùng để báo admin."""
-    return not _psid_path(psid).exists()
+    """Khách lần đầu nhắn (báo admin). Cache local miss -> hỏi Firebase (đĩa mới,
+    khách có thể đã tồn tại). Chỉ 1 lần/khách/đĩa; Firebase tắt -> fetch trả None ngay."""
+    if _psid_path(psid).exists():
+        return False
+    return fb.fetch_conversation(psid) is None
 
 
 def _followup_mark(psid: str) -> Path:
@@ -239,21 +243,35 @@ def mark_followed(psid: str, last_user_at: str) -> None:
 
 
 def _load_hist(psid: str) -> list:
-    """Toàn bộ log 1 khách ([] nếu chưa có)."""
+    """Toàn bộ log 1 khách. Cache local trước; miss -> kéo Firebase, ghi cache. [] nếu chưa có."""
     try:
         return json.loads(_psid_path(psid).read_text(encoding="utf-8"))
     except Exception:
-        return []
+        pass
+    remote = fb.fetch_conversation(psid)            # cache miss -> nguồn chính Firebase
+    if remote:
+        try:
+            _write_local_hist(psid, remote)         # nạp lại cache cho lần sau
+        except Exception as e:
+            print(f"[hist] cache miss, ghi local lỗi psid={psid}: {type(e).__name__}: {e}", file=sys.stderr)
+        return remote
+    return []
+
+
+def _write_local_hist(psid: str, full_msgs: list) -> None:
+    """Ghi cache local (atomic tmp+rename -> không hỏng file khi chết giữa chừng)."""
+    _HIST_DIR.mkdir(parents=True, exist_ok=True)
+    p = _psid_path(psid)
+    tmp = p.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(full_msgs, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(p)
 
 
 def _save_hist(psid: str, full_msgs: list) -> None:
-    """Ghi TOÀN BỘ log khách (không cắt). Ghi tạm rồi rename -> không hỏng file khi chết giữa chừng."""
+    """Ghi TOÀN BỘ log khách: cache local + Firebase (nguồn chính, thread nền)."""
     try:
-        _HIST_DIR.mkdir(parents=True, exist_ok=True)
-        p = _psid_path(psid)
-        tmp = p.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(full_msgs, ensure_ascii=False), encoding="utf-8")
-        tmp.replace(p)
+        _write_local_hist(psid, full_msgs)
+        fb.mirror_conversation(psid, full_msgs)
     except Exception as e:
         print(f"[hist] ghi lỗi psid={psid}: {type(e).__name__}: {e}", file=sys.stderr)
 

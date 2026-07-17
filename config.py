@@ -64,6 +64,11 @@ FOLLOWUP_ENABLED = os.getenv("BOT_FOLLOWUP_ENABLED", "1").strip() not in ("0", "
 FOLLOWUP_AFTER_H = float(os.getenv("BOT_FOLLOWUP_AFTER_H", "4"))     # im bao lâu thì nhắc
 FOLLOWUP_CHECK_MIN = int(os.getenv("BOT_FOLLOWUP_CHECK_MIN", "15"))  # chu kỳ quét
 
+# Firebase Realtime DB: mirror conversations + stats lên cloud (backup/xem remote).
+# Cả 2 trống -> tắt hẳn. FIREBASE_CRED = path service account json; DB_URL = link RTDB.
+FIREBASE_CRED = os.getenv("FIREBASE_CRED", "").strip()
+FIREBASE_DB_URL = os.getenv("FIREBASE_DB_URL", "").strip()
+
 
 def reload_env() -> None:
     """Đọc lại .env và cập nhật các giá trị chỉnh được từ dashboard (ăn ngay, không restart).

@@ -319,6 +319,20 @@ def _merge_texts(texts: list[str]) -> str:
     return _IMG_EVENT if texts else ""
 
 
+_FOLLOWUP_TEXT = ("Dạ Bác ơi 🌸 Không biết Bác còn đang phân vân mẫu nào không ạ? "
+                  "Bác cứ nhắn em, em tư vấn thêm và gửi mẫu phù hợp cho Bác nhé!")
+
+
+async def run_followups() -> None:
+    """Quét khách im sau trả lời (chưa chốt) -> gửi 1 tin nhắc nhẹ. Chạy định kỳ từ app."""
+    for psid, last_user_at in brain.followup_candidates(config.FOLLOWUP_AFTER_H):
+        if psid in config.ADMIN_UIDS:
+            continue
+        await send_text(psid, _FOLLOWUP_TEXT)
+        brain.mark_followed(psid, last_user_at)
+        stats.log_event("followup", psid)
+
+
 async def _save_lead_to_crm(psid: str) -> None:
     """Handoff: trích lead từ hội thoại -> ghi Lark CRM. Best-effort, lỗi chỉ báo admin."""
     lead = await brain.extract_lead(psid)

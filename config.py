@@ -59,6 +59,11 @@ DASH_TOKEN = os.getenv("BOT_DASH_TOKEN", "").strip()
 PRICE_IN_USD = float(os.getenv("GEMINI_PRICE_IN_USD", "1.5"))
 PRICE_OUT_USD = float(os.getenv("GEMINI_PRICE_OUT_USD", "9.0"))
 
+# Follow-up: khách im sau khi bot trả lời, chưa chốt -> nhắc nhẹ 1 tin (trong cửa sổ 24h FB).
+FOLLOWUP_ENABLED = os.getenv("BOT_FOLLOWUP_ENABLED", "1").strip() not in ("0", "", "false")
+FOLLOWUP_AFTER_H = float(os.getenv("BOT_FOLLOWUP_AFTER_H", "4"))     # im bao lâu thì nhắc
+FOLLOWUP_CHECK_MIN = int(os.getenv("BOT_FOLLOWUP_CHECK_MIN", "15"))  # chu kỳ quét
+
 
 def reload_env() -> None:
     """Đọc lại .env và cập nhật các giá trị chỉnh được từ dashboard (ăn ngay, không restart).

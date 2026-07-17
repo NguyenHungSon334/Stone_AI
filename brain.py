@@ -186,6 +186,58 @@ def is_new_customer(psid: str) -> bool:
     return not _psid_path(psid).exists()
 
 
+def _followup_mark(psid: str) -> Path:
+    return _HIST_DIR / (_psid_path(psid).stem + ".followup")
+
+
+def followup_candidates(after_h: float, max_h: float = 23.0) -> list[tuple[str, str]]:
+    """Khách cần nhắc: bot đã trả lời cuối, khách im trong [after_h, max_h) giờ, CHƯA chốt.
+
+    max_h < 24 để còn trong cửa sổ 24h của FB (gửi RESPONSE hợp lệ). Trả [(psid, last_user_at)].
+    Đã nhắc lượt này (mark == last_user_at) hoặc đã chốt (có .crm.json) -> bỏ.
+    """
+    out: list[tuple[str, str]] = []
+    if not _HIST_DIR.exists():
+        return out
+    now = datetime.now()
+    for p in _HIST_DIR.glob("*.json"):
+        if p.name.endswith(".crm.json"):              # bỏ file meta CRM
+            continue
+        psid = p.stem
+        try:
+            msgs = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not msgs or msgs[-1].get("role") != "assistant":   # khách nhắn cuối -> đang chờ bot, bỏ
+            continue
+        last_user_at = next((m.get("at") for m in reversed(msgs)
+                             if m.get("role") == "user" and m.get("at")), None)
+        if not last_user_at:
+            continue
+        try:
+            age_h = (now - datetime.strptime(last_user_at, "%Y-%m-%d %H:%M:%S")).total_seconds() / 3600
+        except ValueError:
+            continue
+        if not (after_h <= age_h < max_h):
+            continue
+        if (_HIST_DIR / f"{psid}.crm.json").exists():          # đã chốt phiếu -> thôi
+            continue
+        mark = _followup_mark(psid)
+        if mark.exists() and mark.read_text(encoding="utf-8").strip() == last_user_at:
+            continue                                           # đã nhắc đúng lượt này
+        out.append((psid, last_user_at))
+    return out
+
+
+def mark_followed(psid: str, last_user_at: str) -> None:
+    """Đánh dấu đã nhắc khách ở lượt này (theo mốc tin khách cuối) -> không nhắc lặp."""
+    try:
+        _HIST_DIR.mkdir(parents=True, exist_ok=True)
+        _followup_mark(psid).write_text(last_user_at, encoding="utf-8")
+    except Exception as e:
+        print(f"[followup] mark lỗi psid={psid}: {type(e).__name__}: {e}", file=sys.stderr)
+
+
 def _load_hist(psid: str) -> list:
     """Toàn bộ log 1 khách ([] nếu chưa có)."""
     try:

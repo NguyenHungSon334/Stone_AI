@@ -103,7 +103,7 @@ async def customer_detail(request: Request, psid: str):
         raise HTTPException(404, "không có khách này")
     msgs = json.loads(p.read_text(encoding="utf-8"))
     # Chỉ trả turn text (log sạch của brain.py đã là text, phòng hờ lọc block).
-    clean = [{"role": m.get("role"), "text": m["content"]}
+    clean = [{"role": m.get("role"), "text": m["content"], "at": m.get("at", "")}
              for m in msgs if isinstance(m.get("content"), str)]
     return {"psid": psid, "name": await _profile_name(safe), "messages": clean}
 
@@ -210,11 +210,15 @@ async def save_env(request: Request):
 
 @router.post("/api/restart")
 async def restart_bot(request: Request):
-    """Restart bot: spawn process mới (chờ 2s cho port nhả) rồi tự thoát process này.
+    """Restart bot. 2 chế độ theo môi trường:
 
-    ponytail: mất log stdout của process mới (detached); chạy service/PM2 thì thay bằng cơ chế đó.
+    - RESTART_MODE=exit (Docker/systemd): thoát process, cơ chế 'restart: always' dựng lại.
+    - mặc định (Windows local dev): spawn process mới rồi thoát process cũ.
     """
     _check_token(request)
+    if os.getenv("RESTART_MODE") == "exit":
+        asyncio.get_running_loop().call_later(0.5, os._exit, 0)   # compose/systemd dựng lại
+        return {"ok": True, "message": "đang restart (container tự dựng lại), chờ ~5 giây"}
     flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
     cmd = [sys.executable, "-c",
            ("import time, subprocess, sys; time.sleep(2); "

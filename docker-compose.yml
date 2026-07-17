@@ -1,0 +1,37 @@
+# Chạy trên VPS: docker compose up -d
+# 2 service: bot (uvicorn) + caddy (reverse proxy tự lấy SSL Let's Encrypt).
+# State (lịch sử khách, stats, CRM meta, persona) nằm ở ./data + ./.env trên HOST -> update image không mất.
+
+services:
+  bot:
+    image: ${IMAGE:-hondastone-bot:latest}
+    restart: always
+    environment:
+      - RESTART_MODE=exit          # nút Restart trên dashboard -> thoát, compose tự dựng lại
+      - PYTHONIOENCODING=utf-8
+    volumes:
+      - ./.env:/app/.env                              # cấu hình + secret (sửa qua dashboard)
+      - ./data/conversations:/app/conversations       # lịch sử chat + <psid>.crm.json
+      - ./data/stats:/app/stats                       # thống kê token/chi phí/sự kiện
+      - ./data/docs:/app/Document_ChatBot_Mess        # persona + bảng sản phẩm (seed lần đầu)
+    expose:
+      - "7900"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - DOMAIN=${DOMAIN:?đặt DOMAIN trong .env deploy, vd hondastone.duckdns.org}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data          # cert Let's Encrypt (giữ qua restart, tránh xin lại bị rate-limit)
+      - caddy_config:/config
+    depends_on:
+      - bot
+
+volumes:
+  caddy_data:
+  caddy_config:

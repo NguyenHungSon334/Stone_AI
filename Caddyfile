@@ -1,0 +1,5 @@
+# Caddy tự xin + gia hạn SSL Let's Encrypt cho DOMAIN, proxy về bot:7900.
+# DOMAIN lấy từ biến môi trường (docker-compose truyền vào).
+{$DOMAIN} {
+	reverse_proxy bot:7900
+}

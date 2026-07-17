@@ -213,8 +213,13 @@ def _to_contents(msgs: list) -> list[types.Content]:
             for m in msgs if isinstance(m.get("content"), str) and m["content"]]
 
 
+def _now_str() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
 def _answer_sync(psid: str, text: str) -> str:
     client = _get_client()
+    user_at = _now_str()                              # mốc khách gửi (lúc bắt đầu xử lý)
     with _psid_lock(psid):
         full = _load_hist(psid)                       # toàn bộ log
         contents = _to_contents(full[-_MAX_TURNS * 2:])  # chỉ nạp N lượt cuối cho API
@@ -254,15 +259,71 @@ def _answer_sync(psid: str, text: str) -> str:
                 reply = reply + " " + markers
             stats.log_usage(psid, tok_in, tok_out)
             # Nối vào log SẠCH: chỉ text turn (bỏ vòng tool trung gian) -> không orphan tool block.
-            _save_hist(psid, full + [{"role": "user", "content": text},
-                                     {"role": "assistant", "content": reply}])
+            # "at" = thời gian cụ thể: khách gửi lúc nào, bot trả lúc nào.
+            _save_hist(psid, full + [{"role": "user", "content": text, "at": user_at},
+                                     {"role": "assistant", "content": reply, "at": _now_str()}])
             return reply
         raise BrainError("Quá nhiều vòng tool, không chốt được câu trả lời.")
+
+
+_LEAD_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "ten": {"type": "string", "description": "Tên thật của khách (không phải 'Bác'/'Anh'). Rỗng nếu chưa rõ."},
+        "sdt": {"type": "string", "description": "Số điện thoại khách. Rỗng nếu chưa có."},
+        "dia_chi": {"type": "string", "description": "Địa chỉ/nơi thi công đầy đủ như khách nói. Rỗng nếu chưa rõ."},
+        "tinh": {"type": "string", "description": "Tỉnh/Thành phố (1 trong danh sách cho sẵn, khớp CHÍNH XÁC). Rỗng nếu không rõ."},
+        "khu_vuc": {"type": "string", "enum": ["Miền Bắc", "Miền Trung", "Miền Nam", ""],
+                    "description": "Suy từ tỉnh. Rỗng nếu không rõ tỉnh."},
+        "tom_tat": {"type": "string", "description": "Tóm tắt hội thoại 2-4 câu: nhu cầu, hạng mục, loại đá, thời gian, điểm cần lưu ý cho sale."},
+    },
+    "required": ["ten", "sdt", "dia_chi", "tinh", "khu_vuc", "tom_tat"],
+}
+
+_TINH_OPTIONS = ("Hà Nội, Hải Phòng, Quảng Ninh, Bắc Giang, Bắc Ninh, Hải Dương, Hưng Yên, Vĩnh Phúc, "
+                 "Hà Nam, Nam Định, Ninh Bình, Thái Bình, Phú Thọ, Thái Nguyên, Tuyên Quang, Lào Cai, "
+                 "Yên Bái, Điện Biên, Lai Châu, Sơn La, Hòa Bình, Hà Giang, Cao Bằng, Bắc Kạn, Lạng Sơn, "
+                 "Thanh Hóa, Nghệ An, Hà Tĩnh, Quảng Bình, Quảng Trị, Thừa Thiên Huế, Da Nang, Quảng Nam, "
+                 "Quảng Ngãi, Bình Định, Phú Yên, Khánh Hòa, Ninh Thuận, Bình Thuận, Kon Tum, Gia Lai, "
+                 "Đắk Lắk, Đắk Nông, Lâm Đồng, Ho Chi Minh City, Cần Thơ, Bình Dương, Đồng Nai, "
+                 "Bà Rịa - Vũng Tàu, Tây Ninh, Bình Phước, Long An, Tiền Giang, Bến Tre, Trà Vinh, "
+                 "Vĩnh Long, Đồng Tháp, An Giang, Kiên Giang, Hậu Giang")
+
+
+def _extract_lead_sync(psid: str) -> dict | None:
+    """Trích thông tin lead + tóm tắt từ hội thoại khách. None nếu không có SĐT / lỗi."""
+    hist = _load_hist(psid)
+    if not hist:
+        return None
+    convo = "\n".join(f"{'Khách' if m.get('role') == 'user' else 'Bot'}: {m.get('content', '')}"
+                      for m in hist if isinstance(m.get("content"), str))
+    prompt = (f"Trích thông tin khách từ hội thoại dưới đây thành JSON. "
+              f"Tỉnh/Thành phố PHẢI chọn khớp chính xác 1 trong: {_TINH_OPTIONS}.\n\n{convo}")
+    try:
+        resp = _get_client().models.generate_content(
+            model=_model_id(),
+            contents=[types.Content(role="user", parts=[types.Part.from_text(text=prompt)])],
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json", response_json_schema=_LEAD_SCHEMA,
+                max_output_tokens=2048),
+        )
+        cand = (resp.candidates or [None])[0]
+        raw = "".join(p.text for p in (cand.content.parts or []) if p.text) if cand and cand.content else ""
+        lead = json.loads(raw)
+        return lead if (lead.get("sdt") or "").strip() else None
+    except Exception as e:
+        print(f"[lead] trích lỗi psid={psid}: {type(e).__name__}: {e}", file=sys.stderr)
+        return None
 
 
 async def answer(psid: str, text: str) -> str:
     """Trả lời 1 tin của khách. Chạy API trong thread để không chặn event loop."""
     return await asyncio.to_thread(_answer_sync, psid, text)
+
+
+async def extract_lead(psid: str) -> dict | None:
+    """Trích lead (async wrapper). Gọi khi handoff để ghi vào CRM."""
+    return await asyncio.to_thread(_extract_lead_sync, psid)
 
 
 if __name__ == "__main__":

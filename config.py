@@ -40,6 +40,10 @@ LARK_APP_ID = os.getenv("LARK_APP_ID", "").strip()
 LARK_APP_SECRET = os.getenv("LARK_APP_SECRET", "").strip()
 LARK_BASE_APP_TOKEN = os.getenv("LARK_BASE_APP_TOKEN", "Uj9FbhUZWa6y5PsjsDyl0i1egsf").strip()
 LARK_TABLE_ID = os.getenv("LARK_TABLE_ID", "tbl1grmn4hpj4Pih").strip()
+
+# Base CRM (RIÊNG base ảnh SP) - ghi lead khi bot thu đủ thông tin khách.
+LARK_CRM_APP_TOKEN = os.getenv("LARK_CRM_APP_TOKEN", "GtRhbgyWaaKeicstUkIlWKuegqg").strip()
+LARK_CRM_TABLE_ID = os.getenv("LARK_CRM_TABLE_ID", "tblkwMvDQkG4NB3m").strip()
 LARK_PRODUCT_FIELD = os.getenv("LARK_PRODUCT_FIELD", "Mã Sản Phẩm").strip()
 LARK_IMAGE_FIELD = os.getenv("LARK_IMAGE_FIELD", "Ảnh").strip()
 PORT = int(os.getenv("PORT", "7900"))

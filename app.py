@@ -64,6 +64,10 @@ async def events(request: Request):
         t = asyncio.create_task(messenger.handle_event(psid, text))
         _BG.add(t)
         t.add_done_callback(_BG.discard)
+    for comment_id, from_id in messenger.parse_comment_events(payload):
+        t = asyncio.create_task(messenger.handle_comment(comment_id, from_id))
+        _BG.add(t)
+        t.add_done_callback(_BG.discard)
     return JSONResponse({"ok": True})
 
 

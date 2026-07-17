@@ -391,7 +391,7 @@ async function openCustomer(psid) {
     document.getElementById("detailTitle").textContent =
       (d.name ? d.name + " · " : "") + "PSID " + psid;
     document.getElementById("chatlog").innerHTML = d.messages.map(m =>
-      `<div class="msg ${m.role}"><div class="who">${m.role === "user" ? "Khách" : "Bot"}</div>${escapeHtml(m.text)}</div>`).join("");
+      `<div class="msg ${m.role}"><div class="who">${m.role === "user" ? "Khách" : "Bot"}${m.at ? ` · ${m.at}` : ""}</div>${escapeHtml(m.text)}</div>`).join("");
     document.getElementById("customerList").classList.add("hidden");
     document.getElementById("customerDetail").classList.remove("hidden");
     const log = document.getElementById("chatlog");

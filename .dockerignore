@@ -1,0 +1,14 @@
+# Không nhét vào image: secret, dữ liệu runtime, rác build.
+.env
+.env.bak
+data/
+conversations/
+stats/
+*.crm.json
+.git/
+.gitignore
+__pycache__/
+*.pyc
+.claude/
+*.log
+DEPLOY.md

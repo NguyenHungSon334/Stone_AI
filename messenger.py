@@ -14,7 +14,7 @@ import httpx
 import brain
 import config
 import stats
-from bot_tools import lark_image
+from bot_tools import lark_crm, lark_image
 
 _MAX_IMAGES_PER_MSG = 4   # khớp brain._MAX_NEW_IMAGES
 
@@ -54,6 +54,14 @@ async def notify_admins(text: str) -> None:
 
 # Cache tên FB theo psid (RAM). Dùng cho thông báo admin + trang admin.
 _NAME_CACHE: dict[str, str] = {}
+_NAME_CACHE_MAX = 5000            # trần chống phình vô hạn; vượt -> bỏ 1000 entry cũ nhất (FIFO)
+
+
+def _cache_name(pid: str, name: str) -> None:
+    if len(_NAME_CACHE) >= _NAME_CACHE_MAX and pid not in _NAME_CACHE:
+        for k in list(_NAME_CACHE)[:1000]:            # dict giữ thứ tự chèn -> đầu = cũ nhất
+            _NAME_CACHE.pop(k, None)
+    _NAME_CACHE[pid] = name
 
 
 async def _names_from_conversations() -> None:
@@ -72,7 +80,7 @@ async def _names_from_conversations() -> None:
                     for p in (conv.get("participants", {}).get("data") or []):
                         pid, name = str(p.get("id", "")), p.get("name", "")
                         if pid and name:
-                            _NAME_CACHE[pid] = name
+                            _cache_name(pid, name)
                 nxt = (d.get("paging") or {}).get("next")
                 if not nxt:
                     break
@@ -87,7 +95,9 @@ async def profile_name(psid: str) -> str:
         return ""
     if psid not in _NAME_CACHE:
         await _names_from_conversations()
-    return _NAME_CACHE.setdefault(psid, "")   # vẫn không có -> cache rỗng, khỏi gọi lặp
+    if psid not in _NAME_CACHE:
+        _cache_name(psid, "")                 # vẫn không có -> cache rỗng, khỏi gọi lặp
+    return _NAME_CACHE[psid]
 
 
 async def _label(psid: str) -> str:
@@ -112,8 +122,98 @@ def verify_signature(raw_body: bytes, header_sig: str) -> bool:
     return hmac.compare_digest(expected, header_sig.split("=", 1)[1].strip())
 
 
+# Tin public + private khi khách comment (giới thiệu + hỏi nhu cầu, mời vào inbox).
+_PUBLIC_REPLY = "Dạ em cảm ơn Bác đã quan tâm tới Hồn Đá ạ! 🌸"
+_PRIVATE_REPLY = ("Dạ em chào Bác ạ 🌸 Em là Thảo Vân, trợ lý bên Đá mỹ nghệ Hồn Đá. "
+                  "Em thấy Bác quan tâm tới sản phẩm bên em. Bác đang tìm hiểu mẫu nào ạ - "
+                  "Mộ đá, Long đình, Cổng hay Lan can đá? Em tư vấn chi tiết cho Bác nhé!")
+
+_SEEN_COMMENTS: dict[str, float] = {}     # comment_id -> ts, chống xử lý trùng khi FB gửi lại
+_SEEN_MAX = 5000
+
+
+def _comment_seen(cid: str) -> bool:
+    """True nếu comment_id đã xử lý. Dọn entry cũ > 6h khi dict phình."""
+    now = time.monotonic()
+    if len(_SEEN_COMMENTS) > _SEEN_MAX:
+        cutoff = now - 6 * 3600
+        for k in [k for k, v in _SEEN_COMMENTS.items() if v < cutoff]:
+            _SEEN_COMMENTS.pop(k, None)
+    if cid in _SEEN_COMMENTS:
+        return True
+    _SEEN_COMMENTS[cid] = now
+    return False
+
+
+def parse_comment_events(payload: dict):
+    """[(comment_id, from_id)] từ webhook feed. Bỏ comment của chính Page, verb != add, đã xử lý."""
+    out = []
+    if not isinstance(payload, dict) or payload.get("object") != "page":
+        return out
+    for entry in payload.get("entry", []) or []:
+        page_id = str(entry.get("id", ""))
+        for ch in (entry.get("changes") or []):
+            v = ch.get("value") or {}
+            if v.get("item") != "comment" or v.get("verb") != "add":
+                continue
+            cid = str(v.get("comment_id") or "")
+            from_id = str((v.get("from") or {}).get("id") or "")
+            if not cid or not from_id or from_id == page_id:   # bỏ comment của Page (chống loop)
+                continue
+            if _comment_seen(cid):
+                continue
+            out.append((cid, from_id))
+    return out
+
+
+async def reply_public(comment_id: str) -> None:
+    """Trả lời công khai dưới comment: cảm ơn."""
+    if not (config.PAGE_TOKEN and comment_id):
+        return
+    url = f"https://graph.facebook.com/{config.GRAPH_VER}/{comment_id}/comments"
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=10.0)) as c:
+            r = await c.post(url, params={"access_token": config.PAGE_TOKEN},
+                             json={"message": _PUBLIC_REPLY})
+            if r.status_code >= 400:
+                print(f"[comment-public] {r.status_code}: {r.text[:300]}", file=sys.stderr)
+    except Exception as e:
+        print(f"[comment-public] {type(e).__name__}: {e}", file=sys.stderr)
+
+
+async def reply_private(comment_id: str) -> None:
+    """Nhắn RIÊNG vào inbox người comment (private reply - FB chỉ cho 1 lần/comment)."""
+    if not (config.PAGE_TOKEN and comment_id):
+        return
+    url = _SEND_API.format(ver=config.GRAPH_VER)
+    body = {"recipient": {"comment_id": comment_id}, "message": {"text": _PRIVATE_REPLY}}
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=10.0)) as c:
+            r = await c.post(url, params={"access_token": config.PAGE_TOKEN}, json=body)
+            if r.status_code >= 400:
+                print(f"[comment-private] {r.status_code}: {r.text[:300]}", file=sys.stderr)
+    except Exception as e:
+        print(f"[comment-private] {type(e).__name__}: {e}", file=sys.stderr)
+
+
+async def handle_comment(comment_id: str, from_id: str) -> None:
+    """1 comment: cảm ơn công khai + nhắn riêng mời vào inbox. Lỗi 1 kênh không chặn kênh kia."""
+    await reply_public(comment_id)
+    await reply_private(comment_id)
+    stats.log_event("comment", from_id)
+
+
+# Khách gửi ẢNH/file (không kèm chữ) -> trả câu cố định, không gọi AI, không đọc ảnh.
+_IMG_EVENT = "\x00IMG"
+_IMAGE_REPLY = ("Dạ mẫu này bên em có khá nhiều biến thể về kích thước và loại đá ạ. "
+                "Để tư vấn chính xác nhất cho Bác, Bác cho em xin tên và số điện thoại, "
+                "chuyên gia bên em sẽ liên hệ tư vấn cụ thể cho Bác ngay ạ! 🌸")
+
+
 def parse_events(payload: dict):
-    """[(psid, text)] từ webhook body. Bỏ echo của page, sự kiện không có text."""
+    """[(psid, text)] từ webhook body. Bỏ echo của page.
+
+    Tin CHỈ có ảnh/file (không chữ) -> text = _IMG_EVENT (handle_event trả câu cố định)."""
     out = []
     if not isinstance(payload, dict) or payload.get("object") != "page":
         return out
@@ -123,9 +223,13 @@ def parse_events(payload: dict):
             if msg.get("is_echo"):
                 continue
             psid = (ev.get("sender") or {}).get("id")
+            if not psid:
+                continue
             text = msg.get("text")
-            if psid and text:
+            if text:
                 out.append((str(psid), str(text)))
+            elif msg.get("attachments"):          # ảnh/file/sticker, không kèm chữ
+                out.append((str(psid), _IMG_EVENT))
     return out
 
 
@@ -199,26 +303,71 @@ async def send_action(psid: str, action: str = "typing_on") -> None:
 
 
 _SEM = asyncio.Semaphore(config.MAX_CONCURRENT)   # trần đồng thời riêng của bot
-_LAST_SEEN: dict[str, float] = {}                  # psid -> ts tin gần nhất
-_RATE_MAX = 5000                                   # trần size dict; vượt thì dọn entry cũ
+
+# Gom tin (debounce) mỗi khách: đợi khách gõ xong rồi trả 1 lần thay vì rep rời rạc/bỏ tin.
+_BUFFERS: dict[str, dict] = {}     # psid -> {"texts": [...], "task": Task, "first": ts}
+_DEBOUNCE_S = 4.0                  # im bao lâu thì chốt gom
+_MAX_WAIT_S = 20.0                 # trần chờ từ tin đầu (khách gõ liên tục không ngừng vẫn phải trả)
+_MAX_BUFFER = 15                   # trần số tin gom 1 lượt
 
 
-def _rate_ok(psid: str) -> bool:
-    now = time.monotonic()
-    if len(_LAST_SEEN) > _RATE_MAX:                 # dọn psid im > 1h -> dict không phình vô hạn
-        cutoff = now - 3600
-        for k in [k for k, v in _LAST_SEEN.items() if v < cutoff]:
-            _LAST_SEEN.pop(k, None)
-    if now - _LAST_SEEN.get(psid, 0.0) < config.PER_PSID_RATE_S:
-        return False
-    _LAST_SEEN[psid] = now
-    return True
+def _merge_texts(texts: list[str]) -> str:
+    """Gom các tin thành 1. Bỏ sentinel ảnh nếu có tin chữ; chỉ toàn ảnh -> giữ sentinel."""
+    real = [t for t in texts if t != _IMG_EVENT]
+    if real:
+        return "\n".join(real)
+    return _IMG_EVENT if texts else ""
+
+
+async def _save_lead_to_crm(psid: str) -> None:
+    """Handoff: trích lead từ hội thoại -> ghi Lark CRM. Best-effort, lỗi chỉ báo admin."""
+    lead = await brain.extract_lead(psid)
+    if not lead:
+        return
+    result = await asyncio.to_thread(lark_crm.upsert_lead, psid, lead)
+    tag = {"created": "✅ Đã tạo lead CRM", "updated": "♻️ Đã cập nhật lead CRM"}.get(result)
+    if tag:
+        code = lark_crm.lead_code(psid)               # mã Lead/Chance vừa lưu
+        head = f"{tag}: {lead.get('ten') or '?'} - {lead.get('sdt') or '?'}"
+        if code:
+            head += f" [{code}]"
+        await notify_admins(f"{head}\n{lead.get('tinh') or ''} | {lead.get('tom_tat') or ''}")
+    elif result == "error":
+        await notify_admins(f"⚠️ Ghi lead CRM LỖI cho khách {psid} (xem log server)")
 
 
 async def handle_event(psid: str, text: str) -> None:
-    """1 tin (chạy nền): rate-limit → semaphore → Claude trả lời → gửi lại. Lỗi = xin lỗi lịch sự."""
-    if not _rate_ok(psid):
-        stats.log_event("rate_limited", psid)
+    """Nhận 1 tin: gom vào buffer khách + hẹn giờ chốt. Nhiều tin dồn -> gom, trả 1 lần."""
+    buf = _BUFFERS.setdefault(psid, {"texts": [], "task": None, "first": time.monotonic()})
+    buf["texts"].append(text)
+    if buf["task"] and not buf["task"].done():
+        buf["task"].cancel()                        # có tin mới -> dời giờ chốt
+    buf["task"] = asyncio.create_task(_debounced_flush(psid))
+
+
+async def _debounced_flush(psid: str) -> None:
+    """Đợi khách im _DEBOUNCE_S (trần _MAX_WAIT_S / _MAX_BUFFER tin) rồi gom xử 1 lượt."""
+    buf = _BUFFERS.get(psid)
+    if buf is None:
+        return
+    # gõ liên tục -> vẫn chốt khi chạm trần chờ hoặc trần số tin
+    over = (time.monotonic() - buf["first"] >= _MAX_WAIT_S) or (len(buf["texts"]) >= _MAX_BUFFER)
+    try:
+        await asyncio.sleep(0 if over else _DEBOUNCE_S)
+    except asyncio.CancelledError:
+        return
+    buf = _BUFFERS.pop(psid, None)
+    if not buf or not buf["texts"]:
+        return
+    await _process(psid, _merge_texts(buf["texts"]))
+
+
+async def _process(psid: str, text: str) -> None:
+    """Xử 1 lượt đã gom: semaphore → brain → gửi lại. Lỗi = báo admin, không rep khách."""
+    if text == _IMG_EVENT:
+        # Khách gửi ảnh/file không chữ: câu cố định xin tên+SĐT, không gọi AI, không đọc ảnh.
+        stats.log_event("image", psid)
+        await send_text(psid, _IMAGE_REPLY)
         return
     async with _SEM:
         await send_action(psid, "typing_on")
@@ -241,6 +390,7 @@ async def handle_event(psid: str, text: str) -> None:
             if reply:
                 await send_text(psid, reply)
             await notify_admins(f"🔔 KHÁCH CẦN CHUYÊN GIA: {await _label(psid)}\n\n{reply}")
+            await _save_lead_to_crm(psid)
             return
         stats.log_event("ok", psid, duration_s=time.monotonic() - t0)
         img_tokens = img_tokens[:_MAX_IMAGES_PER_MSG]

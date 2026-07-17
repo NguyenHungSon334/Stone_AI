@@ -1,0 +1,9 @@
+.env
+.env.bak
+__pycache__/
+*.pyc
+.history.json
+conversations/
+stats/
+.claude/
+*.log

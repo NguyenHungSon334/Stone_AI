@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CHATBOT CONTROL</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;700&display=swap" rel="stylesheet">
+<style>
+/* ===== Tokens (DESIGN.md - BMW M) ===== */
+:root{
+  --canvas:#000; --surface-soft:#0d0d0d; --surface-card:#1a1a1a; --surface-elev:#262626;
+  --ink:#fff; --body:#bbb; --body-strong:#e6e6e6; --muted:#7e7e7e;
+  --hairline:#3c3c3c;
+  --m-blue-l:#0066b1; --m-blue-d:#1c69d4; --m-red:#e22718;
+  --warning:#f4b400; --success:#0fa336;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--canvas);color:var(--body);font:300 16px/1.5 Inter,-apple-system,"Segoe UI",sans-serif}
+h1,h2,h3{color:var(--ink);text-transform:uppercase;font-weight:700;letter-spacing:-0.5px}
+h1{font-size:40px;line-height:1.1}
+h2{font-size:24px;line-height:1.3}
+
+.label{font-size:14px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted)}
+.stripe{height:4px;background:linear-gradient(90deg,var(--m-blue-l) 0 33%,var(--m-blue-d) 33% 66%,var(--m-red) 66% 100%)}
+
+.wrap{max-width:1440px;margin:0 auto;padding:0 24px}
+
+/* ===== Top nav ===== */
+nav{height:64px;display:flex;align-items:center;gap:40px;border-bottom:1px solid var(--hairline)}
+nav .logo{display:flex;align-items:center;gap:12px;color:var(--ink);font-weight:700;font-size:18px;letter-spacing:1.5px}
+nav .logo .mini-stripe{width:28px;height:16px;background:linear-gradient(105deg,var(--m-blue-l) 0 33%,var(--m-blue-d) 33% 66%,var(--m-red) 66% 100%);transform:skewX(-18deg)}
+.tabs{display:flex;gap:32px;margin-left:auto}
+.tab{background:none;border:none;cursor:pointer;padding:22px 0 18px;color:var(--body);
+     font:700 14px/1.3 Inter;letter-spacing:1.5px;text-transform:uppercase;border-bottom:2px solid transparent}
+.tab.active{color:var(--ink);border-bottom-color:var(--ink)}
+
+/* ===== Hero ===== */
+.hero{padding:64px 0 40px}
+.hero p{margin-top:8px;color:var(--body);max-width:560px}
+.hero .status{display:inline-flex;align-items:center;gap:8px;margin-top:16px}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--success)}
+.dot.off{background:var(--m-red)}
+
+/* ===== Spec cells ===== */
+.specs{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--hairline);border:1px solid var(--hairline)}
+.spec{background:var(--surface-soft);padding:24px}
+.spec .v{font-size:32px;font-weight:700;color:var(--ink);line-height:1.15}
+.spec .v.good{color:var(--success)} .spec .v.bad{color:var(--m-red)} .spec .v.warn{color:var(--warning)}
+.spec .l{margin-top:8px}
+
+/* ===== Chart ===== */
+.chart-band{margin-top:64px}
+.chart{display:flex;gap:8px;align-items:flex-end;height:180px;margin-top:24px;border-bottom:1px solid var(--hairline);padding-bottom:0}
+.bar-col{flex:1;display:flex;flex-direction:column;justify-content:flex-end;gap:2px;height:100%}
+.bar{width:100%}
+.bar.ok{background:var(--ink)} .bar.handoff{background:var(--m-blue-d)} .bar.err{background:var(--m-red)}
+.bar-labels{display:flex;gap:8px;margin-top:8px}
+.bar-labels span{flex:1;text-align:center;font-size:12px;letter-spacing:.5px;color:var(--muted)}
+.legend{display:flex;gap:24px;margin-top:16px}
+.legend span{display:inline-flex;align-items:center;gap:8px;font-size:12px;letter-spacing:.5px;color:var(--body)}
+.sw{width:12px;height:12px;display:inline-block}
+
+/* ===== Buttons / inputs ===== */
+.btn{background:transparent;color:var(--ink);border:1px solid var(--ink);height:48px;padding:0 32px;
+     font:700 14px/1 Inter;letter-spacing:1.5px;text-transform:uppercase;cursor:pointer;border-radius:0}
+.btn:active{background:var(--ink);color:var(--canvas)}
+.btn.small{height:36px;padding:0 16px;font-size:12px}
+.btn.danger{border-color:var(--m-red);color:var(--m-red)}
+.btn.danger:active{background:var(--m-red);color:var(--ink)}
+.btn:disabled{opacity:.4;cursor:wait}
+input,select,textarea{background:var(--surface-card);color:var(--ink);border:1px solid var(--hairline);
+     border-radius:0;padding:12px 16px;font:300 16px/1.5 Inter;width:100%}
+input:focus,select:focus,textarea:focus{outline:none;border-color:var(--ink)}
+input{height:48px}
+textarea{min-height:280px;resize:vertical;font-size:14px}
+.field{margin-bottom:24px}
+.field .label{display:block;margin-bottom:8px;color:var(--body-strong)}
+.field .hint{font-size:12px;color:var(--muted);margin-top:6px;letter-spacing:.5px}
+
+/* ===== Tables ===== */
+table{width:100%;border-collapse:collapse;margin-top:24px}
+th{text-align:left;padding:12px 16px;font:700 12px/1.3 Inter;letter-spacacing:1.5px;letter-spacing:1.5px;
+   text-transform:uppercase;color:var(--muted);border-bottom:1px solid var(--hairline)}
+td{padding:16px;border-bottom:1px solid var(--hairline);font-size:14px;color:var(--body)}
+tr.row{cursor:pointer}
+tr.row:active td{background:var(--surface-soft)}
+td .psid{color:var(--ink);font-weight:700}
+
+/* ===== Chat viewer ===== */
+.chatlog{margin-top:24px;border:1px solid var(--hairline);padding:24px;max-height:520px;overflow-y:auto;background:var(--surface-soft)}
+.msg{max-width:70%;padding:12px 16px;margin-bottom:12px;font-size:14px;white-space:pre-wrap}
+.msg.user{background:var(--surface-card);color:var(--body-strong)}
+.msg.assistant{background:var(--surface-elev);color:var(--ink);margin-left:auto}
+.msg .who{font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);margin-bottom:4px;font-weight:700}
+
+/* ===== Settings grid / secrets ===== */
+.settings-grid{display:grid;grid-template-columns:1fr 1fr;gap:40px;margin-top:40px}
+.secrets{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--hairline);border:1px solid var(--hairline);margin-top:24px}
+.secret{background:var(--surface-soft);padding:16px 24px}
+.secret .s{font-weight:700;font-size:14px;letter-spacing:1.5px;text-transform:uppercase}
+.secret .s.on{color:var(--success)} .secret .s.off{color:var(--m-red)}
+
+.section{padding:64px 0}
+.band-title{display:flex;align-items:baseline;gap:24px}
+.band-title .label{color:var(--muted)}
+.hidden{display:none}
+.toast{position:fixed;bottom:24px;right:24px;background:var(--surface-card);color:var(--ink);
+       border:1px solid var(--hairline);padding:16px 24px;font-size:14px;display:none}
+.range-picker{display:flex;gap:16px;margin-left:auto}
+.range-picker button{background:none;border:none;color:var(--muted);cursor:pointer;
+  font:700 12px/1 Inter;letter-spacing:1.5px;text-transform:uppercase;padding:8px 0;border-bottom:2px solid transparent}
+.range-picker button.active{color:var(--ink);border-bottom-color:var(--ink)}
+
+/* ===== Ô cuộn: giấu thanh scroll nhưng vẫn kéo được ===== */
+.noscroll{scrollbar-width:none;-ms-overflow-style:none}
+.noscroll::-webkit-scrollbar{display:none}
+
+/* ===== Nút expand + modal preview ===== */
+.expandable{position:relative}
+.expand-btn{position:absolute;right:8px;bottom:8px;width:36px;height:36px;background:var(--surface-elev);
+  color:var(--ink);border:1px solid var(--hairline);border-radius:0;cursor:pointer;font-size:16px;line-height:1;z-index:2}
+.expand-btn:active{background:var(--ink);color:var(--canvas)}
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:100;display:none;padding:40px}
+.modal-overlay.open{display:flex}
+.modal-panel{background:var(--surface-soft);border:1px solid var(--hairline);flex:1;display:flex;
+  flex-direction:column;max-width:1200px;margin:0 auto;width:100%}
+.modal-head{display:flex;align-items:center;justify-content:space-between;padding:16px 24px;border-bottom:1px solid var(--hairline)}
+.modal-head .label{color:var(--ink)}
+.modal-body{flex:1;overflow:auto;padding:24px}
+.modal-body textarea{width:100%;height:100%;min-height:0;background:var(--surface-card);border:1px solid var(--hairline)}
+@media(max-width:768px){.modal-overlay{padding:12px}}
+
+@media(max-width:1024px){.specs{grid-template-columns:repeat(2,1fr)}.settings-grid{grid-template-columns:1fr}.secrets{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:768px){h1{font-size:28px}.tabs{gap:16px}.msg{max-width:90%}nav{gap:16px}}
+</style>
+</head>
+<body>
+<div class="stripe"></div>
+<div class="wrap">
+  <nav>
+    <div class="logo"><span class="mini-stripe"></span>CHATBOT CONTROL</div>
+    <div class="tabs">
+      <button class="tab active" data-view="overview">Tổng quan</button>
+      <button class="tab" data-view="customers">Khách hàng</button>
+      <button class="tab" data-view="settings">Cài đặt</button>
+    </div>
+  </nav>
+
+  <!-- ============ TỔNG QUAN ============ -->
+  <section id="view-overview">
+    <div class="hero">
+      <p class="label">Messenger Bot / Bảng điều khiển</p>
+      <h1>Hiệu năng bot</h1>
+      <div class="status"><span class="dot" id="statusDot"></span><span id="statusText" style="font-size:14px">đang tải...</span></div>
+    </div>
+
+    <div class="band-title">
+      <h2>Chỉ số vận hành</h2>
+      <div class="range-picker">
+        <button data-days="7" class="active">7 ngày</button>
+        <button data-days="30">30 ngày</button>
+      </div>
+    </div>
+    <div class="specs" id="specCells" style="margin-top:24px"></div>
+
+    <div class="chart-band">
+      <h2>Tin nhắn theo ngày</h2>
+      <div class="chart" id="chart"></div>
+      <div class="bar-labels" id="chartLabels"></div>
+      <div class="legend">
+        <span><i class="sw" style="background:var(--ink)"></i>TRẢ LỜI OK</span>
+        <span><i class="sw" style="background:var(--m-blue-d)"></i>CHUYỂN CHUYÊN GIA</span>
+        <span><i class="sw" style="background:var(--m-red)"></i>LỖI</span>
+      </div>
+    </div>
+    <div style="height:64px"></div>
+  </section>
+
+  <!-- ============ KHÁCH HÀNG ============ -->
+  <section id="view-customers" class="hidden">
+    <div class="hero">
+      <p class="label">Hội thoại / Lịch sử</p>
+      <h1>Khách hàng</h1>
+    </div>
+    <div id="customerList">
+      <table>
+        <thead><tr><th>Tên khách</th><th>PSID</th><th>Số tin</th><th>Lần cuối</th><th>Tin gần nhất</th></tr></thead>
+        <tbody id="customerRows"></tbody>
+      </table>
+    </div>
+    <div id="customerDetail" class="hidden">
+      <button class="btn small" onclick="showCustomerList()">&larr; Danh sách</button>
+      <h2 style="margin-top:24px" id="detailTitle"></h2>
+      <div class="expandable">
+        <div class="chatlog noscroll" id="chatlog"></div>
+        <button class="expand-btn" title="Phóng to" onclick="openExpand('chatlog')">⛶</button>
+      </div>
+    </div>
+    <div style="height:64px"></div>
+  </section>
+
+  <!-- ============ CÀI ĐẶT ============ -->
+  <section id="view-settings" class="hidden">
+    <div class="hero">
+      <p class="label">Cấu hình / Vận hành</p>
+      <h1>Cài đặt bot</h1>
+    </div>
+
+    <h2>Trạng thái kết nối</h2>
+    <p class="hint" style="font-size:12px;color:var(--muted);letter-spacing:.5px;margin-top:8px">Secrets chỉ sửa trực tiếp trong file .env (không sửa qua web để tránh lộ).</p>
+    <div class="secrets" id="secretCells"></div>
+
+    <div class="settings-grid">
+      <div>
+        <h2 style="margin-bottom:24px">Persona (tính cách bot)</h2>
+        <div class="field">
+          <div class="expandable">
+            <textarea id="persona" class="noscroll" spellcheck="false"></textarea>
+            <button class="expand-btn" title="Phóng to" onclick="openExpand('persona')">⛶</button>
+          </div>
+          <p class="hint">Lưu là ăn ngay (bot đọc lại theo mtime), không cần restart.</p>
+        </div>
+      </div>
+      <div>
+        <h2 style="margin-bottom:24px">Tham số vận hành</h2>
+        <div class="field">
+          <label class="label">Model AI</label>
+          <select id="envModel">
+            <option value="lite">Gemini Flash-Lite (nhanh nhất, rẻ nhất)</option>
+            <option value="flash">Gemini 3.5 Flash (cân bằng)</option>
+            <option value="pro">Gemini Pro (thông minh nhất, đắt)</option>
+          </select>
+        </div>
+        <div class="field">
+          <label class="label">Admin PSID (nhận báo lỗi / handoff)</label>
+          <input id="envAdmins" placeholder="123456,789012">
+          <p class="hint">Nhiều admin cách nhau dấu phẩy.</p>
+        </div>
+        <div class="field">
+          <label class="label">Giãn tin mỗi khách (giây)</label>
+          <input id="envRate" type="number" min="0" step="0.5">
+          <p class="hint">Khách nhắn nhanh hơn mức này bị bỏ qua (chống spam).</p>
+        </div>
+        <div class="field">
+          <label class="label">Số khách xử lý đồng thời</label>
+          <input id="envConcurrent" type="number" min="1" step="1">
+          <p class="hint">Đổi giá trị này cần restart bot mới ăn.</p>
+        </div>
+        <div style="display:flex;gap:16px;flex-wrap:wrap">
+          <button class="btn" onclick="saveSettings()">Lưu cài đặt</button>
+          <button class="btn danger" id="restartBtn" onclick="restartBot()">Restart bot</button>
+        </div>
+      </div>
+    </div>
+
+    <div style="margin-top:64px">
+      <h2>File .env (nâng cao)</h2>
+      <p class="hint" style="font-size:12px;color:var(--muted);letter-spacing:.5px;margin:8px 0 16px">
+        Sửa trực tiếp mọi cấu hình (token, key, giá token GEMINI_PRICE_IN_USD/OUT_USD...).
+        Lưu xong bấm RESTART BOT để chắc ăn mọi giá trị mới. Bản cũ tự giữ ở .env.bak.
+        CẨN THẬN: đổi BOT_DASH_TOKEN thì URL dashboard hiện tại hết hiệu lực.</p>
+      <div class="field">
+        <div class="expandable">
+          <textarea id="envRaw" class="noscroll" spellcheck="false" style="min-height:340px;font-family:Consolas,monospace;font-size:13px"></textarea>
+          <button class="expand-btn" title="Phóng to" onclick="openExpand('envRaw')">⛶</button>
+        </div>
+      </div>
+      <div style="display:flex;gap:16px">
+        <button class="btn" onclick="saveEnvRaw()">Lưu .env</button>
+      </div>
+    </div>
+    <div style="height:64px"></div>
+  </section>
+</div>
+<div class="stripe"></div>
+<div class="toast" id="toast"></div>
+
+<!-- Modal preview phóng to -->
+<div class="modal-overlay" id="modal" onclick="if(event.target===this)closeExpand()">
+  <div class="modal-panel">
+    <div class="modal-head">
+      <span class="label" id="modalTitle"></span>
+      <button class="btn small" onclick="closeExpand()">Đóng</button>
+    </div>
+    <div class="modal-body" id="modalBody"></div>
+  </div>
+</div>
+
+<script>
+const TOKEN = new URLSearchParams(location.search).get("token") || "";
+const api = (path) => fetch(path + (path.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(TOKEN))
+  .then(r => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); });
+
+function toast(msg, ok = true) {
+  const t = document.getElementById("toast");
+  t.textContent = msg;
+  t.style.borderColor = ok ? "var(--success)" : "var(--m-red)";
+  t.style.display = "block";
+  setTimeout(() => t.style.display = "none", 3000);
+}
+
+/* ===== Tabs ===== */
+document.querySelectorAll(".tab").forEach(b => b.onclick = () => {
+  document.querySelectorAll(".tab").forEach(x => x.classList.remove("active"));
+  b.classList.add("active");
+  ["overview","customers","settings"].forEach(v =>
+    document.getElementById("view-" + v).classList.toggle("hidden", v !== b.dataset.view));
+  if (b.dataset.view === "customers") loadCustomers();
+  if (b.dataset.view === "settings") { loadSettings(); loadEnvRaw(); }
+});
+
+/* ===== Tổng quan ===== */
+let days = 7;
+document.querySelectorAll(".range-picker button").forEach(b => b.onclick = () => {
+  document.querySelectorAll(".range-picker button").forEach(x => x.classList.remove("active"));
+  b.classList.add("active");
+  days = +b.dataset.days;
+  loadOverview();
+});
+
+function cell(value, label, cls = "") {
+  return `<div class="spec"><div class="v ${cls}">${value}</div><div class="l label">${label}</div></div>`;
+}
+
+function fmtTokens(n) {
+  n = n || 0;
+  if (n >= 1e6) return (n / 1e6).toFixed(2) + "M";
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + "k";
+  return String(n);
+}
+
+async function loadOverview() {
+  try {
+    const d = await api("/admin/api/overview?days=" + days);
+    const s = d.stats, c = s.counts;
+    document.getElementById("statusDot").className = "dot" + (d.configured ? "" : " off");
+    document.getElementById("statusText").textContent =
+      (d.configured ? "Bot đang cấu hình đủ" : "THIẾU cấu hình PAGE_TOKEN") + " · model: " + d.model;
+
+    const rate = s.success_rate;
+    const rateCls = rate == null ? "" : rate >= 95 ? "good" : rate >= 80 ? "warn" : "bad";
+    document.getElementById("specCells").innerHTML =
+      cell(rate == null ? "--" : rate + "%", "Tỉ lệ thành công", rateCls) +
+      cell(s.total_handled, "Tin đã xử lý") +
+      cell(s.active_customers, "Khách hoạt động") +
+      cell(d.total_customers, "Tổng khách từ trước") +
+      cell(s.avg_reply_s == null ? "--" : s.avg_reply_s + "s", "Trả lời trung bình") +
+      cell(c.handoff, "Chuyển chuyên gia", c.handoff ? "warn" : "") +
+      cell(c.error, "Lỗi", c.error ? "bad" : "good") +
+      cell(c.rate_limited, "Chặn spam") +
+      cell(fmtTokens(s.tokens_in + s.tokens_out), "Token đã dùng") +
+      cell("$" + (s.cost_usd || 0).toFixed(s.cost_usd >= 1 ? 2 : 4), "Chi phí AI (USD)");
+
+    // Bar chart
+    const daily = s.daily;
+    const max = Math.max(1, ...daily.map(x => x.ok + x.error + x.handoff));
+    document.getElementById("chart").innerHTML = daily.map(x => {
+      const h = k => Math.round(x[k] / max * 170);
+      return `<div class="bar-col" title="${x.date}: ok ${x.ok}, handoff ${x.handoff}, lỗi ${x.error}">
+        <div class="bar err" style="height:${h("error")}px"></div>
+        <div class="bar handoff" style="height:${h("handoff")}px"></div>
+        <div class="bar ok" style="height:${h("ok")}px"></div></div>`;
+    }).join("");
+    document.getElementById("chartLabels").innerHTML =
+      daily.map(x => `<span>${x.date.slice(5)}</span>`).join("");
+  } catch (e) { toast("Tải thống kê lỗi: " + e.message, false); }
+}
+
+/* ===== Khách hàng ===== */
+async function loadCustomers() {
+  try {
+    const d = await api("/admin/api/customers");
+    document.getElementById("customerRows").innerHTML = d.customers.length
+      ? d.customers.map(c => `<tr class="row" onclick="openCustomer('${c.psid}')">
+          <td><span class="psid">${escapeHtml(c.name) || "(không rõ tên)"}</span></td>
+          <td style="color:var(--muted)">${c.psid}</td><td>${c.messages}</td>
+          <td>${c.last_at.replace("T", " ")}</td><td>${escapeHtml(c.last_text)}</td></tr>`).join("")
+      : `<tr><td colspan="5" style="color:var(--muted)">Chưa có hội thoại nào.</td></tr>`;
+  } catch (e) { toast("Tải khách lỗi: " + e.message, false); }
+}
+
+function showCustomerList() {
+  document.getElementById("customerDetail").classList.add("hidden");
+  document.getElementById("customerList").classList.remove("hidden");
+}
+
+async function openCustomer(psid) {
+  try {
+    const d = await api("/admin/api/customers/" + encodeURIComponent(psid));
+    document.getElementById("detailTitle").textContent =
+      (d.name ? d.name + " · " : "") + "PSID " + psid;
+    document.getElementById("chatlog").innerHTML = d.messages.map(m =>
+      `<div class="msg ${m.role}"><div class="who">${m.role === "user" ? "Khách" : "Bot"}</div>${escapeHtml(m.text)}</div>`).join("");
+    document.getElementById("customerList").classList.add("hidden");
+    document.getElementById("customerDetail").classList.remove("hidden");
+    const log = document.getElementById("chatlog");
+    log.scrollTop = log.scrollHeight;
+  } catch (e) { toast("Tải hội thoại lỗi: " + e.message, false); }
+}
+
+function escapeHtml(s) {
+  return (s || "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+
+/* ===== Cài đặt ===== */
+async function loadSettings() {
+  try {
+    const d = await api("/admin/api/settings");
+    document.getElementById("persona").value = d.persona;
+    document.getElementById("envModel").value = d.env.BOT_MODEL;
+    document.getElementById("envAdmins").value = d.env.BOT_ADMIN_UIDS;
+    document.getElementById("envRate").value = d.env.BOT_PER_PSID_RATE_S;
+    document.getElementById("envConcurrent").value = d.env.BOT_MAX_CONCURRENT;
+    const names = {PAGE_TOKEN:"FB Page Token", APP_SECRET:"FB App Secret",
+                   GEMINI_API_KEY:"Gemini Key", LARK_APP_ID:"Lark (ảnh SP)"};
+    document.getElementById("secretCells").innerHTML = Object.entries(d.secrets).map(([k, v]) =>
+      `<div class="secret"><div class="s ${v ? "on" : "off"}">${v ? "ĐÃ CẤU HÌNH" : "CHƯA CÓ"}</div>
+       <div class="label" style="margin-top:4px;font-size:12px">${names[k] || k}</div></div>`).join("");
+  } catch (e) { toast("Tải cài đặt lỗi: " + e.message, false); }
+}
+
+async function saveSettings() {
+  try {
+    const body = {
+      persona: document.getElementById("persona").value,
+      env: {
+        BOT_MODEL: document.getElementById("envModel").value,
+        BOT_ADMIN_UIDS: document.getElementById("envAdmins").value,
+        BOT_PER_PSID_RATE_S: document.getElementById("envRate").value,
+        BOT_MAX_CONCURRENT: document.getElementById("envConcurrent").value,
+      },
+    };
+    const r = await fetch("/admin/api/settings?token=" + encodeURIComponent(TOKEN), {
+      method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body),
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.detail || r.status);
+    toast(d.restart_needed ? "Đã lưu. Restart bot để đổi số đồng thời." : "Đã lưu, ăn ngay.");
+  } catch (e) { toast("Lưu lỗi: " + e.message, false); }
+}
+
+async function loadEnvRaw() {
+  try {
+    const d = await api("/admin/api/env");
+    document.getElementById("envRaw").value = d.content;
+  } catch (e) { toast("Tải .env lỗi: " + e.message, false); }
+}
+
+async function saveEnvRaw() {
+  if (!confirm("Ghi đè file .env? Bản cũ giữ ở .env.bak.")) return;
+  try {
+    const r = await fetch("/admin/api/env?token=" + encodeURIComponent(TOKEN), {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({content: document.getElementById("envRaw").value}),
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.detail || r.status);
+    toast(d.message);
+  } catch (e) { toast("Lưu .env lỗi: " + e.message, false); }
+}
+
+async function restartBot() {
+  if (!confirm("Restart bot? Bot sẽ gián đoạn vài giây.")) return;
+  const btn = document.getElementById("restartBtn");
+  btn.disabled = true;
+  try {
+    await fetch("/admin/api/restart?token=" + encodeURIComponent(TOKEN), {method: "POST"});
+    toast("Đang restart, chờ bot sống lại...");
+    // Poll healthz tới khi bot dậy (tối đa 30s)
+    for (let i = 0; i < 30; i++) {
+      await new Promise(r => setTimeout(r, 1000));
+      try {
+        const h = await fetch("/healthz");
+        if (h.ok) { toast("Bot đã sống lại ✓"); loadOverview(); btn.disabled = false; return; }
+      } catch (_) {}
+    }
+    toast("30s chưa thấy bot dậy - kiểm tra cửa sổ server", false);
+  } catch (e) { toast("Restart lỗi: " + e.message, false); }
+  btn.disabled = false;
+}
+
+/* ===== Expand / preview modal ===== */
+const EXPAND_TITLES = {persona: "Persona (tính cách bot)", envRaw: "File .env", chatlog: "Hội thoại"};
+let _expandSrc = null;   // id textarea đang phóng to (để sync ngược khi đóng)
+
+function openExpand(id) {
+  const src = document.getElementById(id);
+  const body = document.getElementById("modalBody");
+  document.getElementById("modalTitle").textContent = EXPAND_TITLES[id] || id;
+  if (src.tagName === "TEXTAREA") {
+    _expandSrc = id;
+    const mono = id === "envRaw" ? "font-family:Consolas,monospace;font-size:13px" : "";
+    body.innerHTML = `<textarea id="modalText" class="noscroll" spellcheck="false" style="${mono}"></textarea>`;
+    document.getElementById("modalText").value = src.value;
+  } else {
+    _expandSrc = null;
+    body.innerHTML = `<div class="chatlog noscroll" style="max-height:none;border:none;padding:0">${src.innerHTML}</div>`;
+  }
+  document.getElementById("modal").classList.add("open");
+}
+
+function closeExpand() {
+  if (_expandSrc) {   // sửa trong modal -> chép về ô gốc (vẫn phải bấm Lưu như thường)
+    document.getElementById(_expandSrc).value = document.getElementById("modalText").value;
+    _expandSrc = null;
+  }
+  document.getElementById("modal").classList.remove("open");
+}
+
+document.addEventListener("keydown", e => { if (e.key === "Escape") closeExpand(); });
+
+if (!TOKEN) toast("Thiếu ?token=... trên URL", false);
+loadOverview();
+</script>
+</body>
+</html>

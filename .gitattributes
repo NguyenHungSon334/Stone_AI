@@ -1,0 +1,7 @@
+# Ép LF cho script chạy trên Linux/Docker (CRLF làm hỏng shebang -> "bad interpreter").
+*.sh text eol=lf
+entrypoint.sh text eol=lf
+deploy.sh text eol=lf
+Dockerfile text eol=lf
+Caddyfile text eol=lf
+*.py text eol=lf

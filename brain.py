@@ -13,10 +13,12 @@ import json
 import re
 import sys
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 
 from google import genai
+from google.genai import errors as genai_errors
 from google.genai import types
 
 import config
@@ -82,14 +84,17 @@ def _model_id() -> str:
 
 
 def _system_text() -> str:
-    """persona + bảng sản phẩm + ngày giờ thật. Gemini tự cache implicit phần prefix lặp lại.
-
-    Ngày giờ đặt CUỐI (sau phần tĩnh) để không phá cache prefix; độ chi tiết tới phút là đủ."""
-    now = datetime.now()
+    """persona + bảng sản phẩm (TĨNH - dùng cho explicit cache). Thời gian tách riêng
+    (_time_note_text) nhét vào contents mỗi lượt để prefix cache không đổi."""
     return (config.persona() + "\n\n# BẢNG SẢN PHẨM (tra cứu chi tiết mã/tên/kích thước/giá)\n"
-            + config.catalog_csv()
-            + f"\n\n# THỜI GIAN THỰC\nBây giờ là {now:%H:%M} ngày {now.day}/{now.month}/{now.year}."
-            + " Dùng mốc này khi khách nói thời gian tương đối (tháng này, cuối năm...).")
+            + config.catalog_csv())
+
+
+def _time_note_text() -> str:
+    """Ghi chú thời gian thực - nhét đầu contents mỗi lượt (KHÔNG vào cache tĩnh)."""
+    now = datetime.now()
+    return (f"[Hệ thống] Bây giờ là {now:%H:%M} ngày {now.day}/{now.month}/{now.year}. "
+            "Dùng mốc này khi khách nói thời gian tương đối (tháng này, cuối năm...).")
 
 
 # Regex mã sản phẩm dựng từ CSV, cache theo nội dung catalog (đổi CSV -> tự dựng lại).
@@ -287,22 +292,114 @@ def _now_str() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+_RETRY_STATUS = {500, 503, 504}   # lỗi server tạm của Gemini (gồm 504 DEADLINE_EXCEEDED)
+
+
+def _generate(client, **kw):
+    """generate_content + retry lỗi server tạm (500/503/504). 3 lần, backoff 1.5s/3s.
+
+    504 DEADLINE_EXCEEDED hay xảy ra lúc Gemini quá tải -> thử lại thường qua ngay,
+    đỡ phải báo lỗi cho admin + bỏ lượt khách."""
+    last = None
+    for i in range(3):
+        try:
+            return client.models.generate_content(**kw)
+        except genai_errors.ServerError as e:
+            if getattr(e, "code", None) not in _RETRY_STATUS:
+                raise
+            last = e
+            print(f"[gemini] {e.code} thử lại lần {i + 1}/3", file=sys.stderr)
+            time.sleep(1.5 * (i + 1))
+    raise last
+
+
+# ===== Explicit context caching =====
+# persona+catalog (~30k token TĨNH) cache 1 lần trên Gemini; mỗi request tham chiếu handle
+# thay vì nhồi lại -> rẻ token + nhanh hơn (giảm 504). Lỗi cache -> fallback nhồi thẳng.
+_CACHE_TTL_S = 3600
+_CACHE = {"key": None, "name": None, "exp": 0.0}
+_CACHE_LOCK = threading.Lock()
+
+
+def _sys_key(model_id: str) -> tuple:
+    """Khóa cache = model + mtime persona + mtime csv. File đổi -> tạo cache mới."""
+    return (model_id,
+            (config.DOCS_DIR / "Personal.md").stat().st_mtime,
+            config.CATALOG_CSV.stat().st_mtime)
+
+
+def _invalidate_cache() -> None:
+    with _CACHE_LOCK:
+        _CACHE.update(key=None, name=None, exp=0.0)
+
+
+def _cached_handle(client, model_id: str) -> str | None:
+    """Tên CachedContent cho persona+catalog hiện tại. None nếu lỗi -> caller nhồi thẳng.
+
+    ponytail: cache cũ để Google tự hết TTL (1h), không xoá tay - phí không đáng, đơn giản hơn."""
+    try:
+        key = _sys_key(model_id)
+    except OSError:
+        return None
+    now = time.time()
+    with _CACHE_LOCK:
+        if _CACHE["name"] and _CACHE["key"] == key and now < _CACHE["exp"]:
+            return _CACHE["name"]
+        try:
+            cache = client.caches.create(
+                model=model_id,
+                config=types.CreateCachedContentConfig(
+                    system_instruction=_system_text(), tools=_TOOLS, ttl=f"{_CACHE_TTL_S}s"),
+            )
+        except Exception as e:
+            print(f"[cache] tạo lỗi, nhồi thẳng: {type(e).__name__}: {e}", file=sys.stderr)
+            _CACHE.update(key=None, name=None, exp=0.0)
+            return None
+        _CACHE.update(key=key, name=cache.name, exp=now + _CACHE_TTL_S - 120)   # -120s an toàn
+        print(f"[cache] tạo {cache.name} ttl {_CACHE_TTL_S}s", file=sys.stderr)
+        return cache.name
+
+
+def _is_cache_error(e) -> bool:
+    """Lỗi do handle cache hỏng/hết (Google xoá) -> cần fallback inline."""
+    msg = str(getattr(e, "message", "") or e).lower()
+    return getattr(e, "code", None) in (400, 403, 404) and "cach" in msg
+
+
+def _gen_answer(client, model_id: str, contents: list, handle: str | None):
+    """1 lần generate luồng trả lời. Trả (resp, handle_dùng_tiếp).
+
+    handle hỏng (cache bị xoá) -> huỷ handle, nhồi thẳng, trả None để vòng sau khỏi thử lại."""
+    # 8192: Gemini 3.x "thinking" tính chung output budget - thấp làm cụt câu trả lời.
+    if handle:
+        try:
+            cfg = types.GenerateContentConfig(cached_content=handle, max_output_tokens=8192)
+            return _generate(client, model=model_id, contents=contents, config=cfg), handle
+        except genai_errors.ClientError as e:
+            if not _is_cache_error(e):
+                raise
+            print(f"[cache] handle hỏng, chuyển nhồi thẳng: {e}", file=sys.stderr)
+            _invalidate_cache()
+    cfg = types.GenerateContentConfig(
+        system_instruction=_system_text(), tools=_TOOLS, max_output_tokens=8192)
+    return _generate(client, model=model_id, contents=contents, config=cfg), None
+
+
 def _answer_sync(psid: str, text: str) -> str:
     client = _get_client()
+    model_id = _model_id()
     user_at = _now_str()                              # mốc khách gửi (lúc bắt đầu xử lý)
     with _psid_lock(psid):
         full = _load_hist(psid)                       # toàn bộ log
-        contents = _to_contents(full[-_MAX_TURNS * 2:])  # chỉ nạp N lượt cuối cho API
+        # thời gian thực nhét ĐẦU contents (tách khỏi cache tĩnh)
+        contents = [types.Content(role="user", parts=[types.Part.from_text(text=_time_note_text())])]
+        contents += _to_contents(full[-_MAX_TURNS * 2:])  # chỉ nạp N lượt cuối cho API
         contents.append(types.Content(role="user", parts=[types.Part.from_text(text=text)]))
 
-        # 8192: Gemini 3.x "thinking" ngầm tính chung vào output budget - 1024 làm cụt câu trả lời.
-        gen_cfg = types.GenerateContentConfig(
-            system_instruction=_system_text(), tools=_TOOLS, max_output_tokens=8192,
-        )
+        handle = _cached_handle(client, model_id)     # None -> nhồi thẳng (fallback)
         tok_in = tok_out = 0
         for _ in range(_MAX_TOOL_LOOPS):
-            resp = client.models.generate_content(model=_model_id(), contents=contents,
-                                                  config=gen_cfg)
+            resp, handle = _gen_answer(client, model_id, contents, handle)
             u = resp.usage_metadata
             if u:
                 tok_in += u.prompt_token_count or 0
@@ -370,7 +467,8 @@ def _extract_lead_sync(psid: str) -> dict | None:
     prompt = (f"Trích thông tin khách từ hội thoại dưới đây thành JSON. "
               f"Tỉnh/Thành phố PHẢI chọn khớp chính xác 1 trong: {_TINH_OPTIONS}.\n\n{convo}")
     try:
-        resp = _get_client().models.generate_content(
+        resp = _generate(
+            _get_client(),
             model=_model_id(),
             contents=[types.Content(role="user", parts=[types.Part.from_text(text=prompt)])],
             config=types.GenerateContentConfig(

@@ -5,6 +5,7 @@ Port gọn từ Javis OS (server/messenger_bot.py) - bỏ phần dính settings,
 import asyncio
 import hashlib
 import hmac
+import json
 import re
 import sys
 import time
@@ -204,10 +205,18 @@ async def handle_comment(comment_id: str, from_id: str) -> None:
 
 
 # Khách gửi ẢNH/file (không kèm chữ) -> trả câu cố định, không gọi AI, không đọc ảnh.
-_IMG_EVENT = "\x00IMG"
+_IMG_EVENT = "\x00IMG"           # khách gửi ẢNH/FILE thật (không chữ)
+_STICKER_EVENT = "\x00STK"       # khách thả like/sticker/icon (không phải ảnh thật)
 _IMAGE_REPLY = ("Dạ mẫu này bên em có khá nhiều biến thể về kích thước và loại đá ạ. "
-                "Để tư vấn chính xác nhất cho Bác, Bác cho em xin tên và số điện thoại, "
+                "Để tư vấn chính xác nhất cho Bác, Bác cho em xin số điện thoại, "
                 "chuyên gia bên em sẽ liên hệ tư vấn cụ thể cho Bác ngay ạ! 🌸")
+# Like/sticker lần đầu: chào hỏi mời tư vấn như bình thường (KHÔNG xin SĐT dồn).
+_STICKER_REPLY = ("Dạ em chào Bác ạ 🌸 Bác đang quan tâm mẫu nào để em tư vấn giúp Bác ạ? "
+                  "(Mộ đá, Lăng thờ, Cổng hay Lan can đá...)")
+
+# Đếm like/sticker liên tiếp mỗi khách -> lần 2 thì ngừng trả lời + báo admin. Reset khi có tin thật.
+_STICKER_COUNT: dict[str, int] = {}
+_STICKER_COUNT_MAX = 5000
 
 
 def parse_events(payload: dict):
@@ -228,8 +237,10 @@ def parse_events(payload: dict):
             text = msg.get("text")
             if text:
                 out.append((str(psid), str(text)))
-            elif msg.get("attachments"):          # ảnh/file/sticker, không kèm chữ
-                out.append((str(psid), _IMG_EVENT))
+            elif msg.get("attachments"):          # không chữ: tách sticker/like khỏi ảnh thật
+                atts = msg["attachments"] or []
+                is_sticker = any((a.get("payload") or {}).get("sticker_id") for a in atts)
+                out.append((str(psid), _STICKER_EVENT if is_sticker else _IMG_EVENT))
     return out
 
 
@@ -250,6 +261,30 @@ def _split_text(text: str, n: int = _TEXT_MAX) -> list[str]:
     if text:
         out.append(text)
     return out
+
+
+# Tách sau . ! ? … + khoảng trắng. (?=\D) tránh cắt giữa số (2.5 triệu, SĐT). Xuống dòng cũng tách.
+_SENT_RE = re.compile(r"(?<=[.!?…])\s+(?=\D)")
+
+
+def _split_sentences(text: str, per: int = 2) -> list[str]:
+    """Reply -> nhiều tin ngắn ~per câu (chat tự nhiên). Gom per câu/tin, cắt theo độ dài nếu quá dài.
+
+    ponytail: viết tắt hiếm ('vd.') có thể bị tách thừa - chấp nhận, reply bot không mấy khi có."""
+    text = (text or "").strip()
+    if not text:
+        return []
+    sents: list[str] = []
+    for para in text.split("\n"):                     # tôn trọng xuống dòng persona đặt
+        for s in _SENT_RE.split(para):
+            s = s.strip()
+            if s:
+                sents.append(s)
+    out: list[str] = []
+    for i in range(0, len(sents), per):
+        chunk = " ".join(sents[i:i + per])
+        out.extend(_split_text(chunk) if len(chunk) > _TEXT_MAX else [chunk])
+    return out or [text]
 
 
 async def send_text(psid: str, text: str) -> None:
@@ -290,6 +325,28 @@ async def send_image(psid: str, file_token: str) -> None:
         print(f"[img] {type(e).__name__}: {e}", file=sys.stderr)
 
 
+async def send_image_bytes(psid: str, data: bytes, ctype: str = "image/jpeg") -> None:
+    """Gửi ảnh bằng CÁCH UPLOAD bytes thẳng (multipart). FB không phải tự fetch URL nữa
+    -> ảnh tới ngay sau text, không trickle. Bytes đã warm sẵn nên gửi luôn."""
+    if not (config.PAGE_TOKEN and psid and data):
+        return
+    url = _SEND_API.format(ver=config.GRAPH_VER)
+    ext = "png" if "png" in (ctype or "") else "jpg"
+    form = {
+        "recipient": json.dumps({"id": psid}),
+        "messaging_type": "RESPONSE",
+        "message": json.dumps({"attachment": {"type": "image", "payload": {"is_reusable": True}}}),
+    }
+    files = {"filedata": (f"image.{ext}", data, ctype or "image/jpeg")}
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as c:
+            r = await c.post(url, params={"access_token": config.PAGE_TOKEN}, data=form, files=files)
+            if r.status_code >= 400:
+                print(f"[img] upload {r.status_code}: {r.text[:300]}", file=sys.stderr)
+    except Exception as e:
+        print(f"[img] upload {type(e).__name__}: {e}", file=sys.stderr)
+
+
 async def send_action(psid: str, action: str = "typing_on") -> None:
     if not (config.PAGE_TOKEN and psid):
         return
@@ -312,11 +369,13 @@ _MAX_BUFFER = 15                   # trần số tin gom 1 lượt
 
 
 def _merge_texts(texts: list[str]) -> str:
-    """Gom các tin thành 1. Bỏ sentinel ảnh nếu có tin chữ; chỉ toàn ảnh -> giữ sentinel."""
-    real = [t for t in texts if t != _IMG_EVENT]
+    """Gom các tin thành 1. Ưu tiên: tin chữ > ảnh thật > sticker/like."""
+    real = [t for t in texts if t not in (_IMG_EVENT, _STICKER_EVENT)]
     if real:
         return "\n".join(real)
-    return _IMG_EVENT if texts else ""
+    if _IMG_EVENT in texts:                    # ảnh thật ưu tiên hơn sticker
+        return _IMG_EVENT
+    return _STICKER_EVENT if texts else ""
 
 
 _FOLLOWUP_TEXT = ("Dạ Bác ơi 🌸 Không biết Bác còn đang phân vân mẫu nào không ạ? "
@@ -338,6 +397,9 @@ async def _save_lead_to_crm(psid: str) -> None:
     lead = await brain.extract_lead(psid)
     if not lead:
         return
+    name = await profile_name(psid)          # tên tài khoản FB - không xin tên khách nữa
+    if name:
+        lead["ten"] = name
     result = await asyncio.to_thread(lark_crm.upsert_lead, psid, lead)
     tag = {"created": "✅ Đã tạo lead CRM", "updated": "♻️ Đã cập nhật lead CRM"}.get(result)
     if tag:
@@ -379,11 +441,27 @@ async def _debounced_flush(psid: str) -> None:
 async def _process(psid: str, text: str) -> None:
     """Xử 1 lượt đã gom: semaphore → brain → gửi lại. Lỗi = báo admin, không rep khách."""
     if text == _IMG_EVENT:
-        # Khách gửi ảnh/file không chữ: câu cố định xin tên+SĐT, không gọi AI, không đọc ảnh.
+        # Khách gửi ảnh/file thật (không chữ): câu cố định xin SĐT, không gọi AI, không đọc ảnh.
+        _STICKER_COUNT.pop(psid, None)                 # ảnh thật = tương tác thật -> reset đếm
         stats.log_event("image", psid)
         await send_text(psid, _IMAGE_REPLY)
         return
+    if text == _STICKER_EVENT:
+        # Like/sticker/icon: lần đầu chào hỏi mời tư vấn; lần 2 liên tiếp -> im + báo admin.
+        n = _STICKER_COUNT.get(psid, 0) + 1
+        if len(_STICKER_COUNT) > _STICKER_COUNT_MAX:   # ponytail: chặn phình, xoá sạch (thô nhưng đủ)
+            _STICKER_COUNT.clear()
+        _STICKER_COUNT[psid] = n
+        if n == 1:
+            await send_text(psid, _STICKER_REPLY)
+        elif n == 2:
+            stats.log_event("sticker_stop", psid)
+            await notify_admins(f"🔕 Ngừng trả lời {await _label(psid)}: gửi like/sticker/icon "
+                                "lần 2 liên tiếp, không có nội dung thật. Cần người xem tay.")
+        # n >= 3: im lặng, không báo admin lại (tránh spam)
+        return
     async with _SEM:
+        _STICKER_COUNT.pop(psid, None)                 # có tin chữ thật -> reset đếm sticker
         await send_action(psid, "typing_on")
         # to_thread: is_new_customer có thể chạm Firebase (cache miss) - offload để
         # Firebase chậm/chết không block event loop (mọi khách khác đứng).
@@ -410,23 +488,23 @@ async def _process(psid: str, text: str) -> None:
             return
         stats.log_event("ok", psid, duration_s=time.monotonic() - t0)
         img_tokens = img_tokens[:_MAX_IMAGES_PER_MSG]
+        imgs: list[tuple[bytes, str]] = []
         if img_tokens:
-            # WARM ảnh trước khi gửi bất kỳ tin nào: tải Lark về cache xong hết mới nhắn.
-            # -> FB fetch /img trúng cache, text + ảnh tới khách sát nhau, không "nhắn xong chờ ảnh".
+            # Tải HẾT ảnh về xong (đợi tất cả) rồi mới gửi. Giữ bytes để upload thẳng lên FB
+            # -> ảnh tới ngay sau text, không để FB tự fetch URL rồi trickle lẻ tẻ.
             warmed = await asyncio.gather(
                 *(asyncio.to_thread(lark_image.download_media, t) for t in img_tokens),
                 return_exceptions=True)
-            ok_tokens = []
             for tok, w in zip(img_tokens, warmed):
                 if isinstance(w, Exception):
-                    print(f"[img] warm lỗi token {tok[:12]}...: {type(w).__name__}: {w}", file=sys.stderr)
+                    print(f"[img] tải lỗi token {tok[:12]}...: {type(w).__name__}: {w}", file=sys.stderr)
                 else:
-                    ok_tokens.append(tok)
-            img_tokens = ok_tokens                     # ảnh tải hỏng thì khỏi gửi, không bắt khách chờ
+                    imgs.append(w)                     # (bytes, ctype) - ảnh hỏng thì bỏ, không bắt chờ
         if reply:
-            await send_text(psid, reply)
-        for tok in img_tokens:
-            await send_image(psid, tok)
+            for chunk in _split_sentences(reply):      # tách 1-2 câu/tin -> chat tự nhiên
+                await send_text(psid, chunk)
+        for data, ctype in imgs:
+            await send_image_bytes(psid, data, ctype)
         # Thông báo admin SAU khi đã trả lời khách (không bắt khách chờ). Admin tự nhắn thì bỏ qua.
         if psid not in config.ADMIN_UIDS:
             if is_new:

@@ -111,3 +111,19 @@ def fetch_conversation(psid: str) -> list | None:
     except Exception as e:
         print(f"[fb] fetch lỗi psid={psid}: {type(e).__name__}: {e}", file=sys.stderr)
         return None
+
+
+def clear_all() -> bool:
+    """Xóa TOÀN BỘ conversations + stats trên Firebase (reset từ đầu). KHÔNG hồi được.
+
+    True = đã xóa (Firebase bật + chạy xong). False = Firebase tắt/lỗi. Đồng bộ (gọi từ admin)."""
+    if not _init():
+        return False
+    try:
+        from firebase_admin import db
+        db.reference("conversations").delete()
+        db.reference("stats").delete()
+        return True
+    except Exception as e:
+        print(f"[fb] clear_all lỗi: {type(e).__name__}: {e}", file=sys.stderr)
+        return False

@@ -18,6 +18,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
 
 import config
+import fb
 import messenger
 import stats
 import util
@@ -216,6 +217,31 @@ async def save_env(request: Request):
     p.write_text(content.rstrip() + "\n", encoding="utf-8")
     config.reload_env()
     return {"ok": True, "message": "đã lưu (.env.bak giữ bản cũ). Token/secret đổi thì cần Restart."}
+
+
+@router.post("/api/clean-data")
+async def clean_data(request: Request):
+    """Xóa TOÀN BỘ data khách: conversations + stats ở local VÀ Firebase. KHÔNG hồi được.
+
+    GIỮ nguyên: bảng sản phẩm + persona (data/docs) + CRM lead trên Lark.
+    brain đọc history từ đĩa mỗi lượt (không cache RAM) -> xóa đĩa + Firebase là sạch, khỏi restart.
+    """
+    _check_token(request)
+    removed = 0
+    for d in (_HIST_DIR, config.ROOT / "stats"):
+        if not d.exists():
+            continue
+        for p in d.iterdir():
+            if p.is_file():
+                try:
+                    p.unlink()
+                    removed += 1
+                except Exception as e:
+                    print(f"[clean] xóa {p.name} lỗi: {type(e).__name__}: {e}", file=sys.stderr)
+    fb_cleared = fb.clear_all()
+    msg = f"đã xóa {removed} file local" + (" + Firebase" if fb_cleared else " (Firebase tắt/lỗi)")
+    print(f"[clean] {msg}", file=sys.stderr)
+    return {"ok": True, "removed_files": removed, "firebase_cleared": fb_cleared, "message": msg}
 
 
 @router.post("/api/restart")

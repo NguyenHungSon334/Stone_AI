@@ -283,7 +283,11 @@ td .psid{color:var(--ink);font-weight:700}
         <div style="display:flex;gap:16px;flex-wrap:wrap">
           <button class="btn" onclick="saveSettings()">Lưu cài đặt</button>
           <button class="btn danger" id="restartBtn" onclick="restartBot()">Restart bot</button>
+          <button class="btn danger" id="cleanBtn" onclick="cleanData()">Xóa toàn bộ data</button>
         </div>
+        <p class="hint" style="color:var(--muted);margin-top:8px">
+          Xóa toàn bộ data = xóa lịch sử chat + thống kê (local + Firebase), KHÔNG hồi được.
+          Giữ nguyên bảng sản phẩm + persona + CRM lead trên Lark.</p>
       </div>
     </div>
 
@@ -546,6 +550,23 @@ async function saveEnvRaw() {
     if (!r.ok) throw new Error(d.detail || r.status);
     toast(d.message);
   } catch (e) { toast("Lưu .env lỗi: " + e.message, false); }
+}
+
+async function cleanData() {
+  if (!confirm("XÓA TOÀN BỘ lịch sử chat + thống kê (local + Firebase)?\nKHÔNG hồi được. Giữ nguyên sản phẩm + persona + CRM Lark.")) return;
+  const typed = prompt("Xác nhận lần cuối: gõ XOA (in hoa) để xóa toàn bộ data.");
+  if (typed !== "XOA") { toast("Đã hủy, không xóa gì."); return; }
+  const btn = document.getElementById("cleanBtn");
+  btn.disabled = true;
+  try {
+    const r = await fetch("/admin/api/clean-data?token=" + encodeURIComponent(TOKEN), {method: "POST"});
+    const d = await r.json();
+    toast(d.message || "Đã xóa toàn bộ data.");
+    loadOverview();
+  } catch (e) {
+    toast("Lỗi xóa data.");
+  }
+  btn.disabled = false;
 }
 
 async function restartBot() {

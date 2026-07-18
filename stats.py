@@ -19,14 +19,9 @@ _EVENTS = _STATS_DIR / "events.jsonl"
 _LOCK = threading.Lock()
 
 
-def log_event(kind: str, psid: str, duration_s: float | None = None, note: str = "") -> None:
-    """Ghi 1 sự kiện. Không bao giờ ném lỗi ra ngoài (stats chết không được kéo bot chết)."""
+def _append(row: dict) -> None:
+    """Ghi 1 dòng JSONL + mirror Firebase. Không bao giờ ném lỗi (stats chết không kéo bot chết)."""
     try:
-        row = {"ts": time.time(), "kind": kind, "psid": str(psid)}
-        if duration_s is not None:
-            row["dur"] = round(duration_s, 2)
-        if note:
-            row["note"] = note[:200]
         with _LOCK:
             _STATS_DIR.mkdir(parents=True, exist_ok=True)
             with _EVENTS.open("a", encoding="utf-8") as f:
@@ -36,18 +31,20 @@ def log_event(kind: str, psid: str, duration_s: float | None = None, note: str =
         print(f"[stats] ghi lỗi: {type(e).__name__}: {e}", file=sys.stderr)
 
 
+def log_event(kind: str, psid: str, duration_s: float | None = None, note: str = "") -> None:
+    """Ghi 1 sự kiện (ok/error/handoff/rate_limited/...)."""
+    row = {"ts": time.time(), "kind": kind, "psid": str(psid)}
+    if duration_s is not None:
+        row["dur"] = round(duration_s, 2)
+    if note:
+        row["note"] = note[:200]
+    _append(row)
+
+
 def log_usage(psid: str, tok_in: int, tok_out: int) -> None:
     """Ghi token 1 câu trả lời (input gồm cache, output gồm thinking)."""
-    try:
-        row = {"ts": time.time(), "kind": "usage", "psid": str(psid),
-               "tin": int(tok_in), "tout": int(tok_out)}
-        with _LOCK:
-            _STATS_DIR.mkdir(parents=True, exist_ok=True)
-            with _EVENTS.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(row, ensure_ascii=False) + "\n")
-        fb.mirror_event(row)
-    except Exception as e:
-        print(f"[stats] ghi usage lỗi: {type(e).__name__}: {e}", file=sys.stderr)
+    _append({"ts": time.time(), "kind": "usage", "psid": str(psid),
+             "tin": int(tok_in), "tout": int(tok_out)})
 
 
 def _read_events(days: int = 30) -> list[dict]:

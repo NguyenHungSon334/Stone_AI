@@ -3,8 +3,8 @@ Lấy ảnh sản phẩm từ Lark Base (Bitable), cột Ảnh, theo Mã Sản P
 
 - Base quốc tế larksuite.com -> API domain open.larksuite.com (đổi qua LARK_DOMAIN nếu là feishu.cn).
 - Biến thể mã (M01.2, LD03.1) dùng CHUNG ảnh mã gốc -> cắt phần sau dấu chấm khi tra.
-- Ảnh Lark cần auth, không public. get_image_tokens() trả file_token; app.py có endpoint
-  /img/{token} proxy tải bằng download_media() rồi stream cho Messenger.
+- Ảnh Lark cần auth, không public. get_image_tokens() trả file_token; messenger tải bytes
+  bằng download_media() rồi UPLOAD thẳng (multipart) cho Messenger qua send_image_bytes.
 
 Cần trong .env: LARK_APP_ID, LARK_APP_SECRET (app nội bộ có quyền bitable:read + drive:read,
 đã chia sẻ Base cho app). LARK_BASE_APP_TOKEN, LARK_TABLE_ID đã set sẵn từ link.
@@ -24,7 +24,7 @@ import config
 _TOKEN = {"val": "", "exp": 0.0}
 _LOCK = threading.Lock()
 
-# Cache bytes ảnh: warm trước khi gửi tin -> FB fetch qua /img là có ngay, khách không chờ.
+# Cache bytes ảnh (TTL 1h): tải 1 lần, các lần gửi/thử lại sau trúng cache, khách không chờ.
 _MEDIA_CACHE: dict[str, tuple[float, bytes, str]] = {}   # token -> (ts, bytes, ctype)
 _MEDIA_CACHE_LOCK = threading.Lock()
 _MEDIA_TTL_S = 3600

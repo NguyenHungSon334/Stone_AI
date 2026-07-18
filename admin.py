@@ -20,6 +20,7 @@ from fastapi.responses import FileResponse
 import config
 import messenger
 import stats
+import util
 
 _profile_name = messenger.profile_name   # dùng chung cache tên với thông báo admin
 
@@ -79,6 +80,8 @@ async def customers(request: Request):
     out = []
     if _HIST_DIR.exists():
         for p in _HIST_DIR.glob("*.json"):
+            if p.name.endswith((".crm.json", ".sum.json")):   # sidecar CRM/tóm tắt, không phải log tin
+                continue
             try:
                 msgs = json.loads(p.read_text(encoding="utf-8"))
                 out.append({
@@ -97,15 +100,14 @@ async def customers(request: Request):
 @router.get("/api/customers/{psid}")
 async def customer_detail(request: Request, psid: str):
     _check_token(request)
-    safe = re.sub(r"[^A-Za-z0-9_-]", "_", psid)[:80]
-    p = _HIST_DIR / f"{safe}.json"
+    p = _HIST_DIR / f"{util.safe_psid(psid)}.json"
     if not p.exists():
         raise HTTPException(404, "không có khách này")
     msgs = json.loads(p.read_text(encoding="utf-8"))
     # Chỉ trả turn text (log sạch của brain.py đã là text, phòng hờ lọc block).
     clean = [{"role": m.get("role"), "text": m["content"], "at": m.get("at", "")}
              for m in msgs if isinstance(m.get("content"), str)]
-    return {"psid": psid, "name": await _profile_name(safe), "messages": clean}
+    return {"psid": psid, "name": await _profile_name(util.safe_psid(psid)), "messages": clean}
 
 
 @router.get("/api/settings")
@@ -126,10 +128,18 @@ async def get_settings(request: Request):
             "APP_SECRET": bool(config.APP_SECRET),
             "GEMINI_API_KEY": bool(config.GEMINI_API_KEY),
             "LARK_APP_ID": bool(config.LARK_APP_ID),
+            "LARK_WEBHOOK": bool(config.LARK_WEBHOOK_URL),
         },
         "public_url": config.PUBLIC_URL,
         "restart_needed_keys": ["BOT_MAX_CONCURRENT"],
     }
+
+
+@router.post("/api/test-lark")
+async def test_lark(request: Request):
+    """Nút 'Test bot admin Lark': gửi 1 tin test vào group Lark, trả kết quả kết nối."""
+    _check_token(request)
+    return await messenger.lark_ping()
 
 
 def _update_env_file(updates: dict[str, str]) -> None:

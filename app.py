@@ -13,12 +13,11 @@ import sys
 
 import uvicorn
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, PlainTextResponse, Response
+from fastapi.responses import JSONResponse, PlainTextResponse
 
 import admin
 import config
 import messenger
-from bot_tools import lark_image
 
 app = FastAPI(title="Chatbot Messenger (standalone)")
 app.include_router(admin.router)
@@ -48,17 +47,6 @@ async def _start_bg():
 @app.get("/healthz")
 async def healthz():
     return {"ok": True, "model": config.MODEL, "configured": bool(config.PAGE_TOKEN)}
-
-
-@app.get("/img/{file_token}")
-async def product_image(file_token: str):
-    """Proxy ảnh Lark -> FB tải được (Lark cần auth, không public). Cache 1 ngày."""
-    try:
-        data, ctype = await asyncio.to_thread(lark_image.download_media, file_token)
-    except Exception as e:
-        print(f"[img] tải Lark lỗi: {type(e).__name__}: {e}", file=sys.stderr)
-        return PlainTextResponse("not found", status_code=404)
-    return Response(content=data, media_type=ctype, headers={"Cache-Control": "public, max-age=86400"})
 
 
 @app.get("/webhook/messenger")

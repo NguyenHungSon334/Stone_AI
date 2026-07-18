@@ -11,8 +11,6 @@ Ghi lead vào Lark Base CRM khi bot thu đủ thông tin khách (handoff).
 Cần app Lark có quyền GHI Base: scope bitable:record:create + bitable:record:update,
 và Base chia sẻ cho app với quyền "chỉnh sửa".
 """
-import json
-import re
 import sys
 import threading
 import time
@@ -20,14 +18,13 @@ import time
 import httpx
 
 import config
+import util
 from bot_tools.lark_image import _tenant_token   # tái dùng token tenant (đã cache)
 
 _NGUON_LEAD = "Facebook"          # bot chạy trên Messenger -> nguồn cố định
 _OPT_CACHE: dict[str, tuple[float, set[str]]] = {}   # field_name -> (ts, {option})
 _OPT_TTL_S = 3600
 _OPT_LOCK = threading.Lock()
-
-_BASE = property  # placeholder tránh lint; giá trị thật đọc từ config bên dưới
 
 
 def _crm_base() -> str:
@@ -119,15 +116,11 @@ _META_DIR = config.ROOT / "conversations"
 
 
 def _meta_path(psid: str):
-    safe = re.sub(r"[^A-Za-z0-9_-]", "_", str(psid))[:80] or "unknown"
-    return _META_DIR / f"{safe}.crm.json"
+    return _META_DIR / f"{util.safe_psid(psid)}.crm.json"
 
 
 def _load_meta(psid: str) -> dict:
-    try:
-        return json.loads(_meta_path(psid).read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+    return util.read_json(_meta_path(psid), {})
 
 
 def _save_meta(psid: str, record_id: str, lead: dict, lead_code: str = "") -> None:
@@ -135,16 +128,12 @@ def _save_meta(psid: str, record_id: str, lead: dict, lead_code: str = "") -> No
 
     lead_code trống (autonumber chưa sinh kịp) -> giữ mã cũ đã lưu, không ghi đè bằng rỗng."""
     try:
-        _META_DIR.mkdir(parents=True, exist_ok=True)
-        p = _meta_path(psid)
         if not lead_code:
             lead_code = _load_meta(psid).get("lead_code", "")
         data = {"record_id": record_id, "lead_code": lead_code,
                 "ten": lead.get("ten", ""), "sdt": lead.get("sdt", ""),
                 "updated": time.strftime("%Y-%m-%d %H:%M:%S")}
-        tmp = p.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-        tmp.replace(p)
+        util.write_json_atomic(_meta_path(psid), data)
     except Exception as e:
         print(f"[crm] lưu meta psid={psid} lỗi: {type(e).__name__}: {e}", file=sys.stderr)
 

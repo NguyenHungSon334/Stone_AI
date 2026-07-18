@@ -10,11 +10,11 @@ Lỗi Firebase KHÔNG BAO GIỜ được kéo bot chết -> bọc try + thread n
 ponytail: 1 thread daemon / lần ghi; fetch đồng bộ chỉ khi cache miss (hiếm).
 Tải cao thì gom batch hoặc hàng đợi sau.
 """
-import re
 import sys
 import threading
 
 import config
+import util
 
 _app = None
 _ready = False
@@ -46,9 +46,7 @@ def _init() -> bool:
         return _app is not None
 
 
-def _safe(psid: str) -> str:
-    """psid -> key hợp lệ RTDB (cấm . $ # [ ] /)."""
-    return re.sub(r"[^A-Za-z0-9_-]", "_", str(psid))[:80] or "unknown"
+_safe = util.safe_psid   # psid -> key hợp lệ RTDB (cấm . $ # [ ] /)
 
 
 def _run(fn) -> None:

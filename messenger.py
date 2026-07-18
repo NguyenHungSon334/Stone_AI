@@ -107,11 +107,11 @@ def _lark_sign(secret: str, ts: str) -> str:
     return base64.b64encode(h).decode()
 
 
-async def _notify_lark(text: str) -> None:
-    """Đẩy 1 cảnh báo vào group Lark qua custom-bot-webhook. Rỗng URL -> bỏ. Lỗi không kéo bot chết."""
+async def _lark_post(text: str) -> tuple[bool, str]:
+    """POST 1 tin vào Lark webhook. Trả (ok, chi_tiết). URL rỗng -> (False, 'chưa cấu hình')."""
     url = config.LARK_WEBHOOK_URL
     if not url:
-        return
+        return (False, "Chưa cấu hình LARK_WEBHOOK_URL")
     body: dict = {"msg_type": "text", "content": {"text": text}}
     if config.LARK_WEBHOOK_SECRET:
         ts = str(int(time.time()))
@@ -121,10 +121,30 @@ async def _notify_lark(text: str) -> None:
         async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as c:
             r = await c.post(url, json=body)
             d = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
-            if d.get("code") not in (0, None):
-                print(f"[lark] webhook {d.get('code')}: {d.get('msg')}", file=sys.stderr)
+            code = d.get("code")
+            if code in (0, None):
+                return (True, "OK")
+            return (False, f"Lark code={code}: {d.get('msg', '')}")
     except Exception as e:
-        print(f"[lark] webhook lỗi: {type(e).__name__}: {e}", file=sys.stderr)
+        return (False, f"{type(e).__name__}: {e}")
+
+
+async def _notify_lark(text: str) -> None:
+    """Đẩy 1 cảnh báo vào group Lark. Rỗng URL -> bỏ. Lỗi chỉ log, không kéo bot chết."""
+    if not config.LARK_WEBHOOK_URL:
+        return
+    ok, detail = await _lark_post(text)
+    if not ok:
+        print(f"[lark] webhook {detail}", file=sys.stderr)
+
+
+async def lark_ping(text: str = "✅ Test bot admin Lark từ dashboard - kết nối OK.") -> dict:
+    """Kiểm tra kết nối bot admin Lark (nút Test ở dashboard). Trả trạng thái cấu hình + kết quả gửi."""
+    configured = bool(config.LARK_WEBHOOK_URL)
+    if not configured:
+        return {"configured": False, "ok": False, "detail": "Chưa cấu hình LARK_WEBHOOK_URL trong .env"}
+    ok, detail = await _lark_post(text)
+    return {"configured": True, "ok": ok, "detail": detail}
 
 
 async def notify_admins(text: str) -> None:
@@ -251,29 +271,16 @@ async def reply_public(comment_id: str) -> None:
     if not (config.PAGE_TOKEN and comment_id):
         return
     url = f"https://graph.facebook.com/{config.GRAPH_VER}/{comment_id}/comments"
-    try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=10.0)) as c:
-            r = await c.post(url, params={"access_token": config.PAGE_TOKEN},
-                             json={"message": _PUBLIC_REPLY})
-            if r.status_code >= 400:
-                print(f"[comment-public] {r.status_code}: {r.text[:300]}", file=sys.stderr)
-    except Exception as e:
-        print(f"[comment-public] {type(e).__name__}: {e}", file=sys.stderr)
+    await _fb_post(url, payload={"message": _PUBLIC_REPLY}, tag="comment-public")
 
 
 async def reply_private(comment_id: str) -> None:
     """Nhắn RIÊNG vào inbox người comment (private reply - FB chỉ cho 1 lần/comment)."""
     if not (config.PAGE_TOKEN and comment_id):
         return
-    url = _SEND_API.format(ver=config.GRAPH_VER)
-    body = {"recipient": {"comment_id": comment_id}, "message": {"text": _PRIVATE_REPLY}}
-    try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=10.0)) as c:
-            r = await c.post(url, params={"access_token": config.PAGE_TOKEN}, json=body)
-            if r.status_code >= 400:
-                print(f"[comment-private] {r.status_code}: {r.text[:300]}", file=sys.stderr)
-    except Exception as e:
-        print(f"[comment-private] {type(e).__name__}: {e}", file=sys.stderr)
+    await _fb_post(_SEND_API.format(ver=config.GRAPH_VER),
+                   payload={"recipient": {"comment_id": comment_id}, "message": {"text": _PRIVATE_REPLY}},
+                   tag="comment-private")
 
 
 async def handle_comment(comment_id: str, from_id: str) -> None:
@@ -394,64 +401,55 @@ def _split_text(text: str, n: int = _TEXT_MAX) -> list[str]:
 
 # Tách sau . ! ? … + khoảng trắng. (?=\D) tránh cắt giữa số (2.5 triệu, SĐT). Xuống dòng cũng tách.
 _SENT_RE = re.compile(r"(?<=[.!?…])\s+(?=\D)")
+_SEND_GAP_S = 0.5   # giãn giữa 2 tin liên tiếp gửi khách -> FB không rớt/đảo tin (tránh "nuốt chữ")
 
 
 def _split_sentences(text: str, per: int = 2) -> list[str]:
-    """Reply -> nhiều tin ngắn ~per câu (chat tự nhiên). Gom per câu/tin, cắt theo độ dài nếu quá dài.
+    """Reply -> nhiều tin ngắn ~per câu (chat tự nhiên). Gom per câu TRONG CÙNG 1 DÒNG - KHÔNG
+    dồn qua ranh giới xuống dòng (list giá/bullet giữ nguyên từng dòng, không mash thành 1 câu dài).
 
     ponytail: viết tắt hiếm ('vd.') có thể bị tách thừa - chấp nhận, reply bot không mấy khi có."""
     text = (text or "").strip()
     if not text:
         return []
-    sents: list[str] = []
-    for para in text.split("\n"):                     # tôn trọng xuống dòng persona đặt
-        for s in _SENT_RE.split(para):
-            s = s.strip()
-            if s:
-                sents.append(s)
     out: list[str] = []
-    for i in range(0, len(sents), per):
-        chunk = " ".join(sents[i:i + per])
-        out.extend(_split_text(chunk) if len(chunk) > _TEXT_MAX else [chunk])
+    for para in text.split("\n"):                     # mỗi dòng persona đặt -> tách riêng, không trộn
+        para = para.strip()
+        if not para:
+            continue
+        sents = [s.strip() for s in _SENT_RE.split(para) if s.strip()]
+        for i in range(0, len(sents), per):
+            chunk = " ".join(sents[i:i + per])
+            out.extend(_split_text(chunk) if len(chunk) > _TEXT_MAX else [chunk])
     return out or [text]
+
+
+async def _fb_post(url: str, *, payload=None, data=None, files=None,
+                   timeout: float = 20.0, tag: str = "send") -> bool:
+    """POST tới FB Graph kèm access_token. <400 -> True. Lỗi/≥400 -> log [tag] + False (không ném).
+    Gom mọi chỗ gọi Send API về 1 chỗ (timeout/log/params đồng nhất)."""
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=10.0)) as c:
+            r = await c.post(url, params={"access_token": config.PAGE_TOKEN},
+                             json=payload, data=data, files=files)
+            if r.status_code >= 400:
+                print(f"[{tag}] {r.status_code}: {r.text[:300]}", file=sys.stderr)
+                return False
+            return True
+    except Exception as e:
+        print(f"[{tag}] {type(e).__name__}: {e}", file=sys.stderr)
+        return False
 
 
 async def send_text(psid: str, text: str) -> None:
     if not (config.PAGE_TOKEN and psid and text):
         return
     url = _SEND_API.format(ver=config.GRAPH_VER)
-    try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=10.0)) as c:
-            for chunk in _split_text(text):
-                body = {"recipient": {"id": psid}, "messaging_type": "RESPONSE",
-                        "message": {"text": chunk}}
-                r = await c.post(url, params={"access_token": config.PAGE_TOKEN}, json=body)
-                if r.status_code >= 400:
-                    print(f"[send] {r.status_code}: {r.text[:300]}", file=sys.stderr)
-                    break
-    except Exception as e:
-        print(f"[send] {type(e).__name__}: {e}", file=sys.stderr)
-
-
-async def send_image(psid: str, file_token: str) -> None:
-    """Gửi ảnh cho khách qua URL proxy công khai (/img). FB tự tải ảnh từ URL này."""
-    if not (config.PAGE_TOKEN and psid and file_token):
-        return
-    if not config.PUBLIC_URL:
-        print("[img] thiếu PUBLIC_URL, không gửi được ảnh", file=sys.stderr)
-        return
-    url = _SEND_API.format(ver=config.GRAPH_VER)
-    img_url = f"{config.PUBLIC_URL}/img/{file_token}"
-    body = {"recipient": {"id": psid}, "messaging_type": "RESPONSE",
-            "message": {"attachment": {"type": "image",
-                                       "payload": {"url": img_url, "is_reusable": True}}}}
-    try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as c:
-            r = await c.post(url, params={"access_token": config.PAGE_TOKEN}, json=body)
-            if r.status_code >= 400:
-                print(f"[img] {r.status_code}: {r.text[:300]}", file=sys.stderr)
-    except Exception as e:
-        print(f"[img] {type(e).__name__}: {e}", file=sys.stderr)
+    for chunk in _split_text(text):
+        body = {"recipient": {"id": psid}, "messaging_type": "RESPONSE",
+                "message": {"text": chunk}}
+        if not await _fb_post(url, payload=body, tag="send"):
+            break                                      # 1 chunk lỗi -> dừng, khỏi gửi tiếp rối
 
 
 async def send_image_bytes(psid: str, data: bytes, ctype: str = "image/jpeg") -> None:
@@ -467,25 +465,15 @@ async def send_image_bytes(psid: str, data: bytes, ctype: str = "image/jpeg") ->
         "message": json.dumps({"attachment": {"type": "image", "payload": {"is_reusable": True}}}),
     }
     files = {"filedata": (f"image.{ext}", data, ctype or "image/jpeg")}
-    try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as c:
-            r = await c.post(url, params={"access_token": config.PAGE_TOKEN}, data=form, files=files)
-            if r.status_code >= 400:
-                print(f"[img] upload {r.status_code}: {r.text[:300]}", file=sys.stderr)
-    except Exception as e:
-        print(f"[img] upload {type(e).__name__}: {e}", file=sys.stderr)
+    await _fb_post(url, data=form, files=files, timeout=30.0, tag="img upload")
 
 
 async def send_action(psid: str, action: str = "typing_on") -> None:
     if not (config.PAGE_TOKEN and psid):
         return
-    url = _SEND_API.format(ver=config.GRAPH_VER)
-    try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as c:
-            await c.post(url, params={"access_token": config.PAGE_TOKEN},
-                         json={"recipient": {"id": psid}, "sender_action": action})
-    except Exception:
-        pass
+    await _fb_post(_SEND_API.format(ver=config.GRAPH_VER),
+                   payload={"recipient": {"id": psid}, "sender_action": action},
+                   timeout=10.0, tag="action")
 
 
 _SEM = asyncio.Semaphore(config.MAX_CONCURRENT)   # trần đồng thời riêng của bot
@@ -539,9 +527,10 @@ async def _save_lead_to_crm(psid: str) -> None:
         head = f"{tag}: {lead.get('ten') or '?'} - {lead.get('sdt') or '?'}"
         if code:
             head += f" [{code}]"
-        await notify_admins(f"{head}\n{lead.get('tinh') or ''} | {lead.get('tom_tat') or ''}")
+        await notify_admins(f"{head}\nKhách: {await _label(psid)}\n"
+                            f"{lead.get('tinh') or ''} | {lead.get('tom_tat') or ''}")
     elif result == "error":
-        await notify_admins(f"⚠️ Ghi lead CRM LỖI cho khách {psid} (xem log server)")
+        await notify_admins(f"⚠️ Ghi lead CRM LỖI cho khách {await _label(psid)} (xem log server)")
 
 
 async def handle_event(psid: str, text: str) -> None:
@@ -655,7 +644,10 @@ async def _process(psid: str, text: str) -> None:
                 else:
                     imgs.append(_shrink_image(*w))      # nén trước; (bytes, ctype) - ảnh hỏng thì bỏ
         if reply:
-            for chunk in _split_sentences(reply):      # tách 1-2 câu/tin -> chat tự nhiên
+            chunks = _split_sentences(reply)           # tách 1-2 câu/tin -> chat tự nhiên
+            for i, chunk in enumerate(chunks):
+                if i:
+                    await asyncio.sleep(_SEND_GAP_S)   # giãn giữa các tin -> FB không rớt/đảo (hết "nuốt chữ")
                 await send_text(psid, chunk)
         for data, ctype in imgs:
             await send_image_bytes(psid, data, ctype)

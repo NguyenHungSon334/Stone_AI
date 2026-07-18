@@ -24,6 +24,7 @@ from google.genai import types
 import config
 import fb
 import stats
+import util
 from bot_tools import lark_image
 from bot_tools.find_by_price import parse_money, render, rows_by_ids, search
 
@@ -187,8 +188,7 @@ def _psid_lock(psid: str) -> threading.Lock:
 
 def _psid_path(psid: str) -> Path:
     """conversations/<psid>.json. Làm sạch psid -> tên file an toàn."""
-    safe = re.sub(r"[^A-Za-z0-9_-]", "_", str(psid))[:80] or "unknown"
-    return _HIST_DIR / f"{safe}.json"
+    return _HIST_DIR / f"{util.safe_psid(psid)}.json"
 
 
 def is_new_customer(psid: str) -> bool:
@@ -214,7 +214,7 @@ def followup_candidates(after_h: float, max_h: float = 23.0) -> list[tuple[str, 
         return out
     now = datetime.now()
     for p in _HIST_DIR.glob("*.json"):
-        if p.name.endswith(".crm.json"):              # bỏ file meta CRM
+        if p.name.endswith((".crm.json", ".sum.json")):   # bỏ sidecar CRM / tóm tắt
             continue
         psid = p.stem
         try:
@@ -253,10 +253,9 @@ def mark_followed(psid: str, last_user_at: str) -> None:
 
 def _load_hist(psid: str) -> list:
     """Toàn bộ log 1 khách. Cache local trước; miss -> kéo Firebase, ghi cache. [] nếu chưa có."""
-    try:
-        return json.loads(_psid_path(psid).read_text(encoding="utf-8"))
-    except Exception:
-        pass
+    local = util.read_json(_psid_path(psid))
+    if local is not None:                           # [] hợp lệ (khác None) -> khỏi hỏi Firebase
+        return local
     remote = fb.fetch_conversation(psid)            # cache miss -> nguồn chính Firebase
     if remote:
         try:
@@ -269,11 +268,7 @@ def _load_hist(psid: str) -> list:
 
 def _write_local_hist(psid: str, full_msgs: list) -> None:
     """Ghi cache local (atomic tmp+rename -> không hỏng file khi chết giữa chừng)."""
-    _HIST_DIR.mkdir(parents=True, exist_ok=True)
-    p = _psid_path(psid)
-    tmp = p.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(full_msgs, ensure_ascii=False), encoding="utf-8")
-    tmp.replace(p)
+    util.write_json_atomic(_psid_path(psid), full_msgs)
 
 
 def _save_hist(psid: str, full_msgs: list, new_msgs: list | None = None) -> None:
@@ -303,20 +298,13 @@ def _sum_path(psid: str) -> Path:
 
 def _load_summary(psid: str) -> dict | None:
     """Tóm tắt cuốn chiếu {text, upto}. upto = số tin ĐẦU log đã gộp vào tóm tắt."""
-    try:
-        d = json.loads(_sum_path(psid).read_text(encoding="utf-8"))
-        return d if isinstance(d, dict) and d.get("text") else None
-    except Exception:
-        return None
+    d = util.read_json(_sum_path(psid))
+    return d if isinstance(d, dict) and d.get("text") else None
 
 
 def _save_summary(psid: str, text: str, upto: int) -> None:
     try:
-        _HIST_DIR.mkdir(parents=True, exist_ok=True)
-        p = _sum_path(psid)
-        tmp = p.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps({"text": text, "upto": upto}, ensure_ascii=False), encoding="utf-8")
-        tmp.replace(p)
+        util.write_json_atomic(_sum_path(psid), {"text": text, "upto": upto})
     except Exception as e:
         print(f"[sum] ghi lỗi psid={psid}: {type(e).__name__}: {e}", file=sys.stderr)
 

@@ -3,6 +3,7 @@ Giao thức Messenger: verify webhook, verify chữ ký, bóc tin, gửi trả, 
 Port gọn từ Javis OS (server/messenger_bot.py) - bỏ phần dính settings, dùng thẳng config.
 """
 import asyncio
+import base64
 import hashlib
 import hmac
 import json
@@ -46,9 +47,35 @@ def _shrink_image(data: bytes, ctype: str) -> tuple[bytes, str]:
 
 _SEND_API = "https://graph.facebook.com/{ver}/me/messages"
 _TEXT_MAX = 2000
-_HANDOFF = "<<HANDOFF>>"   # marker persona chèn khi chuyển chuyên gia; code bóc ra, khách không thấy
+# Marker persona chèn khi chuyển chuyên gia (khách KHÔNG thấy). Kèm lý do: <<HANDOFF:lý do ngắn>>.
+_HANDOFF_RE = re.compile(r"<<HANDOFF(?::([^>]*))?>>")
 _IMG_RE = re.compile(r"<<IMG:([^>]+)>>")   # marker ảnh: file_token Lark, bóc ra gửi ảnh riêng
 _PHONE_RE = re.compile(r"(?<!\d)(?:\+?84|0)\d{9,10}(?!\d)")   # SĐT VN trong tin khách
+
+# Handoff CƯỠNG BỨC ở code (chặn trước AI, tin cậy 100%): khách gõ tín hiệu tường minh.
+_HUMAN_KEYWORDS = ("gặp nhân viên", "gặp người", "người thật", "tư vấn viên", "tổng đài",
+                   "talk to human", "gặp admin", "chuyển máy", "gặp chuyên gia", "gặp sale",
+                   "nói chuyện với người", "cho gặp người", "gặp ai đó", "gặp quản lý")
+# Từ ngữ khiếu nại/pháp lý/tiêu cực mạnh -> người thật vào xoa dịu.
+_COMPLAINT_KEYWORDS = ("lừa đảo", "cắt cổ", "chặt chém", "báo công an", "khiếu nại", "hoàn tiền",
+                       "trả lại tiền", "đòi tiền", "kiện", "bóc phốt", "phốt", "quá tệ", "tệ hại",
+                       "thất vọng", "bức xúc", "vô trách nhiệm")
+_HUMAN_HANDOFF_REPLY = ("Dạ em kết nối chuyên gia bên em hỗ trợ trực tiếp cho Bác ngay ạ 🌸 "
+                        "Bác cho em xin SĐT hoặc Zalo để chuyên gia liên hệ Bác nhanh nhất nhé!")
+
+
+def _forced_handoff_reason(text: str) -> str | None:
+    """Tín hiệu tường minh cần người thật NGAY (chặn trước AI). None = để AI xử bình thường."""
+    t = (text or "").lower()
+    if any(k in t for k in _HUMAN_KEYWORDS):
+        return "Khách chủ động xin gặp người thật"
+    if any(k in t for k in _COMPLAINT_KEYWORDS):
+        return "Khách bức xúc/khiếu nại (từ ngữ tiêu cực mạnh)"
+    raw = (text or "").strip()
+    letters = [c for c in raw if c.isalpha()]
+    if len(letters) >= 12 and raw == raw.upper() and " " in raw:   # viết HOA cả câu -> đang gắt
+        return "Khách viết HOA toàn bộ câu (dấu hiệu bức xúc)"
+    return None
 
 
 def _find_phone(text: str) -> str | None:
@@ -58,11 +85,13 @@ def _find_phone(text: str) -> str | None:
     return m.group(0) if m else None
 
 
-def _extract_handoff(reply: str) -> tuple[str, bool]:
-    """Bóc marker handoff khỏi tin gửi khách. Trả (reply_sạch, có_handoff)."""
-    if _HANDOFF in reply:
-        return (reply.replace(_HANDOFF, "").strip(), True)
-    return (reply, False)
+def _extract_handoff(reply: str) -> tuple[str, str | None]:
+    """Bóc marker handoff khỏi tin gửi khách. Trả (reply_sạch, lý_do | None)."""
+    m = _HANDOFF_RE.search(reply)
+    if not m:
+        return (reply, None)
+    reason = (m.group(1) or "").strip() or "Khách cần chuyên gia (persona không ghi rõ lý do)"
+    return (_HANDOFF_RE.sub("", reply).strip(), reason)
 
 
 def _extract_images(reply: str) -> tuple[str, list[str]]:
@@ -72,10 +101,35 @@ def _extract_images(reply: str) -> tuple[str, list[str]]:
     return (clean, tokens)
 
 
+def _lark_sign(secret: str, ts: str) -> str:
+    """Chữ ký custom-bot Lark: HMAC-SHA256(key=f'{ts}\\n{secret}', msg='') -> base64."""
+    h = hmac.new(f"{ts}\n{secret}".encode(), b"", hashlib.sha256).digest()
+    return base64.b64encode(h).decode()
+
+
+async def _notify_lark(text: str) -> None:
+    """Đẩy 1 cảnh báo vào group Lark qua custom-bot-webhook. Rỗng URL -> bỏ. Lỗi không kéo bot chết."""
+    url = config.LARK_WEBHOOK_URL
+    if not url:
+        return
+    body: dict = {"msg_type": "text", "content": {"text": text}}
+    if config.LARK_WEBHOOK_SECRET:
+        ts = str(int(time.time()))
+        body["timestamp"] = ts
+        body["sign"] = _lark_sign(config.LARK_WEBHOOK_SECRET, ts)
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as c:
+            r = await c.post(url, json=body)
+            d = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+            if d.get("code") not in (0, None):
+                print(f"[lark] webhook {d.get('code')}: {d.get('msg')}", file=sys.stderr)
+    except Exception as e:
+        print(f"[lark] webhook lỗi: {type(e).__name__}: {e}", file=sys.stderr)
+
+
 async def notify_admins(text: str) -> None:
-    """Gửi 1 tin tới mọi admin (handoff / báo lỗi). Không có admin thì thôi."""
-    for uid in config.ADMIN_UIDS:
-        await send_text(uid, text)
+    """Gửi 1 cảnh báo tới admin QUA LARK group (webhook). Không báo qua FB Messenger nữa."""
+    await _notify_lark(text)
 
 
 # Cache tên FB theo psid (RAM). Dùng cho thông báo admin + trang admin.
@@ -552,6 +606,15 @@ async def _process(psid: str, text: str) -> None:
         return
     async with _SEM:
         _STICKER_COUNT.pop(psid, None)                 # có tin chữ thật -> reset đếm sticker
+        # Handoff cưỡng bức (tín hiệu tường minh): chặn trước AI, người thật vào ngay.
+        forced = _forced_handoff_reason(text) if not images else None
+        if forced:
+            stats.log_event("handoff", psid)
+            await send_text(psid, _HUMAN_HANDOFF_REPLY)
+            await notify_admins(f"🔔 CHUYỂN NGƯỜI THẬT: {await _label(psid)}\n"
+                                f"Lý do: {forced}\nTin khách: {text[:200]}")
+            await _save_lead_to_crm(psid)
+            return
         await send_action(psid, "typing_on")
         # to_thread: is_new_customer có thể chạm Firebase (cache miss) - offload để
         # Firebase chậm/chết không block event loop (mọi khách khác đứng).
@@ -566,14 +629,15 @@ async def _process(psid: str, text: str) -> None:
             await notify_admins(f"⚠️ LỖI BOT khi trả lời khách {await _label(psid)}\n"
                                 f"{type(e).__name__}: {e}\nTin khách: {text[:200]}")
             return
-        reply, handoff = _extract_handoff(reply)
+        reply, handoff_reason = _extract_handoff(reply)
         reply, img_tokens = _extract_images(reply)
-        if handoff:
-            # Handoff: gửi phiếu xác nhận cho KHÁCH trước, rồi báo admin để người thật tiếp quản.
+        if handoff_reason:
+            # Handoff: gửi phiếu xác nhận cho KHÁCH trước, rồi báo admin (kèm lý do) để người thật tiếp quản.
             stats.log_event("handoff", psid, duration_s=time.monotonic() - t0)
             if reply:
                 await send_text(psid, reply)
-            await notify_admins(f"🔔 KHÁCH CẦN CHUYÊN GIA: {await _label(psid)}\n\n{reply}")
+            await notify_admins(f"🔔 KHÁCH CẦN CHUYÊN GIA: {await _label(psid)}\n"
+                                f"Lý do: {handoff_reason}\n\n{reply}")
             await _save_lead_to_crm(psid)
             return
         stats.log_event("ok", psid, duration_s=time.monotonic() - t0)

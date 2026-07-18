@@ -31,6 +31,11 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 # PSID của admin: nhận báo handoff (khách cần chuyên gia) + báo lỗi bot. VD: BOT_ADMIN_UIDS=123,456
 ADMIN_UIDS = _split(os.getenv("BOT_ADMIN_UIDS", ""))
 
+# Báo admin qua Lark: dán URL custom-bot-webhook của group Lark. Rỗng -> bỏ qua (chỉ báo FB).
+# Bật "ký" ở webhook thì điền thêm secret; không bật thì để trống.
+LARK_WEBHOOK_URL = os.getenv("LARK_WEBHOOK_URL", "").strip()
+LARK_WEBHOOK_SECRET = os.getenv("LARK_WEBHOOK_SECRET", "").strip()
+
 # URL công khai của bot (ngrok/domain) - để dựng link ảnh proxy FB tải được. VD https://abc.ngrok.app
 PUBLIC_URL = os.getenv("PUBLIC_URL", "").strip().rstrip("/")
 

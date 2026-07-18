@@ -24,6 +24,26 @@ import config
 _TOKEN = {"val": "", "exp": 0.0}
 _LOCK = threading.Lock()
 
+# Retry lỗi MẠNG tạm (SSL handshake, connect, timeout, server ngắt) - Lark thi thoảng chập.
+# TransportError bao: ConnectError(gồm SSL)/TimeoutException/RemoteProtocolError. KHÔNG bắt
+# HTTPStatusError (lỗi thật 4xx/5xx). Dùng chung cho ảnh + CRM (lark_crm import lại).
+_RETRY_BACKOFF = (1.0, 3.0)     # số lần = len+1 (3 lần tổng), giãn dần
+
+
+def request_retry(method: str, url: str, **kwargs) -> httpx.Response:
+    """httpx.request có retry lỗi mạng transient. Ném lỗi ở lần cuối nếu vẫn hỏng."""
+    last: Exception | None = None
+    for i in range(len(_RETRY_BACKOFF) + 1):
+        try:
+            return httpx.request(method, url, **kwargs)
+        except httpx.TransportError as e:
+            last = e
+            if i < len(_RETRY_BACKOFF):
+                print(f"[lark] {method} {url.split('?')[0].rsplit('/',1)[-1]} lỗi mạng tạm "
+                      f"({type(e).__name__}), thử lại {i+1}/{len(_RETRY_BACKOFF)}...", file=sys.stderr)
+                time.sleep(_RETRY_BACKOFF[i])
+    raise last   # type: ignore[misc]
+
 # Cache bytes ảnh (TTL 1h): tải 1 lần, các lần gửi/thử lại sau trúng cache, khách không chờ.
 _MEDIA_CACHE: dict[str, tuple[float, bytes, str]] = {}   # token -> (ts, bytes, ctype)
 _MEDIA_CACHE_LOCK = threading.Lock()
@@ -41,9 +61,9 @@ def _tenant_token() -> str:
     with _LOCK:
         if _TOKEN["val"] and time.time() < _TOKEN["exp"]:
             return _TOKEN["val"]
-        r = httpx.post(f"{config.LARK_DOMAIN}/open-apis/auth/v3/tenant_access_token/internal",
-                       json={"app_id": config.LARK_APP_ID, "app_secret": config.LARK_APP_SECRET},
-                       timeout=15.0)
+        r = request_retry("POST", f"{config.LARK_DOMAIN}/open-apis/auth/v3/tenant_access_token/internal",
+                          json={"app_id": config.LARK_APP_ID, "app_secret": config.LARK_APP_SECRET},
+                          timeout=15.0)
         d = r.json()
         if d.get("code") != 0:
             raise RuntimeError(f"Lark auth lỗi: {d.get('code')} {d.get('msg')}")
@@ -64,7 +84,7 @@ def get_image_tokens(product_id: str) -> list[str]:
             {"field_name": config.LARK_PRODUCT_FIELD, "operator": "is", "value": [code]}]},
         "automatic_fields": False,
     }
-    r = httpx.post(url, headers={"Authorization": f"Bearer {tok}"}, json=body, timeout=20.0)
+    r = request_retry("POST", url, headers={"Authorization": f"Bearer {tok}"}, json=body, timeout=20.0)
     d = r.json()
     if d.get("code") != 0:
         raise RuntimeError(f"Lark search lỗi: {d.get('code')} {d.get('msg')}")
@@ -92,7 +112,7 @@ def download_media(file_token: str) -> tuple[bytes, str]:
     tok = _tenant_token()
     extra = urllib.parse.quote(json.dumps({"bitablePerm": {"tableId": config.LARK_TABLE_ID, "rev": 1}}))
     url = f"{config.LARK_DOMAIN}/open-apis/drive/v1/medias/{file_token}/download?extra={extra}"
-    r = httpx.get(url, headers={"Authorization": f"Bearer {tok}"}, timeout=30.0)
+    r = request_retry("GET", url, headers={"Authorization": f"Bearer {tok}"}, timeout=30.0)
     r.raise_for_status()
     data, ctype = r.content, r.headers.get("content-type", "image/jpeg")
     with _MEDIA_CACHE_LOCK:

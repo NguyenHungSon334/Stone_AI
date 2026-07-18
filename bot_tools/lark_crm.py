@@ -15,11 +15,9 @@ import sys
 import threading
 import time
 
-import httpx
-
 import config
 import util
-from bot_tools.lark_image import _tenant_token   # tái dùng token tenant (đã cache)
+from bot_tools.lark_image import _tenant_token, request_retry   # tái dùng token + retry transient
 
 _NGUON_LEAD = "Facebook"          # bot chạy trên Messenger -> nguồn cố định
 _OPT_CACHE: dict[str, tuple[float, set[str]]] = {}   # field_name -> (ts, {option})
@@ -49,8 +47,8 @@ def _select_options(field_name: str) -> set[str]:
     opts: set[str] = set()
     try:
         tok = _tenant_token()
-        r = httpx.get(_api("fields"), headers={"Authorization": f"Bearer {tok}"},
-                      params={"page_size": 100}, timeout=15.0)
+        r = request_retry("GET", _api("fields"), headers={"Authorization": f"Bearer {tok}"},
+                          params={"page_size": 100}, timeout=15.0)
         d = r.json()
         for f in (d.get("data", {}).get("items") or []):
             if f.get("field_name") == field_name:
@@ -96,7 +94,7 @@ def _write(method: str, path: str, tok: str, fields: dict) -> str:
 
     Cascade fail (SingleSelectFieldConvFail) -> bỏ cột cascade, thử LẠI 1 lần để lead vẫn lưu."""
     def _call(fs: dict):
-        r = httpx.request(method, _api(path), headers={"Authorization": f"Bearer {tok}"},
+        r = request_retry(method, _api(path), headers={"Authorization": f"Bearer {tok}"},
                           json={"fields": fs}, timeout=20.0)
         return r.json()
 
@@ -144,8 +142,8 @@ def _fetch_lead_code(record_id: str, tok: str, retry: bool = False) -> str:
         if attempt:
             time.sleep(2)
         try:
-            r = httpx.get(_api(f"records/{record_id}"), headers={"Authorization": f"Bearer {tok}"},
-                          timeout=15.0)
+            r = request_retry("GET", _api(f"records/{record_id}"), headers={"Authorization": f"Bearer {tok}"},
+                              timeout=15.0)
             v = (r.json().get("data", {}).get("record", {}).get("fields", {}) or {}).get("Lead/Chance")
             if isinstance(v, list):                    # phòng field trả dạng block
                 v = "".join(x.get("text", "") for x in v if isinstance(x, dict))
@@ -164,8 +162,8 @@ def lead_code(psid: str) -> str:
 def _record_exists(record_id: str, tok: str) -> bool:
     """record_id còn tồn tại trong Base không (phòng bị xóa tay -> tránh update record ma)."""
     try:
-        r = httpx.get(_api(f"records/{record_id}"), headers={"Authorization": f"Bearer {tok}"},
-                      timeout=15.0)
+        r = request_retry("GET", _api(f"records/{record_id}"), headers={"Authorization": f"Bearer {tok}"},
+                          timeout=15.0)
         return r.json().get("code") == 0
     except Exception:
         return False
@@ -176,8 +174,8 @@ def _find_by_phone(phone: str, tok: str) -> str | None:
     body = {"filter": {"conjunction": "and", "conditions": [
         {"field_name": "Số điện thoại", "operator": "is", "value": [phone]}]},
         "field_names": ["Số điện thoại"], "automatic_fields": False}
-    r = httpx.post(_api("records/search"), headers={"Authorization": f"Bearer {tok}"},
-                   json=body, timeout=20.0)
+    r = request_retry("POST", _api("records/search"), headers={"Authorization": f"Bearer {tok}"},
+                      json=body, timeout=20.0)
     for it in (r.json().get("data", {}).get("items") or []):
         return it.get("record_id")
     return None

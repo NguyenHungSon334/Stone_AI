@@ -129,18 +129,34 @@ def _codes_in(text: str) -> set[str]:
     return {m.group(1).upper() for m in _code_pattern().finditer(text or "")}
 
 
-def _new_image_markers(history: list, reply: str) -> str:
-    """Marker ảnh cho các mã nhắc LẦN ĐẦU trong hội thoại (chưa từng xuất hiện ở lượt trước).
+# Khách chủ động xin xem ảnh/hình/mẫu -> gửi ảnh kể cả sản phẩm đã gửi trước đó.
+_ASK_IMG_RE = re.compile(r"xem\s*(ảnh|hình|mẫu)|cho\s*(xem|xin)\s*(ảnh|hình|mẫu)|"
+                         r"gửi\s*(ảnh|hình|mẫu)|(ảnh|hình)\s*(thật|thực tế|mẫu)|có\s*(ảnh|hình)\s*(không|ko|k)\b",
+                         re.IGNORECASE)
 
-    1 mã = 1 ảnh, tối đa _MAX_NEW_IMAGES/tin. Mã không có ảnh bỏ qua im lặng.
+
+def _asks_for_image(text: str) -> bool:
+    return bool(_ASK_IMG_RE.search(text or ""))
+
+
+def _image_markers(history: list, reply: str, user_text: str) -> str:
+    """Marker ảnh (1 mã = 1 ảnh, tối đa _MAX_NEW_IMAGES/tin, mã không ảnh bỏ im lặng).
+
+    2 trường hợp gửi ảnh:
+    - Khách XIN cụ thể (xem ảnh/hình/mẫu...) -> gửi mọi mã nhắc trong câu (reply + tin khách),
+      KỂ CẢ đã gửi trước đó.
+    - Không xin -> chỉ mã nhắc LẦN ĐẦU trong hội thoại (chưa từng xuất hiện ở lượt trước).
     """
-    seen: set[str] = set()
-    for m in history:
-        if isinstance(m.get("content"), str):
-            seen |= _codes_in(m["content"])
-    new_codes = sorted(_codes_in(reply) - seen)
+    if _asks_for_image(user_text):
+        codes = _codes_in(reply) | _codes_in(user_text)     # khách xin -> bỏ qua 'đã seen'
+    else:
+        seen: set[str] = set()
+        for m in history:
+            if isinstance(m.get("content"), str):
+                seen |= _codes_in(m["content"])
+        codes = _codes_in(reply) - seen
     markers: list[str] = []
-    for code in new_codes:
+    for code in sorted(codes):
         if len(markers) >= _MAX_NEW_IMAGES:
             break
         try:
@@ -285,11 +301,25 @@ def _save_hist(psid: str, full_msgs: list, new_msgs: list | None = None) -> None
         print(f"[hist] ghi lỗi psid={psid}: {type(e).__name__}: {e}", file=sys.stderr)
 
 
+_IMG_MARKER_RE = re.compile(r"\s*<<IMG:[^>]+>>")   # marker ảnh: KHÔNG cho model thấy (chống echo token chết)
+
+
 def _to_contents(msgs: list) -> list[types.Content]:
-    """Log ({"role": user|assistant, "content": str}) -> Content Gemini (assistant -> model)."""
-    return [types.Content(role="user" if m["role"] == "user" else "model",
-                          parts=[types.Part.from_text(text=m["content"])])
-            for m in msgs if isinstance(m.get("content"), str) and m["content"]]
+    """Log ({"role": user|assistant, "content": str}) -> Content Gemini (assistant -> model).
+
+    Strip marker <<IMG:token>> khỏi text: token ảnh dễ chết (ảnh Base bị thay) -> nếu model
+    thấy marker cũ trong history nó chép lại -> gửi token 404. Bỏ đi thì model không echo được.
+    """
+    out = []
+    for m in msgs:
+        c = m.get("content")
+        if not (isinstance(c, str) and c):
+            continue
+        c = _IMG_MARKER_RE.sub("", c).strip()
+        if c:
+            out.append(types.Content(role="user" if m["role"] == "user" else "model",
+                                     parts=[types.Part.from_text(text=c)]))
+    return out
 
 
 def _sum_path(psid: str) -> Path:
@@ -519,9 +549,8 @@ def _answer_sync(psid: str, text: str, images: list[tuple[bytes, str]] | None = 
             if not reply:
                 raise BrainError(f"API không trả nội dung. finish_reason={cand.finish_reason}")
             # Sản phẩm nhắc lần đầu trong hội thoại -> tự kèm marker ảnh (messenger bóc ra gửi).
-            markers = _new_image_markers(full, reply)
-            if markers:
-                reply = reply + " " + markers
+            markers = _image_markers(full, reply, text)
+            reply_out = f"{reply} {markers}" if markers else reply   # marker CHỈ để gửi, KHÔNG lưu history
             stats.log_usage(psid, tok_in, tok_out)
             # Nối vào log SẠCH: chỉ text turn (bỏ vòng tool trung gian) -> không orphan tool block.
             # "at" = thời gian cụ thể: khách gửi lúc nào, bot trả lúc nào.
@@ -533,7 +562,7 @@ def _answer_sync(psid: str, text: str, images: list[tuple[bytes, str]] | None = 
             _save_hist(psid, new_full, new_msgs)       # Firebase chỉ append phần mới (O(1))
             # Chat dài -> cập nhật tóm tắt cuốn chiếu ở NỀN (không trễ tin khách; ~1/10 lượt mới chạy).
             _summarize_bg(client, model_id, psid, new_full)
-            return reply
+            return reply_out
         raise BrainError("Quá nhiều vòng tool, không chốt được câu trả lời.")
 
 

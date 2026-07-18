@@ -34,13 +34,31 @@ async def _followup_loop():
             print(f"[followup] vòng quét lỗi: {type(e).__name__}: {e}", file=sys.stderr)
 
 
+async def _tunnel_watch_loop():
+    """Nền: mỗi TUNNEL_CHECK_MIN phút ping PUBLIC_URL từ ngoài -> tunnel đứt thì báo Lark."""
+    while True:
+        await asyncio.sleep(max(1, config.TUNNEL_CHECK_MIN) * 60)
+        try:
+            await messenger.run_tunnel_check()
+        except Exception as e:
+            print(f"[tunnel] vòng check lỗi: {type(e).__name__}: {e}", file=sys.stderr)
+
+
+def _spawn(coro):
+    t = asyncio.create_task(coro)
+    _BG.add(t)
+    t.add_done_callback(_BG.discard)
+
+
 @app.on_event("startup")
 async def _start_bg():
     if config.FOLLOWUP_ENABLED:
-        t = asyncio.create_task(_followup_loop())
-        _BG.add(t)
-        t.add_done_callback(_BG.discard)
+        _spawn(_followup_loop())
         print(f"[app] follow-up bật: nhắc sau {config.FOLLOWUP_AFTER_H}h, quét mỗi {config.FOLLOWUP_CHECK_MIN}p",
+              file=sys.stderr)
+    if config.TUNNEL_WATCH_ENABLED and config.PUBLIC_URL:
+        _spawn(_tunnel_watch_loop())
+        print(f"[app] canh tunnel bật: ping {config.PUBLIC_URL} mỗi {config.TUNNEL_CHECK_MIN}p",
               file=sys.stderr)
 
 

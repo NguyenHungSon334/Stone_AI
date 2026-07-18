@@ -512,6 +512,46 @@ async def run_followups() -> None:
         stats.log_event("followup", psid)
 
 
+# --- Canh tunnel chết: ping PUBLIC_URL/webhook từ ngoài, đứt -> báo Lark 1 lần ---
+_tunnel_alive = True    # trạng thái đã báo gần nhất (chỉ báo khi ĐỔI trạng thái, không spam)
+
+
+async def _tunnel_ok() -> bool:
+    """True chỉ khi SERVER MÌNH trả lời qua tunnel (200 + body == challenge).
+    Phân biệt được với trang lỗi ngrok (tunnel chết nhưng domain vẫn trả HTTP)."""
+    nonce = f"tw{int(time.time())}"
+    url = f"{config.PUBLIC_URL}/webhook/messenger"
+    params = {"hub.mode": "subscribe", "hub.verify_token": config.VERIFY_TOKEN, "hub.challenge": nonce}
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as c:
+            r = await c.get(url, params=params)
+        return r.status_code == 200 and r.text.strip() == nonce
+    except Exception:
+        return False
+
+
+async def run_tunnel_check() -> None:
+    """1 vòng ping. Fail liên tiếp đủ ngưỡng -> báo Lark 'tunnel chết'; sống lại -> báo phục hồi."""
+    global _tunnel_alive
+    if not config.PUBLIC_URL:
+        return
+    fails = 0
+    for _ in range(max(1, config.TUNNEL_FAILS_TO_ALERT)):
+        if await _tunnel_ok():
+            break
+        fails += 1
+        if fails < config.TUNNEL_FAILS_TO_ALERT:
+            await asyncio.sleep(5)
+    ok = fails < config.TUNNEL_FAILS_TO_ALERT
+    if not ok and _tunnel_alive:
+        _tunnel_alive = False
+        await notify_admins(f"🔴 TUNNEL CHẾT: FB không vào được bot qua {config.PUBLIC_URL}\n"
+                            f"Bot đang ĐIẾC - khách nhắn không tới. Bật lại ngrok/cloudflared ngay.")
+    elif ok and not _tunnel_alive:
+        _tunnel_alive = True
+        await notify_admins(f"🟢 TUNNEL SỐNG LẠI: bot nhận tin bình thường qua {config.PUBLIC_URL}")
+
+
 async def _save_lead_to_crm(psid: str) -> None:
     """Handoff: trích lead từ hội thoại -> ghi Lark CRM. Best-effort, lỗi chỉ báo admin."""
     lead = await brain.extract_lead(psid)
@@ -601,7 +641,7 @@ async def _process(psid: str, text: str) -> None:
             stats.log_event("handoff", psid)
             await send_text(psid, _HUMAN_HANDOFF_REPLY)
             await notify_admins(f"🔔 CHUYỂN NGƯỜI THẬT: {await _label(psid)}\n"
-                                f"Lý do: {forced}\nTin khách: {text[:200]}")
+                                f"Lý do: {forced}\nTin khách: {text}")
             await _save_lead_to_crm(psid)
             return
         await send_action(psid, "typing_on")
@@ -616,7 +656,7 @@ async def _process(psid: str, text: str) -> None:
             print(f"[handle] {type(e).__name__}: {e}", file=sys.stderr)
             stats.log_event("error", psid, note=f"{type(e).__name__}: {e}")
             await notify_admins(f"⚠️ LỖI BOT khi trả lời khách {await _label(psid)}\n"
-                                f"{type(e).__name__}: {e}\nTin khách: {text[:200]}")
+                                f"{type(e).__name__}: {e}\nTin khách: {text}")
             return
         reply, handoff_reason = _extract_handoff(reply)
         reply, img_tokens = _extract_images(reply)
@@ -654,9 +694,9 @@ async def _process(psid: str, text: str) -> None:
         # Thông báo admin SAU khi đã trả lời khách (không bắt khách chờ). Admin tự nhắn thì bỏ qua.
         if psid not in config.ADMIN_UIDS:
             if is_new:
-                await notify_admins(f"👋 KHÁCH MỚI: {await _label(psid)}\nTin đầu: {text[:200]}\n"
-                                    f"Bot trả lời: {reply[:200]}")
+                await notify_admins(f"👋 KHÁCH MỚI: {await _label(psid)}\nTin đầu: {text}\n"
+                                    f"Bot trả lời: {reply}")
             phone = _find_phone(text)
             if phone:
                 await notify_admins(f"📞 KHÁCH ĐỂ LẠI SĐT: {phone} - {await _label(psid)}\n"
-                                    f"Tin khách: {text[:200]}")
+                                    f"Tin khách: {text}")

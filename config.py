@@ -69,6 +69,12 @@ FOLLOWUP_ENABLED = os.getenv("BOT_FOLLOWUP_ENABLED", "1").strip() not in ("0", "
 FOLLOWUP_AFTER_H = float(os.getenv("BOT_FOLLOWUP_AFTER_H", "4"))     # im bao lâu thì nhắc
 FOLLOWUP_CHECK_MIN = int(os.getenv("BOT_FOLLOWUP_CHECK_MIN", "15"))  # chu kỳ quét
 
+# Canh tunnel (ngrok/cloudflared) chết: tự ping PUBLIC_URL/webhook từ ngoài -> đứt thì báo Lark.
+# Mặc định bật khi có PUBLIC_URL. Tắt: BOT_TUNNEL_WATCH=0.
+TUNNEL_WATCH_ENABLED = os.getenv("BOT_TUNNEL_WATCH", "1").strip() not in ("0", "", "false")
+TUNNEL_CHECK_MIN = int(os.getenv("BOT_TUNNEL_CHECK_MIN", "3"))       # chu kỳ ping
+TUNNEL_FAILS_TO_ALERT = int(os.getenv("BOT_TUNNEL_FAILS", "2"))      # số lần fail liên tiếp mới báo (tránh báo giả)
+
 # Firebase Realtime DB: mirror conversations + stats lên cloud (backup/xem remote).
 # Cả 2 trống -> tắt hẳn. FIREBASE_CRED = path service account json; DB_URL = link RTDB.
 FIREBASE_CRED = os.getenv("FIREBASE_CRED", "").strip()

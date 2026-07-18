@@ -3,6 +3,10 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+# tzdata: image slim thiếu zoneinfo -> TZ=Asia/Ho_Chi_Minh không ăn nếu không cài.
+RUN apt-get update && apt-get install -y --no-install-recommends tzdata \
+    && rm -rf /var/lib/apt/lists/*
+
 # Cài phụ thuộc trước (tận dụng layer cache khi chỉ đổi code).
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt

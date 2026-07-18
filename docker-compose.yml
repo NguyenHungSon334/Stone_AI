@@ -9,6 +9,7 @@ services:
     environment:
       - RESTART_MODE=exit          # nút Restart trên dashboard -> thoát, compose tự dựng lại
       - PYTHONIOENCODING=utf-8
+      - TZ=Asia/Ho_Chi_Minh        # giờ trong log/CRM/_now_str đúng múi VN (cần tzdata trong image)
     volumes:
       - ./.env:/app/.env                              # cấu hình + secret (sửa qua dashboard)
       # Firebase (nguồn chính conversations + stats): scp key lên VPS cạnh compose.

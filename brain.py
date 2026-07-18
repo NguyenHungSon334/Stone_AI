@@ -27,9 +27,13 @@ import stats
 from bot_tools import lark_image
 from bot_tools.find_by_price import parse_money, render, rows_by_ids, search
 
-# 1 file/khách, GIỮ TOÀN BỘ log hội thoại. API chỉ nạp _MAX_TURNS lượt cuối để chặn token.
+# 1 file/khách, GIỮ TOÀN BỘ log (admin xem đủ). AI đọc NHẸ = tóm tắt phần cũ + đuôi verbatim:
+# token/lượt bị chặn, KHÔNG phình theo độ dài chat. Tóm tắt = sidecar <psid>.sum.json (local,
+# tự dựng lại được nên không cần mirror Firebase).
 _HIST_DIR = config.ROOT / "conversations"
-_MAX_TURNS = 12          # số lượt gần nhất GỬI cho API (log vẫn giữ đủ)
+_MAX_TURNS = 12          # số lượt gần nhất GỬI cho API nguyên văn (chặn token)
+_KEEP_VERBATIM = _MAX_TURNS * 2   # số TIN cuối luôn gửi nguyên văn (~12 lượt)
+_SUMMARY_TRIGGER = 20    # phần chưa-tóm vượt _KEEP_VERBATIM + ngần này -> cập nhật tóm tắt
 _MAX_TOOL_LOOPS = 5      # trần số vòng gọi tool trong 1 câu trả lời
 
 # BOT_MODEL: alias -> model id API. Có dấu '.' hoặc bắt đầu 'gemini' thì coi là id đầy đủ.
@@ -272,11 +276,16 @@ def _write_local_hist(psid: str, full_msgs: list) -> None:
     tmp.replace(p)
 
 
-def _save_hist(psid: str, full_msgs: list) -> None:
-    """Ghi TOÀN BỘ log khách: cache local + Firebase (nguồn chính, thread nền)."""
+def _save_hist(psid: str, full_msgs: list, new_msgs: list | None = None) -> None:
+    """Ghi TOÀN BỘ log khách (admin xem đủ): cache local (full) + Firebase.
+    new_msgs có -> Firebase chỉ APPEND phần mới theo index (O(1)/lượt, không up lại cả mảng).
+    AI không đọc nguyên full - đọc tóm tắt + đuôi verbatim."""
     try:
-        _write_local_hist(psid, full_msgs)
-        fb.mirror_conversation(psid, full_msgs)
+        _write_local_hist(psid, full_msgs)             # local = full (đĩa rẻ), nguồn đọc chính
+        if new_msgs:
+            fb.append_conversation(psid, len(full_msgs) - len(new_msgs), new_msgs)
+        else:
+            fb.mirror_conversation(psid, full_msgs)    # fallback: ghi đè cả mảng
     except Exception as e:
         print(f"[hist] ghi lỗi psid={psid}: {type(e).__name__}: {e}", file=sys.stderr)
 
@@ -286,6 +295,95 @@ def _to_contents(msgs: list) -> list[types.Content]:
     return [types.Content(role="user" if m["role"] == "user" else "model",
                           parts=[types.Part.from_text(text=m["content"])])
             for m in msgs if isinstance(m.get("content"), str) and m["content"]]
+
+
+def _sum_path(psid: str) -> Path:
+    return _HIST_DIR / (_psid_path(psid).stem + ".sum.json")
+
+
+def _load_summary(psid: str) -> dict | None:
+    """Tóm tắt cuốn chiếu {text, upto}. upto = số tin ĐẦU log đã gộp vào tóm tắt."""
+    try:
+        d = json.loads(_sum_path(psid).read_text(encoding="utf-8"))
+        return d if isinstance(d, dict) and d.get("text") else None
+    except Exception:
+        return None
+
+
+def _save_summary(psid: str, text: str, upto: int) -> None:
+    try:
+        _HIST_DIR.mkdir(parents=True, exist_ok=True)
+        p = _sum_path(psid)
+        tmp = p.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps({"text": text, "upto": upto}, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(p)
+    except Exception as e:
+        print(f"[sum] ghi lỗi psid={psid}: {type(e).__name__}: {e}", file=sys.stderr)
+
+
+def _msgs_as_text(msgs: list) -> str:
+    lines = []
+    for m in msgs:
+        c = m.get("content")
+        if isinstance(c, str) and c:
+            lines.append(f"{'Khách' if m.get('role') == 'user' else 'Bot'}: {c}")
+    return "\n".join(lines)
+
+
+def _summarize(client, model_id: str, prev: str, new_msgs: list) -> str:
+    """Cập nhật tóm tắt: gộp tóm-tắt-cũ + tin mới -> tóm tắt mới. Input luôn NHỎ (tóm tắt + ~vài chục tin).
+    Không tool, không cache -> gọi rẻ. Lỗi -> trả prev (giữ nguyên tóm tắt cũ)."""
+    prompt = (
+        "Cập nhật bản tóm tắt hội thoại tư vấn đá mỹ nghệ (mộ/lăng/cổng...) dưới đây thành 5-10 gạch "
+        "đầu dòng NGẮN, giữ mọi thông tin quan trọng để tư vấn tiếp: nhu cầu/hạng mục, mã sản phẩm đã "
+        "tư vấn, giá đã báo, tên/SĐT/địa chỉ/tỉnh khách, mốc thời gian đã hẹn, điểm cần lưu ý. "
+        "Chỉ xuất bản tóm tắt, không thêm lời dẫn.\n\n"
+        f"# Tóm tắt hiện có\n{prev or '(chưa có)'}\n\n# Tin mới cần gộp vào\n{_msgs_as_text(new_msgs)}")
+    try:
+        cfg = types.GenerateContentConfig(max_output_tokens=1024)
+        resp = _generate(client, model=model_id,
+                         contents=[types.Content(role="user", parts=[types.Part.from_text(text=prompt)])],
+                         config=cfg)
+        cand = (resp.candidates or [None])[0]
+        out = "".join(p.text for p in (cand.content.parts or []) if p.text).strip() if cand and cand.content else ""
+        return out or prev
+    except Exception as e:
+        print(f"[sum] tóm tắt lỗi psid: {type(e).__name__}: {e}", file=sys.stderr)
+        return prev
+
+
+def _maybe_summarize(client, model_id: str, psid: str, full: list) -> None:
+    """Sau khi lưu: nếu phần chưa-tóm quá dài -> cập nhật tóm tắt, chốt upto để đuôi verbatim luôn ~_KEEP_VERBATIM."""
+    summ = _load_summary(psid)
+    upto = summ.get("upto", 0) if summ else 0
+    if len(full) - upto <= _KEEP_VERBATIM + _SUMMARY_TRIGGER:
+        return
+    cutoff = len(full) - _KEEP_VERBATIM               # gộp mọi tin cũ hơn đuôi verbatim
+    new_text = _summarize(client, model_id, summ.get("text", "") if summ else "", full[upto:cutoff])
+    _save_summary(psid, new_text, cutoff)
+
+
+_SUMMARIZING: set[str] = set()
+_SUMMARIZING_LOCK = threading.Lock()
+
+
+def _summarize_bg(client, model_id: str, psid: str, full: list) -> None:
+    """Chạy _maybe_summarize ở THREAD NỀN -> không trễ tin trả lời khách. 1 khách chỉ 1 lần chạy 1 lúc."""
+    with _SUMMARIZING_LOCK:
+        if psid in _SUMMARIZING:                       # đang tóm cho khách này -> bỏ, khỏi đua sidecar
+            return
+        _SUMMARIZING.add(psid)
+
+    def run() -> None:
+        try:
+            _maybe_summarize(client, model_id, psid, full)
+        except Exception as e:
+            print(f"[sum] bg lỗi psid={psid}: {type(e).__name__}: {e}", file=sys.stderr)
+        finally:
+            with _SUMMARIZING_LOCK:
+                _SUMMARIZING.discard(psid)
+
+    threading.Thread(target=run, daemon=True).start()
 
 
 def _now_str() -> str:
@@ -385,16 +483,28 @@ def _gen_answer(client, model_id: str, contents: list, handle: str | None):
     return _generate(client, model=model_id, contents=contents, config=cfg), None
 
 
-def _answer_sync(psid: str, text: str) -> str:
+def _answer_sync(psid: str, text: str, images: list[tuple[bytes, str]] | None = None) -> str:
     client = _get_client()
     model_id = _model_id()
     user_at = _now_str()                              # mốc khách gửi (lúc bắt đầu xử lý)
     with _psid_lock(psid):
-        full = _load_hist(psid)                       # toàn bộ log
+        full = _load_hist(psid)                       # TOÀN BỘ log (lưu đủ cho admin)
         # thời gian thực nhét ĐẦU contents (tách khỏi cache tĩnh)
         contents = [types.Content(role="user", parts=[types.Part.from_text(text=_time_note_text())])]
-        contents += _to_contents(full[-_MAX_TURNS * 2:])  # chỉ nạp N lượt cuối cho API
-        contents.append(types.Content(role="user", parts=[types.Part.from_text(text=text)]))
+        # AI đọc NHẸ: tóm tắt phần cũ + đuôi verbatim. upto = tin đã gộp vào tóm tắt.
+        summ = _load_summary(psid)
+        if summ:
+            contents.append(types.Content(role="user", parts=[types.Part.from_text(
+                text=f"[Tóm tắt hội thoại trước đó - dùng để nhớ ngữ cảnh]\n{summ['text']}")]))
+            start = min(summ.get("upto", 0), len(full))
+        else:
+            start = max(0, len(full) - _KEEP_VERBATIM)
+        contents += _to_contents(full[start:])        # đuôi nguyên văn (token bị chặn, không phình)
+        # Ảnh khách gửi: nhét bytes vào lượt hiện tại cho Gemini vision đọc (không lưu vào lịch sử).
+        parts = [types.Part.from_text(text=text)]
+        for data, ctype in (images or []):
+            parts.append(types.Part.from_bytes(data=data, mime_type=ctype))
+        contents.append(types.Content(role="user", parts=parts))
 
         handle = _cached_handle(client, model_id)     # None -> nhồi thẳng (fallback)
         tok_in = tok_out = 0
@@ -427,8 +537,14 @@ def _answer_sync(psid: str, text: str) -> str:
             stats.log_usage(psid, tok_in, tok_out)
             # Nối vào log SẠCH: chỉ text turn (bỏ vòng tool trung gian) -> không orphan tool block.
             # "at" = thời gian cụ thể: khách gửi lúc nào, bot trả lúc nào.
-            _save_hist(psid, full + [{"role": "user", "content": text, "at": user_at},
-                                     {"role": "assistant", "content": reply, "at": _now_str()}])
+            # Ảnh không lưu bytes vào log -> ghi chú số ảnh để lượt sau còn biết khách từng gửi ảnh.
+            user_content = text if not images else f"{text}\n[khách gửi {len(images)} ảnh]"
+            new_msgs = [{"role": "user", "content": user_content, "at": user_at},
+                        {"role": "assistant", "content": reply, "at": _now_str()}]
+            new_full = full + new_msgs
+            _save_hist(psid, new_full, new_msgs)       # Firebase chỉ append phần mới (O(1))
+            # Chat dài -> cập nhật tóm tắt cuốn chiếu ở NỀN (không trễ tin khách; ~1/10 lượt mới chạy).
+            _summarize_bg(client, model_id, psid, new_full)
             return reply
         raise BrainError("Quá nhiều vòng tool, không chốt được câu trả lời.")
 
@@ -484,9 +600,11 @@ def _extract_lead_sync(psid: str) -> dict | None:
         return None
 
 
-async def answer(psid: str, text: str) -> str:
-    """Trả lời 1 tin của khách. Chạy API trong thread để không chặn event loop."""
-    return await asyncio.to_thread(_answer_sync, psid, text)
+async def answer(psid: str, text: str, images: list[tuple[bytes, str]] | None = None) -> str:
+    """Trả lời 1 tin của khách. Chạy API trong thread để không chặn event loop.
+
+    images: ảnh khách gửi (bytes, content_type) -> Gemini vision đọc trong lượt này."""
+    return await asyncio.to_thread(_answer_sync, psid, text, images)
 
 
 async def extract_lead(psid: str) -> dict | None:

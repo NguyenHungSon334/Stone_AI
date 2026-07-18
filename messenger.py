@@ -18,6 +18,31 @@ import stats
 from bot_tools import lark_crm, lark_image
 
 _MAX_IMAGES_PER_MSG = 4   # khớp brain._MAX_NEW_IMAGES
+_IMG_MAX_DIM = 1600       # cạnh dài tối đa gửi FB; ảnh gốc Lark hay 16MB PNG -> FB nghẹn
+_IMG_JPEG_Q = 85
+
+
+def _shrink_image(data: bytes, ctype: str) -> tuple[bytes, str]:
+    """Downscale + nén JPEG để FB nuốt được (ảnh gốc Lark tới ~16MB PNG -> upload treo/timeout).
+    Pillow lỗi hoặc ảnh đã nhỏ -> trả nguyên gốc (fallback an toàn)."""
+    try:
+        import io
+
+        from PIL import Image
+        im = Image.open(io.BytesIO(data))
+        big = max(im.size) > _IMG_MAX_DIM
+        if not big and len(data) < 1_000_000:
+            return (data, ctype)                       # đã nhỏ, khỏi đụng
+        if big:
+            im.thumbnail((_IMG_MAX_DIM, _IMG_MAX_DIM))
+        if im.mode in ("RGBA", "P", "LA"):
+            im = im.convert("RGB")
+        buf = io.BytesIO()
+        im.save(buf, format="JPEG", quality=_IMG_JPEG_Q, optimize=True)
+        return (buf.getvalue(), "image/jpeg")
+    except Exception as e:
+        print(f"[img] nén lỗi, gửi gốc: {type(e).__name__}: {e}", file=sys.stderr)
+        return (data, ctype)
 
 _SEND_API = "https://graph.facebook.com/{ver}/me/messages"
 _TEXT_MAX = 2000
@@ -207,16 +232,58 @@ async def handle_comment(comment_id: str, from_id: str) -> None:
 # Khách gửi ẢNH/file (không kèm chữ) -> trả câu cố định, không gọi AI, không đọc ảnh.
 _IMG_EVENT = "\x00IMG"           # khách gửi ẢNH/FILE thật (không chữ)
 _STICKER_EVENT = "\x00STK"       # khách thả like/sticker/icon (không phải ảnh thật)
+_REFERRAL_EVENT = "\x00REF"      # khách bấm quảng cáo Click-to-Messenger / link m.me / Bắt đầu -> chào chủ động
 _IMAGE_REPLY = ("Dạ mẫu này bên em có khá nhiều biến thể về kích thước và loại đá ạ. "
                 "Để tư vấn chính xác nhất cho Bác, Bác cho em xin số điện thoại, "
                 "chuyên gia bên em sẽ liên hệ tư vấn cụ thể cho Bác ngay ạ! 🌸")
 # Like/sticker lần đầu: chào hỏi mời tư vấn như bình thường (KHÔNG xin SĐT dồn).
 _STICKER_REPLY = ("Dạ em chào Bác ạ 🌸 Bác đang quan tâm mẫu nào để em tư vấn giúp Bác ạ? "
                   "(Mộ đá, Lăng thờ, Cổng hay Lan can đá...)")
+# Khách vừa bấm quảng cáo/link mở chat (chưa gõ gì): chào chủ động mời tư vấn.
+_REFERRAL_REPLY = ("Dạ em chào Bác ạ 🌸 Cảm ơn Bác đã quan tâm bên em. "
+                   "Bác đang tìm mẫu nào để em tư vấn giúp Bác ạ? "
+                   "(Mộ đá, Lăng thờ, Cổng hay Lan can đá...)")
 
 # Đếm like/sticker liên tiếp mỗi khách -> lần 2 thì ngừng trả lời + báo admin. Reset khi có tin thật.
 _STICKER_COUNT: dict[str, int] = {}
 _STICKER_COUNT_MAX = 5000
+
+# Ảnh khách gửi: stash URL theo psid, _process tải bytes -> Gemini vision đọc. (Ảnh tách khỏi
+# pipeline text vì buffer chỉ mang string; sentinel _IMG_EVENT vẫn đi luồng gom/merge như cũ.)
+_PENDING_IMAGES: dict[str, list[str]] = {}
+_PENDING_IMAGES_MAX = 2000
+_MAX_CUSTOMER_IMAGES = 4
+# Khách gửi ảnh KHÔNG kèm chữ -> prompt để Gemini chủ động nhìn ảnh, DÒ bảng sản phẩm, gợi ý mẫu.
+_IMG_ONLY_PROMPT = (
+    "(Khách vừa gửi ảnh, chưa nhắn gì thêm. Hãy NHÌN KỸ ảnh và tư vấn:\n"
+    "1. Nhận diện hạng mục (mộ đá, lăng thờ, cổng, lan can...) và đặc điểm (số mái, kiểu dáng, loại đá nếu thấy).\n"
+    "2. DÒ trong BẢNG SẢN PHẨM tìm 1-3 mẫu GIỐNG/gần nhất với ảnh, nêu rõ mã + tên "
+    "(nhắc mã -> hệ thống tự gửi ảnh mẫu kèm). Nếu không chắc mẫu chính xác, nói rõ đây là mẫu gần giống "
+    "cùng dòng, đừng khẳng định chắc nịch.\n"
+    "3. Nếu ảnh không phải sản phẩm đá (ảnh khác/không rõ), hỏi khách cần tư vấn gì.)")
+
+
+def _stash_customer_images(psid: str, urls: list[str]) -> None:
+    if len(_PENDING_IMAGES) > _PENDING_IMAGES_MAX:     # chặn phình (khách gửi ảnh rồi bỏ đi, không xử)
+        _PENDING_IMAGES.clear()
+    _PENDING_IMAGES.setdefault(psid, []).extend(urls)
+
+
+async def _fetch_customer_images(urls: list[str]) -> list[tuple[bytes, str]]:
+    """Tải ảnh khách từ URL CDN của FB (public), nén lại cho nhẹ token trước khi đưa Gemini."""
+    out: list[tuple[bytes, str]] = []
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as c:
+        for u in urls[:_MAX_CUSTOMER_IMAGES]:
+            try:
+                r = await c.get(u)
+                r.raise_for_status()
+                ct = (r.headers.get("content-type", "image/jpeg") or "").split(";")[0].strip()
+                if not ct.startswith("image/"):        # video/file: không đọc được bằng vision
+                    continue
+                out.append(_shrink_image(r.content, ct))
+            except Exception as e:
+                print(f"[cust-img] tải lỗi: {type(e).__name__}: {e}", file=sys.stderr)
+    return out
 
 
 def parse_events(payload: dict):
@@ -240,7 +307,15 @@ def parse_events(payload: dict):
             elif msg.get("attachments"):          # không chữ: tách sticker/like khỏi ảnh thật
                 atts = msg["attachments"] or []
                 is_sticker = any((a.get("payload") or {}).get("sticker_id") for a in atts)
+                if not is_sticker:
+                    urls = [(a.get("payload") or {}).get("url") for a in atts
+                            if a.get("type") == "image" and (a.get("payload") or {}).get("url")]
+                    if urls:
+                        _stash_customer_images(str(psid), urls)   # _process tải + đưa Gemini đọc
                 out.append((str(psid), _STICKER_EVENT if is_sticker else _IMG_EVENT))
+            elif ev.get("referral") or ev.get("postback"):
+                # Bấm quảng cáo Click-to-Messenger / link m.me có ref / nút Bắt đầu -> chào chủ động.
+                out.append((str(psid), _REFERRAL_EVENT))
     return out
 
 
@@ -369,13 +444,16 @@ _MAX_BUFFER = 15                   # trần số tin gom 1 lượt
 
 
 def _merge_texts(texts: list[str]) -> str:
-    """Gom các tin thành 1. Ưu tiên: tin chữ > ảnh thật > sticker/like."""
-    real = [t for t in texts if t not in (_IMG_EVENT, _STICKER_EVENT)]
-    if real:
+    """Gom các tin thành 1. Ưu tiên: tin chữ > ảnh thật > sticker/like > referral (chào)."""
+    _META = (_IMG_EVENT, _STICKER_EVENT, _REFERRAL_EVENT)
+    real = [t for t in texts if t not in _META]
+    if real:                                   # khách gõ thật -> bỏ chào referral, trả lời thẳng
         return "\n".join(real)
     if _IMG_EVENT in texts:                    # ảnh thật ưu tiên hơn sticker
         return _IMG_EVENT
-    return _STICKER_EVENT if texts else ""
+    if _STICKER_EVENT in texts:
+        return _STICKER_EVENT
+    return _REFERRAL_EVENT if texts else ""
 
 
 _FOLLOWUP_TEXT = ("Dạ Bác ơi 🌸 Không biết Bác còn đang phân vân mẫu nào không ạ? "
@@ -440,11 +518,23 @@ async def _debounced_flush(psid: str) -> None:
 
 async def _process(psid: str, text: str) -> None:
     """Xử 1 lượt đã gom: semaphore → brain → gửi lại. Lỗi = báo admin, không rep khách."""
+    pending_urls = _PENDING_IMAGES.pop(psid, None)     # ảnh khách kèm lượt này (nếu có)
+    images: list[tuple[bytes, str]] = []
+    if pending_urls:
+        images = await _fetch_customer_images(pending_urls)
     if text == _IMG_EVENT:
-        # Khách gửi ảnh/file thật (không chữ): câu cố định xin SĐT, không gọi AI, không đọc ảnh.
         _STICKER_COUNT.pop(psid, None)                 # ảnh thật = tương tác thật -> reset đếm
         stats.log_event("image", psid)
-        await send_text(psid, _IMAGE_REPLY)
+        if not images:
+            # Tải ảnh hỏng hoặc attachment không phải ảnh (file/video) -> câu cố định cũ.
+            await send_text(psid, _IMAGE_REPLY)
+            return
+        text = _IMG_ONLY_PROMPT                         # ảnh không kèm chữ -> Gemini tự nhìn ảnh tư vấn
+    if text == _REFERRAL_EVENT:
+        # Khách bấm quảng cáo/link mở chat, chưa gõ gì: chào chủ động 1 lần, không gọi AI.
+        _STICKER_COUNT.pop(psid, None)
+        stats.log_event("referral", psid)
+        await send_text(psid, _REFERRAL_REPLY)
         return
     if text == _STICKER_EVENT:
         # Like/sticker/icon: lần đầu chào hỏi mời tư vấn; lần 2 liên tiếp -> im + báo admin.
@@ -468,7 +558,7 @@ async def _process(psid: str, text: str) -> None:
         is_new = await asyncio.to_thread(brain.is_new_customer, psid)  # TRƯỚC khi brain ghi lịch sử
         t0 = time.monotonic()
         try:
-            reply = await brain.answer(psid, text)
+            reply = await brain.answer(psid, text, images or None)
         except Exception as e:
             # Lỗi: KHÔNG trả lời khách gì cả, chỉ báo admin.
             print(f"[handle] {type(e).__name__}: {e}", file=sys.stderr)
@@ -499,7 +589,7 @@ async def _process(psid: str, text: str) -> None:
                 if isinstance(w, Exception):
                     print(f"[img] tải lỗi token {tok[:12]}...: {type(w).__name__}: {w}", file=sys.stderr)
                 else:
-                    imgs.append(w)                     # (bytes, ctype) - ảnh hỏng thì bỏ, không bắt chờ
+                    imgs.append(_shrink_image(*w))      # nén trước; (bytes, ctype) - ảnh hỏng thì bỏ
         if reply:
             for chunk in _split_sentences(reply):      # tách 1-2 câu/tin -> chat tự nhiên
                 await send_text(psid, chunk)

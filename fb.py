@@ -69,6 +69,20 @@ def mirror_conversation(psid: str, msgs: list) -> None:
     _run(fn)
 
 
+def append_conversation(psid: str, start_index: int, new_msgs: list) -> None:
+    """APPEND tin mới vào conversations/<psid> theo index số (start_index, start_index+1...).
+
+    RTDB coi key số 0..n liền mạch là MẢNG -> ghi child(str(idx)) tương thích y hệt dữ liệu cũ
+    (mirror_conversation set cả list cũng sinh key số). Mỗi lượt chỉ ghi phần mới -> O(1), không
+    up lại cả mảng. Ghi tuần tự từng index để không tạo lỗ hổng (get vẫn trả list liền mạch)."""
+    def fn() -> None:
+        from firebase_admin import db
+        ref = db.reference(f"conversations/{_safe(psid)}")
+        for i, m in enumerate(new_msgs):
+            ref.child(str(start_index + i)).set(m)
+    _run(fn)
+
+
 def mirror_event(row: dict) -> None:
     """Append 1 sự kiện stats vào stats/events (push -> key tự sinh)."""
     def fn() -> None:
@@ -88,7 +102,14 @@ def fetch_conversation(psid: str) -> list | None:
     try:
         from firebase_admin import db
         data = db.reference(f"conversations/{_safe(psid)}").get()
-        return data if isinstance(data, list) else None
+        if isinstance(data, list):
+            return [m for m in data if m is not None]   # RTDB chèn None ở index thiếu -> lọc
+        if isinstance(data, dict):
+            # Có lỗ hổng index (1 lượt append lỗi) -> RTDB trả dict thay list. Xếp theo key số.
+            items = sorted(((int(k), v) for k, v in data.items() if str(k).isdigit()),
+                           key=lambda x: x[0])
+            return [v for _, v in items] or None
+        return None
     except Exception as e:
         print(f"[fb] fetch lỗi psid={psid}: {type(e).__name__}: {e}", file=sys.stderr)
         return None

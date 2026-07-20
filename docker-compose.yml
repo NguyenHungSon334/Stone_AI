@@ -5,6 +5,7 @@
 services:
   bot:
     image: ${IMAGE:-hondastone-bot:latest}
+    build: .                       # build thẳng trên VPS: ./deploy-vps.sh (khỏi Artifact Registry)
     restart: always
     environment:
       - RESTART_MODE=exit          # nút Restart trên dashboard -> thoát, compose tự dựng lại

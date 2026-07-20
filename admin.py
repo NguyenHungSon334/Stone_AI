@@ -18,6 +18,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
 
 import config
+import control
 import fb
 import messenger
 import stats
@@ -186,6 +187,162 @@ async def save_settings(request: Request):
     return {"ok": True, "restart_needed": "BOT_MAX_CONCURRENT" in updates}
 
 
+# --- Cấu hình bằng Ô NHẬP thay vì sửa file .env tay ---
+# 1 nguồn sự thật: schema định nghĩa ở đây, giao diện tự dựng ô theo nó -> thêm biến mới chỉ
+# sửa 1 chỗ, không phải sửa cả HTML lẫn Python (kiểu đó chắc chắn lệch nhau sau vài lần).
+# `bi_mat`: chỉ trả về dạng che, để TRỐNG khi lưu = giữ nguyên giá trị cũ (không bao giờ lộ ra web).
+_F = lambda key, nhan, nhom, **kw: {"key": key, "nhan": nhan, "nhom": nhom, **kw}   # noqa: E731
+
+_CONFIG_FIELDS = [
+    _F("MSGR_PAGE_TOKEN", "Page Access Token", "Facebook", bi_mat=True, restart=True,
+       goi_y="Token của PAGE (không phải USER). Hết hạn là bot chết câm."),
+    _F("MSGR_VERIFY_TOKEN", "Verify Token", "Facebook", bi_mat=True, restart=True,
+       goi_y="Phải khớp ô Verify Token bên Meta Developers."),
+    _F("MSGR_APP_SECRET", "App Secret", "Facebook", bi_mat=True, restart=True,
+       goi_y="Dùng ký webhook. Sai là bot chặn hết tin của FB."),
+    _F("MSGR_GRAPH_VER", "Phiên bản Graph API", "Facebook", mau=r"^v\d+\.\d+$", restart=True),
+    _F("PUBLIC_URL", "URL công khai của bot", "Facebook", mau=r"^(https?://\S+)?$",
+       goi_y="Domain thật hoặc ngrok. Dùng để canh tunnel chết."),
+
+    _F("GEMINI_API_KEY", "Gemini API Key", "AI", bi_mat=True, restart=True,
+       goi_y="Lấy ở aistudio.google.com/apikey."),
+    _F("BOT_MODEL", "Model", "AI", kieu="chon",
+       chon=[["lite", "Flash-Lite (rẻ nhất)"], ["flash", "Flash (cân bằng)"], ["pro", "Pro (đắt nhất)"]]),
+    _F("GEMINI_PRICE_IN_USD", "Giá token VÀO (USD/1 triệu)", "AI", kieu="so",
+       goi_y="Chỉ để tính tiền trên dashboard. Google đổi giá thì sửa ở đây."),
+    _F("GEMINI_PRICE_OUT_USD", "Giá token RA (USD/1 triệu)", "AI", kieu="so"),
+
+    _F("BOT_ADMIN_UIDS", "PSID admin", "Cảnh báo", mau=r"^[0-9, ]*$",
+       goi_y="Nhiều admin cách nhau dấu phẩy."),
+    _F("LARK_WEBHOOK_URL", "Lark webhook (nhận cảnh báo)", "Cảnh báo", bi_mat=True,
+       goi_y="TRỐNG = mọi cảnh báo lỗi bị nuốt, không ai được báo."),
+    _F("LARK_WEBHOOK_SECRET", "Lark webhook secret", "Cảnh báo", bi_mat=True,
+       goi_y="Chỉ điền khi bật 'ký' ở webhook Lark."),
+
+    _F("LARK_APP_ID", "Lark App ID", "Lark Base", bi_mat=True, restart=True),
+    _F("LARK_APP_SECRET", "Lark App Secret", "Lark Base", bi_mat=True, restart=True),
+    _F("LARK_BASE_APP_TOKEN", "Base ảnh sản phẩm", "Lark Base", restart=True),
+    _F("LARK_TABLE_ID", "Bảng ảnh sản phẩm", "Lark Base", restart=True),
+    _F("LARK_CRM_APP_TOKEN", "Base CRM (lead)", "Lark Base", restart=True,
+       goi_y="TRỐNG = khách để lại SĐT nhưng lead không vào CRM."),
+    _F("LARK_CRM_TABLE_ID", "Bảng CRM", "Lark Base", restart=True),
+    _F("LARK_PRODUCT_FIELD", "Tên cột mã sản phẩm", "Lark Base", restart=True),
+    _F("LARK_IMAGE_FIELD", "Tên cột ảnh", "Lark Base", restart=True),
+    _F("LARK_DOMAIN", "Domain Lark", "Lark Base", restart=True,
+       goi_y="open.larksuite.com (quốc tế) hoặc open.feishu.cn (Trung Quốc)."),
+
+    _F("BOT_FOLLOWUP_ENABLED", "Tự nhắc khách im", "Chăm khách", kieu="bat_tat"),
+    _F("BOT_FOLLOWUP_AFTER_H", "Im bao lâu thì nhắc (giờ)", "Chăm khách", kieu="so",
+       goi_y="Giữ dưới 24 cho hợp cửa sổ tin nhắn của Facebook."),
+    _F("BOT_FOLLOWUP_CHECK_MIN", "Chu kỳ quét (phút)", "Chăm khách", kieu="so"),
+    _F("BOT_MISSED_AFTER_MIN", "Báo tin rơi sau (phút)", "Chăm khách", kieu="so",
+       goi_y="Khách nhắn mà bot chưa trả lời quá ngần này phút thì xử lý."),
+    _F("BOT_MISSED_AUTOREPLY", "Bot tự trả lời bù", "Chăm khách", kieu="bat_tat",
+       goi_y="Bật: bot tự trả lời khách bị bỏ sót (đọc lại lịch sử nên khớp ngữ cảnh). "
+             "Không áp dụng cho khách đã handoff và tin quá 24h - những ca đó chỉ báo admin."),
+
+    _F("BOT_PER_PSID_RATE_S", "Giãn tin mỗi khách (giây)", "Vận hành", kieu="so"),
+    _F("BOT_MAX_CONCURRENT", "Số khách xử lý cùng lúc", "Vận hành", kieu="so", restart=True),
+    _F("BOT_TUNNEL_WATCH", "Canh tunnel chết", "Vận hành", kieu="bat_tat"),
+    _F("BOT_TUNNEL_CHECK_MIN", "Chu kỳ canh tunnel (phút)", "Vận hành", kieu="so"),
+    _F("BOT_DASH_TOKEN", "Token trang quản trị", "Vận hành", bi_mat=True,
+       goi_y="ĐỔI LÀ LINK DASHBOARD HIỆN TẠI HẾT HIỆU LỰC - phải mở lại bằng token mới."),
+
+    _F("FIREBASE_CRED", "File key Firebase", "Firebase", restart=True),
+    _F("FIREBASE_DB_URL", "Realtime DB URL", "Firebase", restart=True,
+       goi_y="TRỐNG = tắt backup cloud, lịch sử chỉ nằm trên máy."),
+]
+_CONFIG_BY_KEY = {f["key"]: f for f in _CONFIG_FIELDS}
+
+
+_MAC_DINH = {'MSGR_GRAPH_VER': 'v21.0', 'BOT_MODEL': 'flash', 'GEMINI_PRICE_IN_USD': '1.5', 'GEMINI_PRICE_OUT_USD': '9.0', 'BOT_FOLLOWUP_ENABLED': '1', 'BOT_FOLLOWUP_AFTER_H': '4', 'BOT_FOLLOWUP_CHECK_MIN': '15', 'BOT_MISSED_AFTER_MIN': '10', 'BOT_MISSED_AUTOREPLY': '1', 'BOT_PER_PSID_RATE_S': '3', 'BOT_MAX_CONCURRENT': '4', 'BOT_TUNNEL_WATCH': '1', 'BOT_TUNNEL_CHECK_MIN': '3', 'LARK_DOMAIN': 'https://open.larksuite.com', 'LARK_PRODUCT_FIELD': 'Mã Sản Phẩm', 'LARK_IMAGE_FIELD': 'Ảnh'}
+
+
+def _read_env_file() -> dict[str, str]:
+    """Đọc .env thành dict. utf-8-sig để BOM (Notepad/PowerShell hay thêm) không dính vào key đầu."""
+    p = config.ROOT / ".env"
+    out: dict[str, str] = {}
+    if not p.exists():
+        return out
+    for line in p.read_text(encoding="utf-8-sig").splitlines():
+        s = line.strip()
+        if not s or s.startswith("#") or "=" not in s:
+            continue
+        k, v = s.split("=", 1)
+        out[k.strip()] = v.strip()
+    return out
+
+
+def _che(v: str) -> str:
+    """Che secret: đủ để nhận ra 'có phải cái mình vừa dán không', không đủ để dùng lại."""
+    if not v:
+        return ""
+    return f"{v[:4]}…{v[-4:]} ({len(v)} ký tự)" if len(v) > 12 else "…đã đặt…"
+
+
+@router.get("/api/config")
+async def get_config(request: Request):
+    """Schema + giá trị hiện tại để giao diện tự dựng ô nhập."""
+    _check_token(request)
+    env = _read_env_file()
+    fields = []
+    for f in _CONFIG_FIELDS:
+        raw = env.get(f["key"], "")
+        fields.append({**f,
+                       "gia_tri": _che(raw) if f.get("bi_mat") else raw,
+                       "mac_dinh": _MAC_DINH.get(f["key"], ""),
+                       "da_dat": bool(raw)})
+    nhom: list[str] = []
+    for f in _CONFIG_FIELDS:                       # giữ thứ tự khai báo, không sort abc
+        if f["nhom"] not in nhom:
+            nhom.append(f["nhom"])
+    return {"nhom": nhom, "fields": fields,
+            "ngoai_schema": sorted(k for k in env if k not in _CONFIG_BY_KEY)}
+
+
+@router.post("/api/config")
+async def save_config(request: Request):
+    """Lưu từ ô nhập. Secret để TRỐNG = giữ nguyên (không thể vô tình xoá token bằng cách bỏ trống)."""
+    _check_token(request)
+    body = await request.json()
+    vao = body.get("fields") or {}
+    updates: dict[str, str] = {}
+    for key, val in vao.items():
+        f = _CONFIG_BY_KEY.get(key)
+        if not f:
+            raise HTTPException(400, f"không cho sửa key lạ: {key}")
+        val = str(val).strip()
+        if f.get("bi_mat") and not val:
+            continue                                # bỏ trống secret = giữ giá trị cũ
+        if f.get("kieu") == "so" and val and not re.match(r"^\d+(\.\d+)?$", val):
+            raise HTTPException(400, f"{f['nhan']}: phải là số")
+        if f.get("kieu") == "bat_tat" and val not in ("0", "1"):
+            raise HTTPException(400, f"{f['nhan']}: chỉ 0 hoặc 1")
+        if f.get("chon") and val not in [c[0] for c in f["chon"]]:
+            raise HTTPException(400, f"{f['nhan']}: giá trị không hợp lệ")
+        if f.get("mau") and not re.match(f["mau"], val):
+            raise HTTPException(400, f"{f['nhan']}: sai định dạng")
+        if "\n" in val or "\r" in val:
+            raise HTTPException(400, f"{f['nhan']}: không được xuống dòng")
+        updates[key] = val
+    if not updates:
+        return {"ok": True, "doi": 0, "can_restart": False, "message": "không có gì thay đổi"}
+    _update_env_file(updates)
+    config.reload_env()
+    can_restart = [k for k in updates if _CONFIG_BY_KEY[k].get("restart")]
+    return {"ok": True, "doi": len(updates), "can_restart": bool(can_restart),
+            "keys_can_restart": can_restart,
+            "message": f"đã lưu {len(updates)} mục"
+                       + (f"; cần RESTART để ăn: {', '.join(can_restart)}" if can_restart else "")}
+
+
+@router.get("/api/control")
+async def get_control(request: Request, days: int = 30, force: int = 0):
+    """Toàn cảnh: khách đang chờ, chi phí, vấn đề cần xử lý."""
+    _check_token(request)
+    return await control.snapshot(days=max(1, min(days, 90)), force=bool(force))
+
+
 _ENV_LINE_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=.*$")
 
 
@@ -193,7 +350,9 @@ _ENV_LINE_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=.*$")
 async def get_env(request: Request):
     _check_token(request)
     p = config.ROOT / ".env"
-    return {"content": p.read_text(encoding="utf-8") if p.exists() else ""}
+    # utf-8-sig: .env sửa bằng Notepad/PowerShell hay dính BOM (U+FEFF) ở đầu. Đọc kiểu utf-8
+    # thường thì BOM lọt vào editor rồi quay lại validate -> báo "dòng 1 sai định dạng".
+    return {"content": p.read_text(encoding="utf-8-sig") if p.exists() else ""}
 
 
 @router.post("/api/env")
@@ -204,6 +363,7 @@ async def save_env(request: Request):
     content = body.get("content")
     if not isinstance(content, str) or not content.strip():
         raise HTTPException(400, "nội dung .env trống")
+    content = content.lstrip("﻿")     # bỏ BOM -> ghi lại file sạch, lần sau khỏi dính
     for i, line in enumerate(content.splitlines(), 1):
         s = line.strip()
         if not s or s.startswith("#"):
@@ -213,7 +373,7 @@ async def save_env(request: Request):
     p = config.ROOT / ".env"
     bak = config.ROOT / ".env.bak"
     if p.exists():
-        bak.write_text(p.read_text(encoding="utf-8"), encoding="utf-8")   # giữ 1 bản lùi
+        bak.write_text(p.read_text(encoding="utf-8-sig"), encoding="utf-8")   # giữ 1 bản lùi
     p.write_text(content.rstrip() + "\n", encoding="utf-8")
     config.reload_env()
     return {"ok": True, "message": "đã lưu (.env.bak giữ bản cũ). Token/secret đổi thì cần Restart."}

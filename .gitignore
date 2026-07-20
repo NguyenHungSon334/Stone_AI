@@ -1,5 +1,7 @@
-.env
-.env.bak
+# Mọi biến thể .env đều là secret (.env.bak, .env.truoc-doi-token, .env cũ đổi tên...).
+# Liệt kê từng tên là kiểu bỏ sót - chặn cả họ, chừa đúng file mẫu.
+.env*
+!.env.example
 firebase-key.json
 *-firebase-adminsdk-*.json
 hon-da-c0444-67c2f3e5de10.json

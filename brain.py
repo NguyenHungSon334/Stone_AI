@@ -21,6 +21,7 @@ from google import genai
 from google.genai import errors as genai_errors
 from google.genai import types
 
+import alerts
 import config
 import fb
 import stats
@@ -163,6 +164,10 @@ def _image_markers(history: list, reply: str, user_text: str) -> str:
             toks = lark_image.get_image_tokens(code)
         except Exception as e:
             print(f"[img] lấy ảnh {code} lỗi: {type(e).__name__}: {e}", file=sys.stderr)
+            # Token Lark hết hạn / mất quyền Base -> hỏng CẢ LOẠT: khách xin ảnh chỉ nhận text trơn.
+            alerts.alert(f"lark:img:{type(e).__name__}",
+                         f"⚠️ LẤY ẢNH LARK LỖI (mã {code}) - khách xin ảnh nhưng bot chỉ trả chữ.\n"
+                         f"{type(e).__name__}: {e}\n➡️ Kiểm tra LARK_APP_ID/SECRET và quyền Base.")
             toks = []
         if toks:
             markers.append(f"<<IMG:{toks[0]}>>")
@@ -258,6 +263,41 @@ def followup_candidates(after_h: float, max_h: float = 23.0) -> list[tuple[str, 
     return out
 
 
+def _missed_mark(psid: str) -> Path:
+    return _HIST_DIR / (_psid_path(psid).stem + ".missed")
+
+
+def load_history(psid: str) -> list:
+    """Lịch sử 1 khách (cache local, miss thì kéo Firebase). Cho lớp ngoài dùng, khỏi đụng _private."""
+    return _load_hist(psid)
+
+
+def is_closed(psid: str) -> bool:
+    """Khách đã chốt phiếu CRM (handoff xong / người thật tiếp quản) -> khỏi báo tin rơi."""
+    return (_HIST_DIR / f"{_psid_path(psid).stem}.crm.json").exists()
+
+
+def missed_already_reported(psid: str, at: str) -> bool:
+    """Đã báo đúng tin này rồi? -> vòng quét sau không lải nhải cùng 1 khách."""
+    mark = _missed_mark(psid)
+    try:
+        return mark.exists() and mark.read_text(encoding="utf-8").strip() == at
+    except Exception:
+        return False
+
+
+def mark_missed_reported(psid: str, last_user_at: str) -> None:
+    """Đánh dấu ĐÃ BÁO tin rơi này -> vòng quét sau không báo lại cùng 1 tin."""
+    try:
+        _HIST_DIR.mkdir(parents=True, exist_ok=True)
+        _missed_mark(psid).write_text(last_user_at, encoding="utf-8")
+    except Exception as e:
+        print(f"[missed] mark lỗi psid={psid}: {type(e).__name__}: {e}", file=sys.stderr)
+        alerts.alert(f"missed:mark:{type(e).__name__}",
+                     f"⚠️ KHÔNG ĐÁNH DẤU ĐƯỢC TIN RƠI - admin sẽ bị báo lặp cùng 1 khách.\n"
+                     f"{type(e).__name__}: {e}")
+
+
 def mark_followed(psid: str, last_user_at: str) -> None:
     """Đánh dấu đã nhắc khách ở lượt này (theo mốc tin khách cuối) -> không nhắc lặp."""
     try:
@@ -265,6 +305,10 @@ def mark_followed(psid: str, last_user_at: str) -> None:
         _followup_mark(psid).write_text(last_user_at, encoding="utf-8")
     except Exception as e:
         print(f"[followup] mark lỗi psid={psid}: {type(e).__name__}: {e}", file=sys.stderr)
+        # KHÔNG đánh dấu được = vòng quét sau lại nhắc khách lần nữa, mỗi 15 phút -> SPAM KHÁCH.
+        alerts.alert(f"followup:mark:{type(e).__name__}",
+                     f"🔴 KHÔNG ĐÁNH DẤU ĐƯỢC FOLLOW-UP - khách sẽ bị nhắc LẶP mỗi vòng quét.\n"
+                     f"{type(e).__name__}: {e}\n➡️ Tắt tạm BOT_FOLLOWUP_ENABLED=0 nếu khách kêu spam.")
 
 
 def _load_hist(psid: str) -> list:
@@ -278,6 +322,10 @@ def _load_hist(psid: str) -> list:
             _write_local_hist(psid, remote)         # nạp lại cache cho lần sau
         except Exception as e:
             print(f"[hist] cache miss, ghi local lỗi psid={psid}: {type(e).__name__}: {e}", file=sys.stderr)
+            # Cache không nạp lại được -> lượt sau lại đi Firebase (chậm + tốn quota), lặp mãi.
+            alerts.alert(f"hist:cache:{type(e).__name__}",
+                         f"⚠️ KHÔNG GHI ĐƯỢC CACHE LỊCH SỬ - mỗi lượt phải kéo lại từ Firebase (chậm).\n"
+                         f"{type(e).__name__}: {e}\n➡️ Kiểm tra dung lượng đĩa / quyền ghi.")
         return remote
     return []
 
@@ -299,6 +347,10 @@ def _save_hist(psid: str, full_msgs: list, new_msgs: list | None = None) -> None
             fb.mirror_conversation(psid, full_msgs)    # fallback: ghi đè cả mảng
     except Exception as e:
         print(f"[hist] ghi lỗi psid={psid}: {type(e).__name__}: {e}", file=sys.stderr)
+        # Ghi hỏng = lượt này biến mất khỏi lịch sử -> bot quên ngữ cảnh, admin xem log thiếu.
+        alerts.alert(f"hist:{type(e).__name__}",
+                     f"⚠️ GHI LỊCH SỬ HỎNG - hội thoại mất lượt, bot quên ngữ cảnh khách.\n"
+                     f"{type(e).__name__}: {e}\n➡️ Kiểm tra dung lượng đĩa / quyền ghi conversations/.")
 
 
 _IMG_MARKER_RE = re.compile(r"\s*<<IMG:[^>]+>>")   # marker ảnh: KHÔNG cho model thấy (chống echo token chết)
@@ -367,6 +419,10 @@ def _summarize(client, model_id: str, prev: str, new_msgs: list) -> str:
         return out or prev
     except Exception as e:
         print(f"[sum] tóm tắt lỗi psid: {type(e).__name__}: {e}", file=sys.stderr)
+        # Tóm tắt hỏng liên tục -> phần chưa-tóm phình mãi -> mỗi tin gửi thêm hàng nghìn token.
+        alerts.alert(f"sum:{type(e).__name__}",
+                     f"💸 TÓM TẮT HỘI THOẠI LỖI - lịch sử không được nén, token mỗi tin tăng dần.\n"
+                     f"{type(e).__name__}: {e}")
         return prev
 
 
@@ -469,6 +525,11 @@ def _cached_handle(client, model_id: str) -> str | None:
             )
         except Exception as e:
             print(f"[cache] tạo lỗi, nhồi thẳng: {type(e).__name__}: {e}", file=sys.stderr)
+            # Vẫn chạy được, nhưng MỖI TIN nhồi lại ~30k token system -> tiền token tăng vọt.
+            # Hỏng lặng lẽ kiểu này chỉ lộ khi xem hoá đơn cuối tháng -> phải báo.
+            alerts.alert("gemini:cache", f"💸 TẠO CACHE GEMINI LỖI - bot vẫn trả lời nhưng nhồi lại "
+                                         f"toàn bộ persona+bảng SP mỗi tin, CHI PHÍ TOKEN TĂNG MẠNH.\n"
+                                         f"{type(e).__name__}: {e}")
             _CACHE.update(key=None, name=None, exp=0.0)
             return None
         _CACHE.update(key=key, name=cache.name, exp=now + _CACHE_TTL_S - 120)   # -120s an toàn
@@ -501,12 +562,25 @@ def _gen_answer(client, model_id: str, contents: list, handle: str | None):
     return _generate(client, model=model_id, contents=contents, config=cfg), None
 
 
+def trim_resend(full: list, text: str, user_at: str) -> tuple[list, str]:
+    """TRẢ LỜI BÙ: tin này đã nằm cuối lịch sử (bot nhận được nhưng trả lời hỏng) -> bỏ bản cũ ra,
+    chỗ gọi ghi lại đúng 1 lần.
+
+    Không có bước này thì lượt khách bị NHÂN ĐÔI trong log, prompt cũng thấy 2 lần -> bot tưởng
+    khách nhắc lại nên trả lời kiểu 'dạ em đã nói ở trên'. Giữ mốc giờ GỐC khách gửi.
+    """
+    if full and full[-1].get("role") == "user" and full[-1].get("content") == text:
+        return full[:-1], (full[-1].get("at") or user_at)
+    return full, user_at
+
+
 def _answer_sync(psid: str, text: str, images: list[tuple[bytes, str]] | None = None) -> str:
     client = _get_client()
     model_id = _model_id()
     user_at = _now_str()                              # mốc khách gửi (lúc bắt đầu xử lý)
     with _psid_lock(psid):
         full = _load_hist(psid)                       # TOÀN BỘ log (lưu đủ cho admin)
+        full, user_at = trim_resend(full, text, user_at)
         # thời gian thực nhét ĐẦU contents (tách khỏi cache tĩnh)
         contents = [types.Content(role="user", parts=[types.Part.from_text(text=_time_note_text())])]
         # AI đọc NHẸ: tóm tắt phần cũ + đuôi verbatim. upto = tin đã gộp vào tóm tắt.
@@ -614,6 +688,11 @@ def _extract_lead_sync(psid: str) -> dict | None:
         return lead if (lead.get("sdt") or "").strip() else None
     except Exception as e:
         print(f"[lead] trích lỗi psid={psid}: {type(e).__name__}: {e}", file=sys.stderr)
+        # Trích hỏng -> _save_lead_to_crm thoát sớm, KHÔNG có "lỗi CRM" nào bắn ra: lead im lặng
+        # bốc hơi dù khách đã cho SĐT. Đây là đường mất lead khó thấy nhất.
+        alerts.alert(f"lead:extract:{type(e).__name__}",
+                     f"🔴 TRÍCH LEAD HỎNG - khách đã handoff nhưng KHÔNG lead nào vào CRM.\n"
+                     f"{type(e).__name__}: {e}")
         return None
 
 

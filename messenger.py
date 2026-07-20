@@ -3,19 +3,21 @@ Giao thức Messenger: verify webhook, verify chữ ký, bóc tin, gửi trả, 
 Port gọn từ Javis OS (server/messenger_bot.py) - bỏ phần dính settings, dùng thẳng config.
 """
 import asyncio
-import base64
 import hashlib
 import hmac
 import json
 import re
 import sys
 import time
+from datetime import datetime, timezone
 
 import httpx
 
+import alerts
 import brain
 import config
 import stats
+import util
 from bot_tools import lark_crm, lark_image
 
 _MAX_IMAGES_PER_MSG = 4   # khớp brain._MAX_NEW_IMAGES
@@ -101,55 +103,22 @@ def _extract_images(reply: str) -> tuple[str, list[str]]:
     return (clean, tokens)
 
 
-def _lark_sign(secret: str, ts: str) -> str:
-    """Chữ ký custom-bot Lark: HMAC-SHA256(key=f'{ts}\\n{secret}', msg='') -> base64."""
-    h = hmac.new(f"{ts}\n{secret}".encode(), b"", hashlib.sha256).digest()
-    return base64.b64encode(h).decode()
-
-
-async def _lark_post(text: str) -> tuple[bool, str]:
-    """POST 1 tin vào Lark webhook. Trả (ok, chi_tiết). URL rỗng -> (False, 'chưa cấu hình')."""
-    url = config.LARK_WEBHOOK_URL
-    if not url:
-        return (False, "Chưa cấu hình LARK_WEBHOOK_URL")
-    body: dict = {"msg_type": "text", "content": {"text": text}}
-    if config.LARK_WEBHOOK_SECRET:
-        ts = str(int(time.time()))
-        body["timestamp"] = ts
-        body["sign"] = _lark_sign(config.LARK_WEBHOOK_SECRET, ts)
-    try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as c:
-            r = await c.post(url, json=body)
-            d = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
-            code = d.get("code")
-            if code in (0, None):
-                return (True, "OK")
-            return (False, f"Lark code={code}: {d.get('msg', '')}")
-    except Exception as e:
-        return (False, f"{type(e).__name__}: {e}")
-
-
-async def _notify_lark(text: str) -> None:
-    """Đẩy 1 cảnh báo vào group Lark. Rỗng URL -> bỏ. Lỗi chỉ log, không kéo bot chết."""
-    if not config.LARK_WEBHOOK_URL:
-        return
-    ok, detail = await _lark_post(text)
-    if not ok:
-        print(f"[lark] webhook {detail}", file=sys.stderr)
-
-
 async def lark_ping(text: str = "✅ Test bot admin Lark từ dashboard - kết nối OK.") -> dict:
     """Kiểm tra kết nối bot admin Lark (nút Test ở dashboard). Trả trạng thái cấu hình + kết quả gửi."""
-    configured = bool(config.LARK_WEBHOOK_URL)
-    if not configured:
+    if not config.LARK_WEBHOOK_URL:
         return {"configured": False, "ok": False, "detail": "Chưa cấu hình LARK_WEBHOOK_URL trong .env"}
-    ok, detail = await _lark_post(text)
+    ok, detail = await asyncio.to_thread(alerts.post_lark, text)
     return {"configured": True, "ok": ok, "detail": detail}
 
 
 async def notify_admins(text: str) -> None:
-    """Gửi 1 cảnh báo tới admin QUA LARK group (webhook). Không báo qua FB Messenger nữa."""
-    await _notify_lark(text)
+    """Thông báo nghiệp vụ tới admin qua Lark group (khách mới, sđt, handoff) - KHÔNG gộp."""
+    await asyncio.to_thread(alerts.notify, text)
+
+
+async def alert_admins(key: str, text: str) -> None:
+    """Báo LỖI có gộp (xem alerts.alert). `key` = loại sự cố, KHÔNG kèm psid."""
+    await asyncio.to_thread(alerts.alert, key, text)
 
 
 # Cache tên FB theo psid (RAM). Dùng cho thông báo admin + trang admin.
@@ -228,66 +197,120 @@ _PRIVATE_REPLY = ("Dạ em chào Bác ạ 🌸 Em là Thảo Vân, trợ lý bê
                   "Em thấy Bác quan tâm tới sản phẩm bên em. Bác đang tìm hiểu mẫu nào ạ - "
                   "Mộ đá, Long đình, Cổng hay Lan can đá? Em tư vấn chi tiết cho Bác nhé!")
 
-_SEEN_COMMENTS: dict[str, float] = {}     # comment_id -> ts, chống xử lý trùng khi FB gửi lại
+# comment_id -> epoch, chống xử lý trùng khi FB gửi lại.
+# GHI XUỐNG ĐĨA (không chỉ RAM): FB gửi lại event sau khi bot restart/deploy thì dedupe trong
+# RAM đã trắng -> bot trả lời CÔNG KHAI lần 2 dưới cùng comment, khách nhìn thấy. Private reply
+# được FB tự chặn (#10900) nhưng public thì không ai chặn.
+_SEEN_COMMENTS: dict[str, float] = {}
 _SEEN_MAX = 5000
+_SEEN_KEEP_S = 7 * 24 * 3600              # FB gửi lại trong vài giờ; 7 ngày là dư an toàn
+_SEEN_PATH = brain._HIST_DIR / "_comments_seen.json"
+_seen_loaded = False
+
+
+def _load_seen() -> None:
+    """Nạp 1 lần từ đĩa lúc dùng đầu tiên. File hỏng/thiếu -> coi như rỗng (không chặn bot)."""
+    global _seen_loaded
+    if _seen_loaded:
+        return
+    _seen_loaded = True
+    data = util.read_json(_SEEN_PATH, {})
+    if isinstance(data, dict):
+        cutoff = time.time() - _SEEN_KEEP_S
+        _SEEN_COMMENTS.update({k: v for k, v in data.items()
+                               if isinstance(v, (int, float)) and v > cutoff})
 
 
 def _comment_seen(cid: str) -> bool:
-    """True nếu comment_id đã xử lý. Dọn entry cũ > 6h khi dict phình."""
-    now = time.monotonic()
-    if len(_SEEN_COMMENTS) > _SEEN_MAX:
-        cutoff = now - 6 * 3600
-        for k in [k for k, v in _SEEN_COMMENTS.items() if v < cutoff]:
-            _SEEN_COMMENTS.pop(k, None)
+    """True nếu comment_id đã xử lý (kể cả ở lần chạy TRƯỚC). Ghi đĩa để sống qua restart."""
+    _load_seen()
+    now = time.time()
     if cid in _SEEN_COMMENTS:
         return True
+    if len(_SEEN_COMMENTS) > _SEEN_MAX:
+        cutoff = now - _SEEN_KEEP_S
+        for k in [k for k, v in _SEEN_COMMENTS.items() if v < cutoff]:
+            _SEEN_COMMENTS.pop(k, None)
     _SEEN_COMMENTS[cid] = now
+    try:
+        util.write_json_atomic(_SEEN_PATH, _SEEN_COMMENTS)
+    except Exception as e:
+        # Ghi hỏng -> dedupe tụt về mức RAM: vẫn chạy, nhưng restart là comment trùng lại.
+        print(f"[comment] ghi dedupe lỗi: {type(e).__name__}: {e}", file=sys.stderr)
+        alerts.alert(f"comment:seen:{type(e).__name__}",
+                     f"⚠️ KHÔNG LƯU ĐƯỢC DANH SÁCH COMMENT ĐÃ XỬ LÝ - restart có thể trả lời "
+                     f"TRÙNG công khai dưới comment khách.\n{type(e).__name__}: {e}")
     return False
 
 
 def parse_comment_events(payload: dict):
-    """[(comment_id, from_id)] từ webhook feed. Bỏ comment của chính Page, verb != add, đã xử lý."""
+    """[(comment_id, from_id)] từ webhook feed. Bỏ comment của chính Page, verb != add, đã xử lý.
+
+    Log MỌI lần bỏ kèm lý do: không có log thì 'FB không gửi event' và 'bot tự bỏ event'
+    nhìn giống hệt nhau (đều im lặng), debug thành đoán mò."""
     out = []
     if not isinstance(payload, dict) or payload.get("object") != "page":
         return out
     for entry in payload.get("entry", []) or []:
         page_id = str(entry.get("id", ""))
         for ch in (entry.get("changes") or []):
+            if ch.get("field") != "feed":
+                continue
             v = ch.get("value") or {}
-            if v.get("item") != "comment" or v.get("verb") != "add":
+            item, verb = v.get("item"), v.get("verb")
+            if item != "comment" or verb != "add":
+                print(f"[comment] bỏ qua: item={item} verb={verb} (chỉ xử lý comment/add)", file=sys.stderr)
                 continue
             cid = str(v.get("comment_id") or "")
             from_id = str((v.get("from") or {}).get("id") or "")
-            if not cid or not from_id or from_id == page_id:   # bỏ comment của Page (chống loop)
+            if not cid or not from_id:
+                print(f"[comment] bỏ qua: thiếu comment_id/from (cid={cid!r} from={from_id!r})", file=sys.stderr)
+                continue
+            if from_id == page_id:                      # comment của chính Page -> chống loop vô hạn
+                print(f"[comment] bỏ qua {cid}: comment của chính Page", file=sys.stderr)
                 continue
             if _comment_seen(cid):
+                print(f"[comment] bỏ qua {cid}: FB gửi trùng, đã xử lý rồi", file=sys.stderr)
                 continue
+            print(f"[comment] NHẬN {cid} từ {from_id}", file=sys.stderr)
             out.append((cid, from_id))
     return out
 
 
-async def reply_public(comment_id: str) -> None:
-    """Trả lời công khai dưới comment: cảm ơn."""
+async def reply_public(comment_id: str) -> bool:
+    """Trả lời công khai dưới comment: cảm ơn. True = FB nhận."""
     if not (config.PAGE_TOKEN and comment_id):
-        return
+        return False
     url = f"https://graph.facebook.com/{config.GRAPH_VER}/{comment_id}/comments"
-    await _fb_post(url, payload={"message": _PUBLIC_REPLY}, tag="comment-public")
+    return await _fb_post(url, payload={"message": _PUBLIC_REPLY}, tag="comment-public")
 
 
-async def reply_private(comment_id: str) -> None:
-    """Nhắn RIÊNG vào inbox người comment (private reply - FB chỉ cho 1 lần/comment)."""
+async def reply_private(comment_id: str) -> bool:
+    """Nhắn RIÊNG vào inbox người comment (private reply - FB chỉ cho 1 lần/comment). True = FB nhận."""
     if not (config.PAGE_TOKEN and comment_id):
-        return
-    await _fb_post(_SEND_API.format(ver=config.GRAPH_VER),
-                   payload={"recipient": {"comment_id": comment_id}, "message": {"text": _PRIVATE_REPLY}},
-                   tag="comment-private")
+        return False
+    return await _fb_post(_SEND_API.format(ver=config.GRAPH_VER),
+                          payload={"recipient": {"comment_id": comment_id}, "message": {"text": _PRIVATE_REPLY}},
+                          tag="comment-private")
 
 
 async def handle_comment(comment_id: str, from_id: str) -> None:
-    """1 comment: cảm ơn công khai + nhắn riêng mời vào inbox. Lỗi 1 kênh không chặn kênh kia."""
-    await reply_public(comment_id)
-    await reply_private(comment_id)
-    stats.log_event("comment", from_id)
+    """1 comment: cảm ơn công khai + nhắn riêng mời vào inbox. Lỗi 1 kênh không chặn kênh kia.
+
+    2 kênh hỏng theo cách KHÁC nhau (public cần pages_manage_engagement; private chỉ được 1
+    lần/comment và hết hạn sau 7 ngày) -> ghi rõ kênh nào được, kênh nào không."""
+    pub = await reply_public(comment_id)
+    priv = await reply_private(comment_id)
+    print(f"[comment] {comment_id}: công khai={'OK' if pub else 'HỎNG'} | riêng={'OK' if priv else 'HỎNG'}",
+          file=sys.stderr)
+    stats.log_event("comment", from_id, note=f"public={pub} private={priv}")
+    if not (pub or priv):
+        # Cả 2 kênh chết = khách comment xong KHÔNG nhận được gì. Chi tiết HTTP đã nằm ở
+        # cảnh báo của _fb_post; đây là tin gộp cho biết comment thật sự rơi.
+        await alert_admins("comment:dead",
+                           f"🔴 COMMENT KHÔNG ĐƯỢC TRẢ LỜI - cả công khai lẫn nhắn riêng đều hỏng.\n"
+                           f"comment_id: {comment_id}\n"
+                           f"➡️ Thường do thiếu pages_manage_engagement hoặc token page hết hạn.")
 
 
 # Khách gửi ẢNH/file (không kèm chữ) -> trả câu cố định, không gọi AI, không đọc ảnh.
@@ -344,6 +367,10 @@ async def _fetch_customer_images(urls: list[str]) -> list[tuple[bytes, str]]:
                 out.append(_shrink_image(r.content, ct))
             except Exception as e:
                 print(f"[cust-img] tải lỗi: {type(e).__name__}: {e}", file=sys.stderr)
+                # Khách gửi ảnh (mẫu mộ, bản vẽ) mà bot KHÔNG thấy -> trả lời lệch, khách tưởng bot ngu.
+                await alert_admins(f"cust-img:{type(e).__name__}",
+                                   f"⚠️ KHÔNG TẢI ĐƯỢC ẢNH KHÁCH GỬI - bot trả lời mà không nhìn thấy ảnh.\n"
+                                   f"{type(e).__name__}: {e}")
     return out
 
 
@@ -424,20 +451,50 @@ def _split_sentences(text: str, per: int = 2) -> list[str]:
     return out or [text]
 
 
+async def _send_failed(tag: str, code: int, detail: str, psid: str) -> None:
+    """Gửi FB hỏng = KHÁCH KHÔNG NHẬN ĐƯỢC GÌ, trong khi bot vẫn ghi 'ok'. Phải báo admin.
+    Gộp theo (tag, code) vì token chết/rate-limit đập vào mọi khách cùng lúc."""
+    # #10900 'Activity already replied to': FB chỉ cho private reply 1 lần/comment. Gặp khi FB
+    # gửi lại event hoặc bot restart mất dedupe -> BÌNH THƯỜNG, báo là dạy admin phớt lờ cảnh báo.
+    # Đọc MÃ LỖI THẬT của FB thay vì dò chuỗi con: '#10900' cũng chứa '#10' -> gợi ý sai bét
+    # (đã bắn nhầm "ngoài cửa sổ 24h" cho lỗi 'đã trả lời rồi').
+    try:
+        fb_code = int(((json.loads(detail) or {}).get("error") or {}).get("code") or 0)
+    except Exception:
+        fb_code = 0
+    if fb_code == 10900:
+        return
+    hint = ""
+    if fb_code == 190 or "access token" in detail.lower():
+        hint = "\n➡️ Nhiều khả năng MSGR_PAGE_TOKEN hết hạn/bị thu hồi - lấy token mới."
+    elif fb_code in (4, 32, 613) or code == 429:
+        hint = "\n➡️ FB rate-limit. Giảm BOT_MAX_CONCURRENT hoặc chờ."
+    elif fb_code == 10:
+        hint = "\n➡️ Ngoài cửa sổ 24h của FB - không nhắn chủ động được nữa."
+    elif fb_code == 200:
+        hint = "\n➡️ Thiếu quyền (pages_manage_engagement / pages_messaging) trên token page."
+    who = await _label(psid) if psid else "(không rõ)"
+    await alert_admins(f"fb:{tag}:{code}",
+                       f"🔴 GỬI FB HỎNG ({tag}) - khách KHÔNG nhận được tin\n"
+                       f"Khách: {who}\nHTTP {code}: {detail}{hint}")
+
+
 async def _fb_post(url: str, *, payload=None, data=None, files=None,
-                   timeout: float = 20.0, tag: str = "send") -> bool:
-    """POST tới FB Graph kèm access_token. <400 -> True. Lỗi/≥400 -> log [tag] + False (không ném).
-    Gom mọi chỗ gọi Send API về 1 chỗ (timeout/log/params đồng nhất)."""
+                   timeout: float = 20.0, tag: str = "send", psid: str = "") -> bool:
+    """POST tới FB Graph kèm access_token. <400 -> True. Lỗi/≥400 -> log [tag] + báo admin + False
+    (không ném). Gom mọi chỗ gọi Send API về 1 chỗ (timeout/log/cảnh báo đồng nhất)."""
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=10.0)) as c:
             r = await c.post(url, params={"access_token": config.PAGE_TOKEN},
                              json=payload, data=data, files=files)
             if r.status_code >= 400:
                 print(f"[{tag}] {r.status_code}: {r.text[:300]}", file=sys.stderr)
+                await _send_failed(tag, r.status_code, r.text[:300], psid)
                 return False
             return True
     except Exception as e:
         print(f"[{tag}] {type(e).__name__}: {e}", file=sys.stderr)
+        await _send_failed(tag, 0, f"{type(e).__name__}: {e}", psid)
         return False
 
 
@@ -448,7 +505,7 @@ async def send_text(psid: str, text: str) -> None:
     for chunk in _split_text(text):
         body = {"recipient": {"id": psid}, "messaging_type": "RESPONSE",
                 "message": {"text": chunk}}
-        if not await _fb_post(url, payload=body, tag="send"):
+        if not await _fb_post(url, payload=body, tag="send", psid=psid):
             break                                      # 1 chunk lỗi -> dừng, khỏi gửi tiếp rối
 
 
@@ -465,7 +522,7 @@ async def send_image_bytes(psid: str, data: bytes, ctype: str = "image/jpeg") ->
         "message": json.dumps({"attachment": {"type": "image", "payload": {"is_reusable": True}}}),
     }
     files = {"filedata": (f"image.{ext}", data, ctype or "image/jpeg")}
-    await _fb_post(url, data=form, files=files, timeout=30.0, tag="img upload")
+    await _fb_post(url, data=form, files=files, timeout=30.0, tag="img upload", psid=psid)
 
 
 async def send_action(psid: str, action: str = "typing_on") -> None:
@@ -480,6 +537,9 @@ _SEM = asyncio.Semaphore(config.MAX_CONCURRENT)   # trần đồng thời riêng
 
 # Gom tin (debounce) mỗi khách: đợi khách gõ xong rồi trả 1 lần thay vì rep rời rạc/bỏ tin.
 _BUFFERS: dict[str, dict] = {}     # psid -> {"texts": [...], "task": Task, "first": ts}
+# Khách ĐANG được xử lý (brain chạy 5-15s). Trả lời bù phải né, không thì webhook và vòng quét
+# cùng trả lời 1 tin -> khách nhận 2 câu.
+_INFLIGHT: set[str] = set()
 _DEBOUNCE_S = 4.0                  # im bao lâu thì chốt gom
 _MAX_WAIT_S = 20.0                 # trần chờ từ tin đầu (khách gõ liên tục không ngừng vẫn phải trả)
 _MAX_BUFFER = 15                   # trần số tin gom 1 lượt
@@ -490,7 +550,10 @@ def _merge_texts(texts: list[str]) -> str:
     _META = (_IMG_EVENT, _STICKER_EVENT, _REFERRAL_EVENT)
     real = [t for t in texts if t not in _META]
     if real:                                   # khách gõ thật -> bỏ chào referral, trả lời thẳng
-        return "\n".join(real)
+        # Bỏ tin TRÙNG: webhook và luồng trả lời bù có thể cùng đẩy 1 tin vào buffer. Không lọc
+        # thì prompt thành "xin giá\nxin giá" -> bot tưởng khách hỏi 2 lần, trả lời lặp lại.
+        gon = list(dict.fromkeys(real))
+        return "\n".join(gon)
     if _IMG_EVENT in texts:                    # ảnh thật ưu tiên hơn sticker
         return _IMG_EVENT
     if _STICKER_EVENT in texts:
@@ -510,6 +573,170 @@ async def run_followups() -> None:
         await send_text(psid, _FOLLOWUP_TEXT)
         brain.mark_followed(psid, last_user_at)
         stats.log_event("followup", psid)
+
+
+# --- Lưới an toàn TIN RƠI: hỏi thẳng FB xem thread nào khách nhắn cuối mà page chưa trả lời ---
+# Hỏi FB (không đọc lịch sử local) là CỐ Ý: tin rơi nặng nhất là tin bot CHƯA BAO GIỜ nhận
+# (bot chết, token hết hạn, webhook 502) - không có trong lịch sử local nên quét file không thấy.
+_MISSED_MAX_DAYS = 7            # cũ hơn = chuyện đã rồi, đào lên chỉ gây nhiễu
+_MISSED_MAX_LINES = 20          # tin Lark quá dài bị cắt
+_TRA_BU_TOI_DA_H = 24.0         # cửa sổ nhắn tin của FB; quá là gửi cũng bị từ chối (#10)
+_page_id_cache = ""
+
+
+def _spawn_bg(coro) -> None:
+    """Chạy nền + GIỮ ref: task không được tham chiếu có thể bị GC nuốt giữa chừng."""
+    t = asyncio.create_task(coro)
+    _BG_TASKS.add(t)
+    t.add_done_callback(_BG_TASKS.discard)
+
+
+_BG_TASKS: set = set()
+
+
+async def _page_id() -> str:
+    """ID page của token hiện tại (để biết tin cuối là của page hay của khách). Cache RAM."""
+    global _page_id_cache
+    if not _page_id_cache:
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as c:
+                r = await c.get(f"https://graph.facebook.com/{config.GRAPH_VER}/me",
+                                params={"access_token": config.PAGE_TOKEN, "fields": "id"})
+            _page_id_cache = str((r.json() or {}).get("id") or "")
+        except Exception as e:
+            print(f"[missed] không lấy được page id: {type(e).__name__}: {e}", file=sys.stderr)
+    return _page_id_cache
+
+
+def pick_unanswered(threads: list, page_id: str, after_min: float, now: datetime) -> list[tuple]:
+    """Lọc thread mà TIN CUỐI là của khách và đã quá `after_min` phút. Hàm THUẦN (test được).
+
+    Trả [(psid, tên, nội dung, thời điểm ISO)]."""
+    out = []
+    for t in threads or []:
+        msgs = ((t.get("messages") or {}).get("data")) or []
+        if not msgs:
+            continue
+        m = msgs[0]                                    # FB trả tin MỚI NHẤT trước
+        frm = m.get("from") or {}
+        psid = str(frm.get("id") or "")
+        if not psid or psid == page_id:                # page trả lời cuối -> không rơi
+            continue
+        created = m.get("created_time") or ""
+        try:
+            at = datetime.strptime(created, "%Y-%m-%dT%H:%M:%S%z")
+        except ValueError:
+            continue
+        age_min = (now - at).total_seconds() / 60
+        if age_min < after_min or age_min > _MISSED_MAX_DAYS * 24 * 60:
+            continue
+        out.append((psid, frm.get("name") or psid, m.get("message") or "(không phải chữ)", created))
+    return out
+
+
+def _da_tra_loi_sau(psid: str, at_iso: str) -> bool:
+    """Lịch sử đã có câu trả lời SAU mốc tin đó chưa?
+
+    Chốt cuối trước khi trả lời bù: giữa lúc hỏi FB và lúc gửi, lượt webhook có thể vừa xong
+    hoặc người thật vừa rep tay. Đọc file local nên rẻ, không tốn thêm request FB.
+    """
+    try:
+        moc = datetime.strptime(at_iso, "%Y-%m-%dT%H:%M:%S%z").astimezone().replace(tzinfo=None)
+    except ValueError:
+        return False
+    for m in reversed(brain.load_history(psid)):
+        if m.get("role") != "assistant":
+            continue
+        try:
+            return datetime.strptime(m.get("at", ""), "%Y-%m-%d %H:%M:%S") > moc
+        except ValueError:
+            return False
+    return False
+
+
+async def run_missed_check() -> None:
+    """Hỏi FB xem khách nào nhắn mà chưa được trả lời -> báo admin trả lời tay.
+
+    Chỉ BÁO, KHÔNG tự trả lời: tin rơi thường đã cũ, bot trả lời trễ dễ lạc ngữ cảnh và
+    có thể đã ngoài cửa sổ 24h của FB.
+    """
+    pid = await _page_id()
+    if not pid:
+        return
+    url = f"https://graph.facebook.com/{config.GRAPH_VER}/{pid}/conversations"
+    params = {"access_token": config.PAGE_TOKEN, "limit": 50,
+              "fields": "id,updated_time,messages.limit(1){from,message,created_time}"}
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as c:
+            data = (await c.get(url, params=params)).json()
+    except Exception as e:
+        print(f"[missed] gọi FB lỗi: {type(e).__name__}: {e}", file=sys.stderr)
+        return
+    if "error" in data:
+        print(f"[missed] FB trả lỗi: {json.dumps(data['error'], ensure_ascii=False)[:200]}", file=sys.stderr)
+        await alert_admins("missed:api",
+                           f"⚠️ KHÔNG QUÉT ĐƯỢC TIN RƠI - mất lưới an toàn, khách có thể bị bỏ mà không ai biết.\n"
+                           f"{json.dumps(data['error'], ensure_ascii=False)[:200]}")
+        return
+
+    now = datetime.now(timezone.utc)
+    rows = [r for r in pick_unanswered(data.get("data"), pid, config.MISSED_AFTER_MIN, now)
+            if r[0] not in config.ADMIN_UIDS and not brain.missed_already_reported(r[0], r[3])]
+    if not rows:
+        return
+
+    tu_tra: list[tuple] = []      # bot trả lời bù được
+    nguoi_that: list[tuple] = []  # phải người thật xử lý
+    for psid, name, text, at in rows:
+        try:
+            tuoi_h = (now - datetime.strptime(at, "%Y-%m-%dT%H:%M:%S%z")).total_seconds() / 3600
+        except ValueError:
+            tuoi_h = 999
+        if psid in _INFLIGHT or psid in _BUFFERS:
+            # Webhook vừa tới và đang xử lý khách này -> số liệu FB đã cũ. Bỏ qua HOÀN TOÀN
+            # (không đánh dấu) để vòng sau soi lại nếu lượt đó vẫn hỏng.
+            print(f"[missed] bỏ qua {name}: đang xử lý ở luồng webhook", file=sys.stderr)
+            continue
+        if _da_tra_loi_sau(psid, at):
+            # Lịch sử đã có câu trả lời SAU tin đó (người thật rep tay, hoặc lượt trước vừa xong)
+            # -> không rơi nữa. Đánh dấu để khỏi soi lại mãi.
+            brain.mark_missed_reported(psid, at)
+            continue
+        if brain.is_closed(psid):
+            # Đã handoff/chốt phiếu -> chuyên gia đang cầm khách này, bot nhảy vào là phá.
+            nguoi_that.append((psid, name, text, at, "đã handoff cho chuyên gia"))
+        elif tuoi_h >= _TRA_BU_TOI_DA_H:
+            # Ngoài cửa sổ 24h của FB: gửi RESPONSE sẽ bị từ chối (#10), có cố cũng vô ích.
+            nguoi_that.append((psid, name, text, at, f"quá {int(tuoi_h)}h - ngoài cửa sổ 24h của FB"))
+        elif config.MISSED_AUTOREPLY:
+            tu_tra.append((psid, name, text, at))
+        else:
+            nguoi_that.append((psid, name, text, at, "tự trả lời bù đang TẮT"))
+
+    for psid, name, text, at in tu_tra:
+        # Đi ĐÚNG luồng tin bình thường (handle_event -> gom tin -> brain.answer -> gửi):
+        # brain tự nạp lịch sử + bảng sản phẩm nên câu trả lời khớp ngữ cảnh, và mọi thứ khác
+        # (handoff, gửi ảnh theo mã, ghi CRM) chạy y hệt. Viết đường trả lời riêng = 2 lối đi
+        # dễ lệch nhau về sau.
+        print(f"[missed] trả lời bù {name} ({psid}): {text[:40]!r}", file=sys.stderr)
+        _spawn_bg(handle_event(psid, text))
+        stats.log_event("missed_autoreply", psid, note=text[:100])
+        brain.mark_missed_reported(psid, at)
+
+    if tu_tra:
+        lines = [f"• {n}: \"{t[:60]}\"" for _, n, t, _ in tu_tra[:_MISSED_MAX_LINES]]
+        await notify_admins(f"🤖 BOT TRẢ LỜI BÙ {len(tu_tra)} khách bị bỏ sót\n\n" + "\n".join(lines)
+                            + "\n\n(Bot đọc lại lịch sử + bảng sản phẩm nên trả lời khớp ngữ cảnh.)")
+    if nguoi_that:
+        lines = [f"• {n} lúc {a[11:16]} {a[:10]} - {ly_do}\n  \"{t[:60]}\""
+                 for _, n, t, a, ly_do in nguoi_that[:_MISSED_MAX_LINES]]
+        more = (f"\n(và {len(nguoi_that) - _MISSED_MAX_LINES} khách nữa)"
+                if len(nguoi_that) > _MISSED_MAX_LINES else "")
+        await notify_admins(f"⚠️ {len(nguoi_that)} KHÁCH CẦN NGƯỜI THẬT TRẢ LỜI\n\n"
+                            + "\n".join(lines) + more + "\n\n➡️ Bot KHÔNG tự trả lời các ca này.")
+        for psid, _, _, at, _ly in nguoi_that:
+            brain.mark_missed_reported(psid, at)
+    stats.log_event("missed_check", "", note=f"bù {len(tu_tra)}, người thật {len(nguoi_that)}")
 
 
 # --- Canh tunnel chết: ping PUBLIC_URL/webhook từ ngoài, đứt -> báo Lark 1 lần ---
@@ -570,7 +797,10 @@ async def _save_lead_to_crm(psid: str) -> None:
         await notify_admins(f"{head}\nKhách: {await _label(psid)}\n"
                             f"{lead.get('tinh') or ''} | {lead.get('tom_tat') or ''}")
     elif result == "error":
-        await notify_admins(f"⚠️ Ghi lead CRM LỖI cho khách {await _label(psid)} (xem log server)")
+        # Token/quyền Lark hỏng -> lỗi lặp ở MỌI lead, gộp lại thay vì mỗi khách 1 tin.
+        await alert_admins("crm:error",
+                           f"🔴 GHI LEAD CRM LỖI - lead khách {await _label(psid)} "
+                           f"({lead.get('sdt') or '?'}) chưa vào CRM (xem log server).")
 
 
 async def handle_event(psid: str, text: str) -> None:
@@ -601,6 +831,14 @@ async def _debounced_flush(psid: str) -> None:
 
 async def _process(psid: str, text: str) -> None:
     """Xử 1 lượt đã gom: semaphore → brain → gửi lại. Lỗi = báo admin, không rep khách."""
+    _INFLIGHT.add(psid)
+    try:
+        await _process_inner(psid, text)
+    finally:
+        _INFLIGHT.discard(psid)
+
+
+async def _process_inner(psid: str, text: str) -> None:
     pending_urls = _PENDING_IMAGES.pop(psid, None)     # ảnh khách kèm lượt này (nếu có)
     images: list[tuple[bytes, str]] = []
     if pending_urls:
@@ -655,8 +893,10 @@ async def _process(psid: str, text: str) -> None:
             # Lỗi: KHÔNG trả lời khách gì cả, chỉ báo admin.
             print(f"[handle] {type(e).__name__}: {e}", file=sys.stderr)
             stats.log_event("error", psid, note=f"{type(e).__name__}: {e}")
-            await notify_admins(f"⚠️ LỖI BOT khi trả lời khách {await _label(psid)}\n"
-                                f"{type(e).__name__}: {e}\nTin khách: {text}")
+            # Gộp theo LOẠI lỗi: key sai/hết quota Gemini làm MỌI khách fail, báo từng khách = bão.
+            await alert_admins(f"brain:{type(e).__name__}",
+                               f"⚠️ LỖI BOT khi trả lời khách {await _label(psid)}\n"
+                               f"{type(e).__name__}: {e}\nTin khách: {text}")
             return
         reply, handoff_reason = _extract_handoff(reply)
         reply, img_tokens = _extract_images(reply)

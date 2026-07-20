@@ -69,6 +69,13 @@ FOLLOWUP_ENABLED = os.getenv("BOT_FOLLOWUP_ENABLED", "1").strip() not in ("0", "
 FOLLOWUP_AFTER_H = float(os.getenv("BOT_FOLLOWUP_AFTER_H", "4"))     # im bao lâu thì nhắc
 FOLLOWUP_CHECK_MIN = int(os.getenv("BOT_FOLLOWUP_CHECK_MIN", "15"))  # chu kỳ quét
 
+# Lưới an toàn tin RƠI: khách nhắn mà bot chưa trả lời quá X phút -> báo admin trả lời tay.
+# Ngưỡng phải > thời gian gom tin (debounce 4s) + thời gian bot nghĩ, không thì báo giả.
+MISSED_AFTER_MIN = float(os.getenv("BOT_MISSED_AFTER_MIN", "10"))
+# Bot TỰ trả lời bù khách bị bỏ sót (đọc lại lịch sử nên khớp ngữ cảnh). Không áp dụng cho
+# khách đã handoff (chuyên gia đang cầm) và tin quá 24h (FB chặn gửi).
+MISSED_AUTOREPLY = os.getenv("BOT_MISSED_AUTOREPLY", "1").strip() not in ("0", "", "false")
+
 # Canh tunnel (ngrok/cloudflared) chết: tự ping PUBLIC_URL/webhook từ ngoài -> đứt thì báo Lark.
 # Mặc định bật khi có PUBLIC_URL. Tắt: BOT_TUNNEL_WATCH=0.
 TUNNEL_WATCH_ENABLED = os.getenv("BOT_TUNNEL_WATCH", "1").strip() not in ("0", "", "false")
@@ -78,6 +85,12 @@ TUNNEL_FAILS_TO_ALERT = int(os.getenv("BOT_TUNNEL_FAILS", "2"))      # số lầ
 # Firebase Realtime DB: mirror conversations + stats lên cloud (backup/xem remote).
 # Cả 2 trống -> tắt hẳn. FIREBASE_CRED = path service account json; DB_URL = link RTDB.
 FIREBASE_CRED = os.getenv("FIREBASE_CRED", "").strip()
+if FIREBASE_CRED and not Path(FIREBASE_CRED).exists():
+    # .env dùng chung cho Docker (/app/key.json) và máy dev (Windows) -> đường dẫn tuyệt đối
+    # kiểu Linux chết ở local. Không thấy file thì tìm cùng tên ngay cạnh mã nguồn.
+    _fallback = ROOT / Path(FIREBASE_CRED).name
+    if _fallback.exists():
+        FIREBASE_CRED = str(_fallback)
 FIREBASE_DB_URL = os.getenv("FIREBASE_DB_URL", "").strip()
 
 

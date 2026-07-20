@@ -15,6 +15,7 @@ import sys
 import threading
 import time
 
+import alerts
 import config
 import util
 from bot_tools.lark_image import _tenant_token, request_retry   # tái dùng token + retry transient
@@ -121,8 +122,9 @@ def _load_meta(psid: str) -> dict:
     return util.read_json(_meta_path(psid), {})
 
 
-def _save_meta(psid: str, record_id: str, lead: dict, lead_code: str = "") -> None:
-    """Ghi record_id + mã Lead/Chance + tham chiếu nhanh (tên/sđt). Atomic tmp+rename.
+def _save_meta(psid: str, record_id: str, lead: dict, lead_code: str = "",
+               fields: dict | None = None) -> None:
+    """Ghi record_id + mã Lead/Chance + tham chiếu nhanh (tên/sđt) + ảnh chụp fields. Atomic.
 
     lead_code trống (autonumber chưa sinh kịp) -> giữ mã cũ đã lưu, không ghi đè bằng rỗng."""
     try:
@@ -130,10 +132,16 @@ def _save_meta(psid: str, record_id: str, lead: dict, lead_code: str = "") -> No
             lead_code = _load_meta(psid).get("lead_code", "")
         data = {"record_id": record_id, "lead_code": lead_code,
                 "ten": lead.get("ten", ""), "sdt": lead.get("sdt", ""),
+                # Ảnh chụp fields ĐÃ GHI -> lượt sau so được "có gì đổi thật không".
+                "fields": fields or {},
                 "updated": time.strftime("%Y-%m-%d %H:%M:%S")}
         util.write_json_atomic(_meta_path(psid), data)
     except Exception as e:
         print(f"[crm] lưu meta psid={psid} lỗi: {type(e).__name__}: {e}", file=sys.stderr)
+        # Mất record_id -> lượt sau phải dò SĐT; dò trượt là TẠO LEAD TRÙNG trong CRM.
+        alerts.alert(f"crm:meta:{type(e).__name__}",
+                     f"⚠️ KHÔNG LƯU ĐƯỢC record_id CRM - nguy cơ tạo lead TRÙNG cho cùng khách.\n"
+                     f"{type(e).__name__}: {e}")
 
 
 def _fetch_lead_code(record_id: str, tok: str, retry: bool = False) -> str:
@@ -192,6 +200,10 @@ def upsert_lead(psid: str, lead: dict) -> str:
         return "skipped"
     if not (config.LARK_APP_ID and _crm_base() and _crm_table()):
         print("[crm] thiếu cấu hình LARK_CRM_* -> bỏ qua ghi lead", file=sys.stderr)
+        # Khách ĐÃ để lại SĐT mà lead rơi vào hư không - mất tiền thật, không phải lỗi kỹ thuật vặt.
+        alerts.alert("crm:noconfig",
+                     f"🔴 LEAD BỊ BỎ - khách để lại SĐT {phone} nhưng thiếu cấu hình CRM.\n"
+                     f"➡️ Điền LARK_APP_ID, LARK_CRM_APP_TOKEN, LARK_CRM_TABLE_ID trong .env.")
         return "skipped"
     try:
         tok = _tenant_token()
@@ -200,22 +212,28 @@ def upsert_lead(psid: str, lead: dict) -> str:
             return "skipped"
 
         # 1) record_id đã lưu của khách -> update thẳng (nhanh, chắc, không đua search)
-        rid = _load_meta(psid).get("record_id")
+        meta = _load_meta(psid)
+        rid = meta.get("record_id")
         if rid and _record_exists(rid, tok):
+            if fields == (meta.get("fields") or {}):
+                # Khách chat tiếp nhưng KHÔNG có thông tin nào mới -> bỏ qua hẳn: không ghi Lark
+                # (đỡ 1 request), không báo admin. Trước đây lượt nào cũng "đã cập nhật lead" nên
+                # admin quen phớt lờ, tới lúc có thay đổi thật cũng không ai để ý.
+                return "unchanged"
             _write("PUT", f"records/{rid}", tok, fields)
-            _save_meta(psid, rid, lead, _fetch_lead_code(rid, tok))
+            _save_meta(psid, rid, lead, _fetch_lead_code(rid, tok), fields)
             return "updated"
 
         # 2) chưa có / record bị xóa -> fallback tìm SĐT 1 lần (chống trùng khi mất file)
         rid = _find_by_phone(phone, tok)
         if rid:
             _write("PUT", f"records/{rid}", tok, fields)
-            _save_meta(psid, rid, lead, _fetch_lead_code(rid, tok))
+            _save_meta(psid, rid, lead, _fetch_lead_code(rid, tok), fields)
             return "updated"
 
         # 3) tạo mới, lưu record_id + mã Lead/Chance (autonumber -> retry đọc)
         new_id = _write("POST", "records", tok, fields)
-        _save_meta(psid, new_id, lead, _fetch_lead_code(new_id, tok, retry=True))
+        _save_meta(psid, new_id, lead, _fetch_lead_code(new_id, tok, retry=True), fields)
         return "created"
     except Exception as e:
         print(f"[crm] ghi lead {phone} lỗi: {type(e).__name__}: {e}", file=sys.stderr)

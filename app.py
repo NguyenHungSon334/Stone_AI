@@ -16,6 +16,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 import admin
+import alerts
 import config
 import messenger
 
@@ -30,8 +31,12 @@ async def _followup_loop():
         await asyncio.sleep(max(1, config.FOLLOWUP_CHECK_MIN) * 60)
         try:
             await messenger.run_followups()
+            await messenger.run_missed_check()   # cùng vòng quét, khỏi đẻ thêm loop
         except Exception as e:
             print(f"[followup] vòng quét lỗi: {type(e).__name__}: {e}", file=sys.stderr)
+            await asyncio.to_thread(
+                alerts.alert, f"loop:followup:{type(e).__name__}",
+                f"⚠️ VÒNG QUÉT FOLLOW-UP LỖI - khách im không được nhắc lại.\n{type(e).__name__}: {e}")
 
 
 async def _tunnel_watch_loop():
@@ -42,12 +47,43 @@ async def _tunnel_watch_loop():
             await messenger.run_tunnel_check()
         except Exception as e:
             print(f"[tunnel] vòng check lỗi: {type(e).__name__}: {e}", file=sys.stderr)
+            # Vòng canh chết = mất luôn cảnh báo tunnel chết. Im lặng ở đây là nguy hiểm nhất.
+            await asyncio.to_thread(
+                alerts.alert, f"loop:tunnel:{type(e).__name__}",
+                f"⚠️ VÒNG CANH TUNNEL LỖI - KHÔNG còn cảnh báo khi tunnel chết.\n{type(e).__name__}: {e}")
 
 
 def _spawn(coro):
     t = asyncio.create_task(coro)
     _BG.add(t)
     t.add_done_callback(_BG.discard)
+
+
+def _missing_config() -> list[str]:
+    """Biến .env thiếu mà bot KHÔNG chạy đúng được. Thiếu -> bot im ru, dễ tưởng 'chưa có khách'."""
+    need = {"MSGR_PAGE_TOKEN": config.PAGE_TOKEN, "MSGR_VERIFY_TOKEN": config.VERIFY_TOKEN,
+            "MSGR_APP_SECRET": config.APP_SECRET, "GEMINI_API_KEY": config.GEMINI_API_KEY}
+    return [k for k, v in need.items() if not v]
+
+
+@app.on_event("startup")
+async def _startup_selfcheck():
+    """Báo 1 lần lúc khởi động: thiếu cấu hình gì, kênh cảnh báo sống chưa.
+    Không có bước này thì cấu hình sai chỉ lộ khi khách nhắn mà không ai trả lời."""
+    missing = _missing_config()
+    print(f"[app] cấu hình: {'THIẾU ' + ', '.join(missing) if missing else 'đủ'} | "
+          f"Firebase {'bật' if config.FIREBASE_CRED and config.FIREBASE_DB_URL else 'TẮT'} | "
+          f"CRM {'bật' if config.LARK_CRM_APP_TOKEN and config.LARK_APP_ID else 'TẮT'}", file=sys.stderr)
+    if not config.LARK_WEBHOOK_URL:
+        print("[app] CHƯA cấu hình LARK_WEBHOOK_URL -> mọi cảnh báo lỗi sẽ BỊ NUỐT.", file=sys.stderr)
+        return
+    if not missing:
+        return          # khởi động sạch thì IM: container crash-loop mà báo mỗi vòng = spam Lark
+    await asyncio.to_thread(
+        alerts.notify,
+        f"🔴 BOT KHỞI ĐỘNG THIẾU CẤU HÌNH: {', '.join(missing)}\n"
+        f"Model: {config.MODEL} | Port: {config.PORT}\n"
+        f"➡️ Bot sẽ KHÔNG trả lời khách cho tới khi điền đủ.")
 
 
 @app.on_event("startup")
@@ -64,7 +100,9 @@ async def _start_bg():
 
 @app.get("/healthz")
 async def healthz():
-    return {"ok": True, "model": config.MODEL, "configured": bool(config.PAGE_TOKEN)}
+    """Thêm `alerts`: kênh cảnh báo hỏng thì KHÔNG tự báo được (báo qua chính nó), phải soi ở đây."""
+    return {"ok": True, "model": config.MODEL, "configured": bool(config.PAGE_TOKEN),
+            "missing_config": _missing_config(), "alerts": alerts.status()}
 
 
 @app.get("/webhook/messenger")

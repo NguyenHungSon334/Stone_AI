@@ -13,6 +13,7 @@ Tải cao thì gom batch hoặc hàng đợi sau.
 import sys
 import threading
 
+import alerts
 import config
 import util
 
@@ -42,6 +43,11 @@ def _init() -> bool:
                 cred, {"databaseURL": config.FIREBASE_DB_URL, "httpTimeout": 10})
         except Exception as e:
             print(f"[fb] init lỗi: {type(e).__name__}: {e}", file=sys.stderr)
+            # Init hỏng = TẮT HẲN Firebase cả phiên (_ready đã True, không thử lại): mọi hội
+            # thoại chỉ còn local, admin vẫn tưởng có backup. Phải báo.
+            alerts.alert("fb:init", f"🔴 FIREBASE KHÔNG KHỞI ĐỘNG ĐƯỢC - hội thoại chỉ lưu local, "
+                                    f"KHÔNG có backup cloud.\n{type(e).__name__}: {e}\n"
+                                    f"➡️ Kiểm tra FIREBASE_CRED (file json) và FIREBASE_DB_URL, rồi restart.")
             _app = None
         return _app is not None
 
@@ -56,6 +62,9 @@ def _run(fn) -> None:
                 fn()
         except Exception as e:
             print(f"[fb] mirror lỗi: {type(e).__name__}: {e}", file=sys.stderr)
+            alerts.alert(f"fb:mirror:{type(e).__name__}",
+                         f"⚠️ GHI FIREBASE LỖI - hội thoại/stats lượt này KHÔNG lên cloud "
+                         f"(local vẫn còn).\n{type(e).__name__}: {e}")
     threading.Thread(target=wrap, daemon=True).start()
 
 
@@ -110,6 +119,10 @@ def fetch_conversation(psid: str) -> list | None:
         return None
     except Exception as e:
         print(f"[fb] fetch lỗi psid={psid}: {type(e).__name__}: {e}", file=sys.stderr)
+        # Miss cache + fetch hỏng = bot coi như khách MỚI, mất sạch ngữ cảnh cũ (hỏi lại từ đầu).
+        alerts.alert(f"fb:fetch:{type(e).__name__}",
+                     f"⚠️ ĐỌC FIREBASE LỖI - bot mất lịch sử khách, trả lời như khách mới.\n"
+                     f"{type(e).__name__}: {e}")
         return None
 
 

@@ -11,6 +11,7 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import alerts
 import config
 import fb
 
@@ -29,6 +30,10 @@ def _append(row: dict) -> None:
         fb.mirror_event(row)
     except Exception as e:
         print(f"[stats] ghi lỗi: {type(e).__name__}: {e}", file=sys.stderr)
+        # Stats hỏng = dashboard báo token/chi phí THIẾU -> tưởng đang rẻ trong khi vẫn đốt tiền.
+        alerts.alert(f"stats:{type(e).__name__}",
+                     f"⚠️ GHI STATS LỖI - số liệu token/chi phí trên dashboard KHÔNG còn đúng.\n"
+                     f"{type(e).__name__}: {e}")
 
 
 def log_event(kind: str, psid: str, duration_s: float | None = None, note: str = "") -> None:
@@ -63,6 +68,78 @@ def _read_events(days: int = 30) -> list[dict]:
     except OSError:
         pass
     return out
+
+
+def _usd(tin: int, tout: int) -> float:
+    return tin / 1e6 * config.PRICE_IN_USD + tout / 1e6 * config.PRICE_OUT_USD
+
+
+def cost_breakdown(days: int = 30) -> dict:
+    """Bóc chi phí để KIỂM SOÁT tiền, không chỉ xem tổng.
+
+    Trả: chi phí hôm nay/hôm qua/7 ngày/kỳ, trung bình mỗi câu trả lời, dự phóng 30 ngày,
+    và TOP khách tốn nhất (1 khách hỏi lan man có thể ăn hết ngân sách mà tổng vẫn nhìn 'ổn').
+    """
+    events = _read_events(days)
+    today = datetime.now().date()
+    per_day: dict[str, list[int]] = {}
+    per_psid: dict[str, list[int]] = {}
+    replies_per_psid: dict[str, int] = {}
+    for ev in events:
+        if ev.get("kind") == "ok":
+            replies_per_psid[ev.get("psid", "")] = replies_per_psid.get(ev.get("psid", ""), 0) + 1
+        if ev.get("kind") != "usage":
+            continue
+        tin, tout = int(ev.get("tin") or 0), int(ev.get("tout") or 0)
+        d = datetime.fromtimestamp(ev["ts"]).date().isoformat()
+        per_day.setdefault(d, [0, 0])
+        per_day[d][0] += tin
+        per_day[d][1] += tout
+        psid = ev.get("psid", "")
+        per_psid.setdefault(psid, [0, 0])
+        per_psid[psid][0] += tin
+        per_psid[psid][1] += tout
+
+    def day_usd(d) -> float:
+        v = per_day.get(d.isoformat())
+        return _usd(*v) if v else 0.0
+
+    d7 = sum(day_usd(today - timedelta(days=i)) for i in range(7))
+    total = sum(_usd(*v) for v in per_day.values())
+    replies = sum(replies_per_psid.values())
+    top = sorted(((p, _usd(*v), replies_per_psid.get(p, 0)) for p, v in per_psid.items()),
+                 key=lambda x: x[1], reverse=True)[:10]
+    return {
+        "today_usd": round(day_usd(today), 4),
+        "yesterday_usd": round(day_usd(today - timedelta(days=1)), 4),
+        "d7_usd": round(d7, 4),
+        "period_usd": round(total, 4),
+        "period_days": days,
+        "per_reply_usd": round(total / replies, 5) if replies else None,
+        "replies": replies,
+        # Dự phóng theo nhịp 7 ngày gần nhất - sát thực tế hơn trung bình cả kỳ (kỳ có ngày chết bot).
+        "projection_30d_usd": round(d7 / 7 * 30, 2),
+        "daily": [{"date": (today - timedelta(days=i)).isoformat(),
+                   "usd": round(day_usd(today - timedelta(days=i)), 4)} for i in range(days - 1, -1, -1)],
+        "top_customers": [{"psid": p, "usd": round(c, 4), "replies": n} for p, c, n in top if c > 0],
+    }
+
+
+def recent_errors(days: int = 7, limit: int = 20) -> dict:
+    """Lỗi gần đây gom theo loại + vài dòng mới nhất. Để biết bot đang hỏng KIỂU gì, không chỉ 'có lỗi'."""
+    rows = [e for e in _read_events(days) if e.get("kind") == "error"]
+    groups: dict[str, int] = {}
+    for e in rows:
+        key = (e.get("note") or "không rõ").split(":")[0][:60]
+        groups[key] = groups.get(key, 0) + 1
+    rows.sort(key=lambda e: e.get("ts", 0), reverse=True)
+    return {
+        "total": len(rows),
+        "by_type": sorted(({"type": k, "count": v} for k, v in groups.items()),
+                          key=lambda x: x["count"], reverse=True),
+        "recent": [{"at": datetime.fromtimestamp(e["ts"]).strftime("%Y-%m-%d %H:%M"),
+                    "psid": e.get("psid", ""), "note": e.get("note", "")} for e in rows[:limit]],
+    }
 
 
 def summary(days: int = 7) -> dict:

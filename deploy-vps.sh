@@ -13,7 +13,8 @@ git pull --ff-only
 # Không copy bước này thì sửa Personal.md xong build lại vẫn chạy persona cũ.
 echo "==> Cập nhật persona + bảng sản phẩm"
 mkdir -p data/docs
-cp Document_ChatBot_Mess/* data/docs/
+# data/ do Docker tạo nên có thể thuộc root -> cp thường bị Permission denied.
+cp Document_ChatBot_Mess/* data/docs/ 2>/dev/null || sudo cp Document_ChatBot_Mess/* data/docs/
 
 echo "==> Build image trên VPS (e2-micro chậm, ~3-5 phút lần đầu)"
 docker compose build
@@ -25,5 +26,6 @@ docker image prune -f
 echo "==> Chờ bot lên..."
 sleep 5
 docker compose ps
-curl -s http://localhost:7900/healthz || echo "(chưa lên, xem: docker compose logs --tail=50 bot)"
-echo
+# Bot chỉ 'expose' 7900 (không publish) -> host không gọi localhost:7900 được. Hỏi từ trong container.
+docker compose exec -T bot python -c "import httpx;print(httpx.get('http://localhost:7900/healthz').text)" \
+    || echo "(chưa lên, xem: docker compose logs --tail=50 bot)"

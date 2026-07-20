@@ -25,18 +25,31 @@ app.include_router(admin.router)
 _BG: set = set()   # giữ ref mạnh task nền
 
 
+_QUET_DAU_S = 30      # chờ trước lần quét đầu (xem _followup_loop)
+
+
 async def _followup_loop():
     """Nền: mỗi FOLLOWUP_CHECK_MIN phút quét khách im -> nhắc nhẹ."""
+    # Chờ ngắn rồi quét NGAY, không ngủ trọn 1 chu kỳ: restart giữa lúc đang trả lời bù làm mất
+    # lượt đó, ngủ trước nghĩa là khách bị bỏ thêm 15 phút nữa mới có ai soi lại.
+    # Vẫn phải chờ chút: trên VPS `restart: always`, container crash-loop sẽ khởi động lại liên
+    # tục - quét ngay tức khắc là mỗi vòng lặp đập 1 lượt FB Graph API -> dính rate-limit (#4/#32),
+    # mất luôn lưới an toàn. 30s đủ để lộ crash-loop mà vẫn nhanh hơn chu kỳ thường rất nhiều.
+    await asyncio.sleep(_QUET_DAU_S)
     while True:
+        # 2 try TÁCH RIÊNG: chung 1 khối thì follow-up lỗi là nuốt luôn lưới an toàn tin rơi
+        # (khách nhắn mà không ai trả lời) - mất cái quan trọng hơn vì cái phụ hỏng.
+        for ten, chay, hau_qua in (
+                ("follow-up", messenger.run_followups, "khách im không được nhắc lại"),
+                ("tin rơi", messenger.run_missed_check, "khách nhắn mà KHÔNG ai trả lời")):
+            try:
+                await chay()
+            except Exception as e:
+                print(f"[loop] vòng quét {ten} lỗi: {type(e).__name__}: {e}", file=sys.stderr)
+                await asyncio.to_thread(
+                    alerts.alert, f"loop:{ten}:{type(e).__name__}",
+                    f"⚠️ VÒNG QUÉT {ten.upper()} LỖI - {hau_qua}.\n{type(e).__name__}: {e}")
         await asyncio.sleep(max(1, config.FOLLOWUP_CHECK_MIN) * 60)
-        try:
-            await messenger.run_followups()
-            await messenger.run_missed_check()   # cùng vòng quét, khỏi đẻ thêm loop
-        except Exception as e:
-            print(f"[followup] vòng quét lỗi: {type(e).__name__}: {e}", file=sys.stderr)
-            await asyncio.to_thread(
-                alerts.alert, f"loop:followup:{type(e).__name__}",
-                f"⚠️ VÒNG QUÉT FOLLOW-UP LỖI - khách im không được nhắc lại.\n{type(e).__name__}: {e}")
 
 
 async def _tunnel_watch_loop():

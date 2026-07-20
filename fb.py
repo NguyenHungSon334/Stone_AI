@@ -98,6 +98,53 @@ def mirror_event(row: dict) -> None:
     _run(fn)
 
 
+def list_psids() -> list | None:
+    """Danh sách psid có trên Firebase (shallow - chỉ lấy key, không tải nội dung chat).
+
+    None = Firebase tắt/lỗi. Dùng để dashboard thấy ĐỦ khách của cả hệ thống, không chỉ khách
+    mà máy này tình cờ có cache.
+    """
+    if not _init():
+        return None
+    try:
+        from firebase_admin import db
+        data = db.reference("conversations").get(shallow=True)
+        return sorted(data.keys()) if isinstance(data, dict) else []
+    except Exception as e:
+        print(f"[fb] list psids lỗi: {type(e).__name__}: {e}", file=sys.stderr)
+        return None
+
+
+def fetch_events(since_ts: float) -> list | None:
+    """Kéo sự kiện stats từ Firebase (nguồn CHÍNH) từ mốc `since_ts` trở đi.
+
+    None = Firebase tắt/lỗi -> caller tự rơi về file local. Lọc theo ts ngay trên server
+    (cần .indexOn ts trong database.rules.json) để không tải cả kho về mỗi lần mở dashboard.
+    """
+    if not _init():
+        return None
+    from firebase_admin import db
+    ref = db.reference("stats/events")
+    try:
+        data = ref.order_by_child("ts").start_at(since_ts).get()
+    except Exception as e:
+        if "Index not defined" not in str(e):
+            print(f"[fb] fetch events lỗi: {type(e).__name__}: {e}", file=sys.stderr)
+            return None
+        # Rules chưa deploy .indexOn ts -> RTDB từ chối lọc trên server. Tải hết rồi lọc ở
+        # client: chậm hơn nhưng CHẠY ĐƯỢC ngay, khỏi bắt user vào Console mới xem được số.
+        print("[fb] chưa có .indexOn ts -> tải hết rồi lọc ở client (deploy "
+              "database.rules.json để nhanh hơn)", file=sys.stderr)
+        try:
+            data = ref.get()
+        except Exception as e2:
+            print(f"[fb] fetch events lỗi: {type(e2).__name__}: {e2}", file=sys.stderr)
+            return None
+    rows = (list(data.values()) if isinstance(data, dict)
+            else data if isinstance(data, list) else [])
+    return [r for r in rows if isinstance(r, dict) and (r.get("ts") or 0) >= since_ts]
+
+
 def fetch_conversation(psid: str) -> list | None:
     """Kéo lịch sử 1 khách từ Firebase (dùng khi cache local miss).
 

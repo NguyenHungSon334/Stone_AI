@@ -204,7 +204,9 @@ _PRIVATE_REPLY = ("Dạ em chào Bác ạ 🌸 Em là Thảo Vân, trợ lý bê
 _SEEN_COMMENTS: dict[str, float] = {}
 _SEEN_MAX = 5000
 _SEEN_KEEP_S = 7 * 24 * 3600              # FB gửi lại trong vài giờ; 7 ngày là dư an toàn
-_SEEN_PATH = brain._HIST_DIR / "_comments_seen.json"
+# Đuôi .state (KHÔNG phải .json) là cố ý: conversations/ bị nhiều chỗ quét bằng glob("*.json")
+# (danh sách khách, follow-up). File .json ở đây sẽ bị đếm thành 1 "khách" ma.
+_SEEN_PATH = brain._HIST_DIR / "_comments_seen.state"
 _seen_loaded = False
 
 
@@ -634,6 +636,15 @@ def pick_unanswered(threads: list, page_id: str, after_min: float, now: datetime
     return out
 
 
+def _fb_time_to_local(at_iso: str) -> str | None:
+    """Mốc ISO của FB (UTC) -> chuỗi giờ ĐỊA PHƯƠNG khớp định dạng lịch sử. Hỏng -> None."""
+    try:
+        return (datetime.strptime(at_iso, "%Y-%m-%dT%H:%M:%S%z")
+                .astimezone().strftime("%Y-%m-%d %H:%M:%S"))
+    except ValueError:
+        return None
+
+
 def _da_tra_loi_sau(psid: str, at_iso: str) -> bool:
     """Lịch sử đã có câu trả lời SAU mốc tin đó chưa?
 
@@ -719,9 +730,11 @@ async def run_missed_check() -> None:
         # (handoff, gửi ảnh theo mã, ghi CRM) chạy y hệt. Viết đường trả lời riêng = 2 lối đi
         # dễ lệch nhau về sau.
         print(f"[missed] trả lời bù {name} ({psid}): {text[:40]!r}", file=sys.stderr)
-        _spawn_bg(handle_event(psid, text))
+        _spawn_bg(handle_event(psid, text, _fb_time_to_local(at)))
         stats.log_event("missed_autoreply", psid, note=text[:100])
-        brain.mark_missed_reported(psid, at)
+        # CỐ Ý không mark: mark ở đây = "đã xong" ngay lúc mới GIAO việc. Bot chết/restart/gửi
+        # hỏng giữa chừng -> khách im vĩnh viễn, không vòng nào soi lại. Trả lời xong thì lịch sử
+        # có lượt assistant -> _da_tra_loi_sau chặn vòng sau; chưa xong thì _INFLIGHT/_BUFFERS chặn.
 
     if tu_tra:
         lines = [f"• {n}: \"{t[:60]}\"" for _, n, t, _ in tu_tra[:_MISSED_MAX_LINES]]
@@ -803,10 +816,14 @@ async def _save_lead_to_crm(psid: str) -> None:
                            f"({lead.get('sdt') or '?'}) chưa vào CRM (xem log server).")
 
 
-async def handle_event(psid: str, text: str) -> None:
-    """Nhận 1 tin: gom vào buffer khách + hẹn giờ chốt. Nhiều tin dồn -> gom, trả 1 lần."""
-    buf = _BUFFERS.setdefault(psid, {"texts": [], "task": None, "first": time.monotonic()})
+async def handle_event(psid: str, text: str, user_at: str | None = None) -> None:
+    """Nhận 1 tin: gom vào buffer khách + hẹn giờ chốt. Nhiều tin dồn -> gom, trả 1 lần.
+
+    user_at: mốc khách gửi THẬT (chỉ luồng trả lời bù truyền; webhook để None = giờ hiện tại)."""
+    buf = _BUFFERS.setdefault(psid, {"texts": [], "task": None, "first": time.monotonic(),
+                                     "at": None})
     buf["texts"].append(text)
+    buf["at"] = buf.get("at") or user_at        # tin đầu có mốc thật thì giữ, tin sau không đè
     if buf["task"] and not buf["task"].done():
         buf["task"].cancel()                        # có tin mới -> dời giờ chốt
     buf["task"] = asyncio.create_task(_debounced_flush(psid))
@@ -826,19 +843,19 @@ async def _debounced_flush(psid: str) -> None:
     buf = _BUFFERS.pop(psid, None)
     if not buf or not buf["texts"]:
         return
-    await _process(psid, _merge_texts(buf["texts"]))
+    await _process(psid, _merge_texts(buf["texts"]), buf.get("at"))
 
 
-async def _process(psid: str, text: str) -> None:
+async def _process(psid: str, text: str, user_at: str | None = None) -> None:
     """Xử 1 lượt đã gom: semaphore → brain → gửi lại. Lỗi = báo admin, không rep khách."""
     _INFLIGHT.add(psid)
     try:
-        await _process_inner(psid, text)
+        await _process_inner(psid, text, user_at)
     finally:
         _INFLIGHT.discard(psid)
 
 
-async def _process_inner(psid: str, text: str) -> None:
+async def _process_inner(psid: str, text: str, user_at: str | None = None) -> None:
     pending_urls = _PENDING_IMAGES.pop(psid, None)     # ảnh khách kèm lượt này (nếu có)
     images: list[tuple[bytes, str]] = []
     if pending_urls:
@@ -888,7 +905,7 @@ async def _process_inner(psid: str, text: str) -> None:
         is_new = await asyncio.to_thread(brain.is_new_customer, psid)  # TRƯỚC khi brain ghi lịch sử
         t0 = time.monotonic()
         try:
-            reply = await brain.answer(psid, text, images or None)
+            reply = await brain.answer(psid, text, images or None, user_at)
         except Exception as e:
             # Lỗi: KHÔNG trả lời khách gì cả, chỉ báo admin.
             print(f"[handle] {type(e).__name__}: {e}", file=sys.stderr)

@@ -17,6 +17,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
 
+import brain
 import config
 import control
 import fb
@@ -54,11 +55,24 @@ async def dashboard_page(request: Request):
     return FileResponse(_DASHBOARD_HTML, media_type="text/html")
 
 
+def _dem_khach() -> int:
+    """Số khách của cả hệ thống. Firebase là nguồn chính; tắt thì đếm cache local.
+
+    glob("*.json") thô sẽ đếm cả sidecar .crm.json/.sum.json thành khách -> phồng số."""
+    tren_cloud = fb.list_psids()
+    if tren_cloud is not None:
+        return len(tren_cloud)
+    if not _HIST_DIR.exists():
+        return 0
+    return len([p for p in _HIST_DIR.glob("*.json")
+                if not p.name.endswith((".crm.json", ".sum.json"))])
+
+
 @router.get("/api/overview")
 async def overview(request: Request, days: int = 7):
     _check_token(request)
     days = max(1, min(days, 90))
-    total_customers = len(list(_HIST_DIR.glob("*.json"))) if _HIST_DIR.exists() else 0
+    total_customers = _dem_khach()
     return {
         "stats": stats.summary(days),
         "total_customers": total_customers,
@@ -78,23 +92,32 @@ def _last_text(msgs: list) -> str:
 
 @router.get("/api/customers")
 async def customers(request: Request):
+    """Khách của CẢ HỆ THỐNG: gộp psid trên Firebase (nguồn chính) với cache local.
+
+    Chỉ đọc local thì dashboard mỗi máy hiện một mảnh - container dựng lại là trắng danh sách
+    dù cloud vẫn đủ. Nội dung chat vẫn đọc qua brain (cache local, miss thì kéo Firebase)."""
     _check_token(request)
-    out = []
+    psids: list[str] = []
     if _HIST_DIR.exists():
-        for p in _HIST_DIR.glob("*.json"):
-            if p.name.endswith((".crm.json", ".sum.json")):   # sidecar CRM/tóm tắt, không phải log tin
+        psids = [p.stem for p in _HIST_DIR.glob("*.json")
+                 if not p.name.endswith((".crm.json", ".sum.json"))]
+    tren_cloud = fb.list_psids()
+    if tren_cloud:
+        psids += [p for p in tren_cloud if p not in psids]
+
+    out = []
+    for psid in psids:
+        try:
+            msgs = brain.load_history(psid)         # local trước, miss -> Firebase
+            if not msgs:
                 continue
-            try:
-                msgs = json.loads(p.read_text(encoding="utf-8"))
-                out.append({
-                    "psid": p.stem,
-                    "name": await _profile_name(p.stem),
-                    "messages": len(msgs),
-                    "last_at": datetime.fromtimestamp(p.stat().st_mtime).isoformat(timespec="minutes"),
-                    "last_text": _last_text(msgs)[:120],
-                })
-            except Exception as e:
-                print(f"[admin] đọc {p.name} lỗi: {e}", file=sys.stderr)
+            p = _HIST_DIR / f"{util.safe_psid(psid)}.json"
+            last_at = (datetime.fromtimestamp(p.stat().st_mtime).isoformat(timespec="minutes")
+                       if p.exists() else (msgs[-1].get("at") or "")[:16])
+            out.append({"psid": psid, "name": await _profile_name(psid), "messages": len(msgs),
+                        "last_at": last_at, "last_text": _last_text(msgs)[:120]})
+        except Exception as e:
+            print(f"[admin] đọc khách {psid} lỗi: {type(e).__name__}: {e}", file=sys.stderr)
     out.sort(key=lambda r: r["last_at"], reverse=True)
     return {"customers": out}
 
@@ -102,10 +125,11 @@ async def customers(request: Request):
 @router.get("/api/customers/{psid}")
 async def customer_detail(request: Request, psid: str):
     _check_token(request)
-    p = _HIST_DIR / f"{util.safe_psid(psid)}.json"
-    if not p.exists():
+    # Qua brain: cache local trước, miss thì kéo Firebase -> xem được cả khách mà máy này
+    # chưa từng phục vụ (trước đây 404 dù cloud có đủ lịch sử).
+    msgs = brain.load_history(util.safe_psid(psid))
+    if not msgs:
         raise HTTPException(404, "không có khách này")
-    msgs = json.loads(p.read_text(encoding="utf-8"))
     # Chỉ trả turn text (log sạch của brain.py đã là text, phòng hờ lọc block).
     clean = [{"role": m.get("role"), "text": m["content"], "at": m.get("at", "")}
              for m in msgs if isinstance(m.get("content"), str)]
@@ -288,9 +312,15 @@ async def get_config(request: Request):
     fields = []
     for f in _CONFIG_FIELDS:
         raw = env.get(f["key"], "")
+        mac_dinh = _MAC_DINH.get(f["key"], "")
+        # Hiện giá trị ĐANG CÓ HIỆU LỰC, không phải nguyên văn dòng .env: biến không khai trong
+        # .env vẫn chạy bằng mặc định của config.py, để ô trống là người xem tưởng CHƯA cấu hình
+        # rồi đi đặt lại một giá trị khác - trong khi bot vẫn đang chạy tử tế.
+        hieu_luc = raw or mac_dinh
         fields.append({**f,
-                       "gia_tri": _che(raw) if f.get("bi_mat") else raw,
-                       "mac_dinh": _MAC_DINH.get(f["key"], ""),
+                       "gia_tri": _che(raw) if f.get("bi_mat") else hieu_luc,
+                       "mac_dinh": mac_dinh,
+                       "tu_mac_dinh": not raw and bool(mac_dinh),
                        "da_dat": bool(raw)})
     nhom: list[str] = []
     for f in _CONFIG_FIELDS:                       # giữ thứ tự khai báo, không sort abc
@@ -314,6 +344,11 @@ async def save_config(request: Request):
         val = str(val).strip()
         if f.get("bi_mat") and not val:
             continue                                # bỏ trống secret = giữ giá trị cũ
+        if not val and _MAC_DINH.get(key):
+            # Ghi "KEY=" rỗng là config.py đọc ra chuỗi rỗng chứ KHÔNG rơi về mặc định:
+            # float("") nổ ngay lúc import -> bot chết lúc khởi động. Trống thì bỏ dòng đó ra,
+            # để mặc định lo.
+            continue
         if f.get("kieu") == "so" and val and not re.match(r"^\d+(\.\d+)?$", val):
             raise HTTPException(400, f"{f['nhan']}: phải là số")
         if f.get("kieu") == "bat_tat" and val not in ("0", "1"):
@@ -343,40 +378,8 @@ async def get_control(request: Request, days: int = 30, force: int = 0):
     return await control.snapshot(days=max(1, min(days, 90)), force=bool(force))
 
 
-_ENV_LINE_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=.*$")
-
-
-@router.get("/api/env")
-async def get_env(request: Request):
-    _check_token(request)
-    p = config.ROOT / ".env"
-    # utf-8-sig: .env sửa bằng Notepad/PowerShell hay dính BOM (U+FEFF) ở đầu. Đọc kiểu utf-8
-    # thường thì BOM lọt vào editor rồi quay lại validate -> báo "dòng 1 sai định dạng".
-    return {"content": p.read_text(encoding="utf-8-sig") if p.exists() else ""}
-
-
-@router.post("/api/env")
-async def save_env(request: Request):
-    """Ghi đè nguyên file .env từ editor. Validate từng dòng để không hỏng file."""
-    _check_token(request)
-    body = await request.json()
-    content = body.get("content")
-    if not isinstance(content, str) or not content.strip():
-        raise HTTPException(400, "nội dung .env trống")
-    content = content.lstrip("﻿")     # bỏ BOM -> ghi lại file sạch, lần sau khỏi dính
-    for i, line in enumerate(content.splitlines(), 1):
-        s = line.strip()
-        if not s or s.startswith("#"):
-            continue
-        if not _ENV_LINE_RE.match(s):
-            raise HTTPException(400, f"dòng {i} sai định dạng KEY=value: {s[:60]}")
-    p = config.ROOT / ".env"
-    bak = config.ROOT / ".env.bak"
-    if p.exists():
-        bak.write_text(p.read_text(encoding="utf-8-sig"), encoding="utf-8")   # giữ 1 bản lùi
-    p.write_text(content.rstrip() + "\n", encoding="utf-8")
-    config.reload_env()
-    return {"ok": True, "message": "đã lưu (.env.bak giữ bản cũ). Token/secret đổi thì cần Restart."}
+# Sửa .env CHỈ qua ô nhập (/api/config). Editor file thô đã bỏ: 2 đường ghi cùng 1 file là 1
+# đường không validate được (dán nhầm là hỏng cả file, mất token), và ô nhập đã phủ đủ biến.
 
 
 @router.post("/api/clean-data")

@@ -19,6 +19,11 @@ VPS_DIR="${VPS_DIR:-~/chatbot-mess}"         # thư mục chứa docker-compose.
 
 IMAGE="$REGION-docker.pkg.dev/$PROJECT/$REPO/bot:latest"
 
+# Chặn ở đây rẻ hơn nhiều so với phát hiện trên VPS: script này push thẳng lên prod, hỏng là
+# khách nhắn không ai trả lời cho tới lần deploy sau.
+echo "==> Chạy test"
+python -m pytest tests/ -q
+
 echo "==> Build image: $IMAGE"
 docker build -t "$IMAGE" .
 

@@ -130,26 +130,33 @@ def _codes_in(text: str) -> set[str]:
     return {m.group(1).upper() for m in _code_pattern().finditer(text or "")}
 
 
-# Khách chủ động xin xem ảnh/hình/mẫu -> gửi ảnh kể cả sản phẩm đã gửi trước đó.
-_ASK_IMG_RE = re.compile(r"xem\s*(ảnh|hình|mẫu)|cho\s*(xem|xin)\s*(ảnh|hình|mẫu)|"
-                         r"gửi\s*(ảnh|hình|mẫu)|(ảnh|hình)\s*(thật|thực tế|mẫu)|có\s*(ảnh|hình)\s*(không|ko|k)\b",
-                         re.IGNORECASE)
+# AI TỰ QUYẾT có gửi lại ảnh hay không: nó viết <<ANH>> vào câu trả lời khi thấy khách đang đòi
+# xem ảnh. Bản cũ dò tin khách bằng regex liệt kê cụm ("xem ảnh", "gửi ảnh"...) nên mọi cách nói
+# ngoài danh sách ("kèm ảnh", "ảnh đi", "cho ít hình") đều trượt -> bot hứa gửi ảnh rồi gửi chữ
+# trơn. Chỉ AI mới đọc được ý đó; nó đang sinh câu trả lời sẵn rồi nên không tốn thêm lượt gọi.
+_WANT_IMG_RE = re.compile(r"<<\s*ANH\s*>>", re.IGNORECASE)
 
 
-def _asks_for_image(text: str) -> bool:
-    return bool(_ASK_IMG_RE.search(text or ""))
+def _wants_image(reply: str) -> bool:
+    """AI có đánh dấu 'lượt này gửi ảnh' không?"""
+    return bool(_WANT_IMG_RE.search(reply or ""))
+
+
+def _bo_marker_anh(reply: str) -> str:
+    """Bóc <<ANH>> khỏi câu trả lời - marker nội bộ, KHÔNG cho khách thấy, KHÔNG lưu lịch sử."""
+    return _WANT_IMG_RE.sub("", reply or "").strip()
 
 
 def _image_markers(history: list, reply: str, user_text: str) -> str:
     """Marker ảnh (1 mã = 1 ảnh, tối đa _MAX_NEW_IMAGES/tin, mã không ảnh bỏ im lặng).
 
     2 trường hợp gửi ảnh:
-    - Khách XIN cụ thể (xem ảnh/hình/mẫu...) -> gửi mọi mã nhắc trong câu (reply + tin khách),
-      KỂ CẢ đã gửi trước đó.
-    - Không xin -> chỉ mã nhắc LẦN ĐẦU trong hội thoại (chưa từng xuất hiện ở lượt trước).
+    - AI đánh dấu <<ANH>> (nó hiểu khách đang đòi ảnh) -> gửi mọi mã nhắc trong câu
+      (reply + tin khách), KỂ CẢ đã gửi trước đó.
+    - Không đánh dấu -> chỉ mã nhắc LẦN ĐẦU trong hội thoại (chưa từng xuất hiện ở lượt trước).
     """
-    if _asks_for_image(user_text):
-        codes = _codes_in(reply) | _codes_in(user_text)     # khách xin -> bỏ qua 'đã seen'
+    if _wants_image(reply):
+        codes = _codes_in(reply) | _codes_in(user_text)     # AI đòi gửi -> bỏ qua 'đã seen'
     else:
         seen: set[str] = set()
         for m in history:
@@ -574,10 +581,15 @@ def trim_resend(full: list, text: str, user_at: str) -> tuple[list, str]:
     return full, user_at
 
 
-def _answer_sync(psid: str, text: str, images: list[tuple[bytes, str]] | None = None) -> str:
+def _answer_sync(psid: str, text: str, images: list[tuple[bytes, str]] | None = None,
+                 user_at: str | None = None) -> str:
     client = _get_client()
     model_id = _model_id()
-    user_at = _now_str()                              # mốc khách gửi (lúc bắt đầu xử lý)
+    # user_at: luồng bình thường = None (khách vừa nhắn, giờ xử lý ~ giờ gửi). Trả lời bù truyền
+    # mốc THẬT lấy từ FB: tin bot chưa bao giờ nhận thì không có bản cũ trong lịch sử để
+    # trim_resend giữ mốc, đóng dấu _now_str() là ghi lệch cả tiếng -> bot tưởng khách vừa nhắn,
+    # không biết mình đã bỏ khách bao lâu.
+    user_at = user_at or _now_str()
     with _psid_lock(psid):
         full = _load_hist(psid)                       # TOÀN BỘ log (lưu đủ cho admin)
         full, user_at = trim_resend(full, text, user_at)
@@ -623,7 +635,11 @@ def _answer_sync(psid: str, text: str, images: list[tuple[bytes, str]] | None = 
             if not reply:
                 raise BrainError(f"API không trả nội dung. finish_reason={cand.finish_reason}")
             # Sản phẩm nhắc lần đầu trong hội thoại -> tự kèm marker ảnh (messenger bóc ra gửi).
+            # Đọc <<ANH>> TRƯỚC khi bóc; sau đó reply sạch mới đem gửi + lưu lịch sử.
             markers = _image_markers(full, reply, text)
+            reply = _bo_marker_anh(reply)
+            if not reply:
+                raise BrainError("API chỉ trả marker ảnh, không có chữ.")
             reply_out = f"{reply} {markers}" if markers else reply   # marker CHỈ để gửi, KHÔNG lưu history
             stats.log_usage(psid, tok_in, tok_out)
             # Nối vào log SẠCH: chỉ text turn (bỏ vòng tool trung gian) -> không orphan tool block.
@@ -696,11 +712,13 @@ def _extract_lead_sync(psid: str) -> dict | None:
         return None
 
 
-async def answer(psid: str, text: str, images: list[tuple[bytes, str]] | None = None) -> str:
+async def answer(psid: str, text: str, images: list[tuple[bytes, str]] | None = None,
+                 user_at: str | None = None) -> str:
     """Trả lời 1 tin của khách. Chạy API trong thread để không chặn event loop.
 
-    images: ảnh khách gửi (bytes, content_type) -> Gemini vision đọc trong lượt này."""
-    return await asyncio.to_thread(_answer_sync, psid, text, images)
+    images: ảnh khách gửi (bytes, content_type) -> Gemini vision đọc trong lượt này.
+    user_at: mốc khách gửi THẬT ("%Y-%m-%d %H:%M:%S"); None = lấy giờ hiện tại."""
+    return await asyncio.to_thread(_answer_sync, psid, text, images, user_at)
 
 
 async def extract_lead(psid: str) -> dict | None:

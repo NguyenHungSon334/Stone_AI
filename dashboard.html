@@ -193,6 +193,13 @@ td .psid{color:var(--ink);font-weight:700}
 .cfg input:focus,.cfg select:focus{outline:none;border-color:var(--m-blue-d)}
 .cfg input.secret{font-family:Consolas,monospace;color:var(--muted)}
 .cfg .h{font-size:12px;color:var(--muted);margin-top:6px;line-height:1.5}
+/* Giá trị secret hiện tại: phải ĐỌC ĐƯỢC (không dùng màu mờ như .h), vì đây là thứ để đối chiếu
+   "có đúng cái mình vừa dán không". Ô nhập bên trên cố tình để trống. */
+.cfg .cur{font-size:12px;margin-top:6px;display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.cfg .cur code{font-family:Consolas,monospace;color:var(--ink);background:var(--surface-soft);
+  padding:2px 6px;border-radius:4px;border:1px solid var(--hairline)}
+.cfg .cur .ok{color:var(--success);font-weight:700}
+.cfg .cur .no{color:var(--m-red);font-weight:700}
 @media(max-width:720px){.wrow{grid-template-columns:1fr}.specs{grid-template-columns:repeat(2,1fr)}}
 </style>
 </head>
@@ -374,22 +381,6 @@ td .psid{color:var(--ink);font-weight:700}
       </div>
     </div>
 
-    <div style="margin-top:64px">
-      <h2>File .env (nâng cao)</h2>
-      <p class="hint" style="font-size:12px;color:var(--muted);letter-spacing:.5px;margin:8px 0 16px">
-        Sửa trực tiếp mọi cấu hình (token, key, giá token GEMINI_PRICE_IN_USD/OUT_USD...).
-        Lưu xong bấm RESTART BOT để chắc ăn mọi giá trị mới. Bản cũ tự giữ ở .env.bak.
-        CẨN THẬN: đổi BOT_DASH_TOKEN thì URL dashboard hiện tại hết hiệu lực.</p>
-      <div class="field">
-        <div class="expandable">
-          <textarea id="envRaw" class="noscroll" spellcheck="false" style="min-height:340px;font-family:Consolas,monospace;font-size:13px"></textarea>
-          <button class="expand-btn" title="Phóng to" onclick="openExpand('envRaw')">⛶</button>
-        </div>
-      </div>
-      <div style="display:flex;gap:16px">
-        <button class="btn" onclick="saveEnvRaw()">Lưu .env</button>
-      </div>
-    </div>
     <div style="height:64px"></div>
   </section>
 </div>
@@ -442,7 +433,7 @@ document.querySelectorAll(".tab").forEach(b => b.onclick = () => {
     document.getElementById("view-" + v).classList.toggle("hidden", v !== b.dataset.view));
   if (b.dataset.view === "control") loadControl();
   if (b.dataset.view === "customers") loadCustomers();
-  if (b.dataset.view === "settings") { loadSettings(); loadEnvRaw(); loadConfigFields(); }
+  if (b.dataset.view === "settings") { loadSettings(); loadConfigFields(); }
 });
 
 /* ===== Tổng quan ===== */
@@ -616,26 +607,6 @@ async function saveSettings() {
   } catch (e) { toast("Lưu lỗi: " + e.message, false); }
 }
 
-async function loadEnvRaw() {
-  try {
-    const d = await api("/admin/api/env");
-    document.getElementById("envRaw").value = d.content;
-  } catch (e) { toast("Tải .env lỗi: " + e.message, false); }
-}
-
-async function saveEnvRaw() {
-  if (!confirm("Ghi đè file .env? Bản cũ giữ ở .env.bak.")) return;
-  try {
-    const r = await fetch("/admin/api/env?token=" + encodeURIComponent(TOKEN), {
-      method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({content: document.getElementById("envRaw").value}),
-    });
-    const d = await r.json();
-    if (!r.ok) throw new Error(d.detail || r.status);
-    toast(d.message);
-  } catch (e) { toast("Lưu .env lỗi: " + e.message, false); }
-}
-
 async function cleanData() {
   if (!confirm("XÓA TOÀN BỘ lịch sử chat + thống kê (local + Firebase)?\nKHÔNG hồi được. Giữ nguyên sản phẩm + persona + CRM Lark.")) return;
   const typed = prompt("Xác nhận lần cuối: gõ XOA (in hoa) để xóa toàn bộ data.");
@@ -674,7 +645,7 @@ async function restartBot() {
 }
 
 /* ===== Expand / preview modal ===== */
-const EXPAND_TITLES = {persona: "Persona (tính cách bot)", envRaw: "File .env", chatlog: "Hội thoại"};
+const EXPAND_TITLES = {persona: "Persona (tính cách bot)", chatlog: "Hội thoại"};
 let _expandSrc = null;   // id textarea đang phóng to (để sync ngược khi đóng)
 
 function openExpand(id) {
@@ -683,8 +654,7 @@ function openExpand(id) {
   document.getElementById("modalTitle").textContent = EXPAND_TITLES[id] || id;
   if (src.tagName === "TEXTAREA") {
     _expandSrc = id;
-    const mono = id === "envRaw" ? "font-family:Consolas,monospace;font-size:13px" : "";
-    body.innerHTML = `<textarea id="modalText" class="noscroll" spellcheck="false" style="${mono}"></textarea>`;
+    body.innerHTML = `<textarea id="modalText" class="noscroll" spellcheck="false"></textarea>`;
     document.getElementById("modalText").value = src.value;
   } else {
     _expandSrc = null;
@@ -840,8 +810,8 @@ async function loadConfigFields() {
     document.getElementById("configForm").innerHTML =
       (d.nhom || []).map(g => '<div class="cfg-group"><h3>' + esc(g) + '</h3><div class="cfg-grid">'
         + (byGroup[g] || []).map(renderField).join("") + '</div></div>').join("")
-      + (extra.length ? '<p class="hint">Còn ' + extra.length + ' biến chưa có ô riêng ('
-          + extra.map(esc).join(", ") + ') - sửa ở phần .env nâng cao bên dưới.</p>' : "");
+      + (extra.length ? '<p class="hint">Còn ' + extra.length + ' biến trong .env chưa có ô riêng ('
+          + extra.map(esc).join(", ") + ') - bot vẫn đọc bình thường, muốn sửa thì sửa file trên máy chủ.</p>' : "");
   } catch (e) { toast("Lỗi tải cấu hình: " + e.message, false); }
 }
 
@@ -854,18 +824,27 @@ function renderField(f) {
       '<option value="' + esc(o[0]) + '"' + (o[0] === f.gia_tri ? " selected" : "") + '>'
       + esc(o[1]) + '</option>').join("") + '</select>';
   } else if (f.kieu === "bat_tat") {
-    input = '<select id="' + id + '"><option value="1"' + (f.gia_tri !== "0" ? " selected" : "")
-      + '>Bật</option><option value="0"' + (f.gia_tri === "0" ? " selected" : "") + '>Tắt</option></select>';
+    const tat = f.gia_tri === "0";
+    input = '<select id="' + id + '"><option value="1"' + (tat ? "" : " selected")
+      + '>Bật</option><option value="0"' + (tat ? " selected" : "") + '>Tắt</option></select>';
   } else if (f.bi_mat) {
+    // Ô secret LUÔN để trống, giá trị hiện ở dòng dưới. KHÔNG đổ mask vào value: lúc Lưu, ô có
+    // chữ là gửi lên server -> ghi đè chính chuỗi mask vào .env, mất token thật.
     input = '<input id="' + id + '" class="secret" value="" spellcheck="false" placeholder="'
-      + (f.da_dat ? esc(f.gia_tri) + " — để trống là giữ nguyên" : "chưa đặt") + '">';
+      + (f.da_dat ? "để trống là giữ nguyên" : "chưa đặt — dán giá trị vào đây") + '">'
+      + (f.da_dat
+         ? '<div class="cur"><span class="ok">✔ đang dùng</span> <code>' + esc(f.gia_tri) + '</code></div>'
+         : '<div class="cur"><span class="no">✖ chưa đặt</span></div>');
   } else {
     input = '<input id="' + id + '" value="' + esc(f.gia_tri) + '" spellcheck="false"'
       + (f.kieu === "so" ? ' inputmode="decimal"' : "")
       + (f.mac_dinh ? ' placeholder="mặc định: ' + esc(f.mac_dinh) + '"' : "") + '>';
   }
+  // Ô lấy giá trị ĐANG CHẠY. Chưa khai trong .env thì hiện mặc định + nói rõ, để khỏi tưởng
+  // là chưa cấu hình rồi đi đặt lại một giá trị khác.
+  const md = f.tu_mac_dinh ? '<div class="h">Đang chạy bằng mặc định (chưa khai trong .env).</div>' : "";
   return '<div class="cfg"><label class="lbl" for="' + id + '">' + esc(f.nhan) + rs + '</label>' + input
-    + (f.goi_y ? '<div class="h">' + esc(f.goi_y) + '</div>' : "") + '</div>';
+    + (f.goi_y ? '<div class="h">' + esc(f.goi_y) + '</div>' : "") + md + '</div>';
 }
 
 async function saveConfigFields() {

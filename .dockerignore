@@ -15,3 +15,7 @@ __pycache__/
 .claude/
 *.log
 DEPLOY.md
+# Không cần khi chạy: test, tài liệu thiết kế, logo 800KB không chỗ nào trong code dùng tới.
+tests/
+DESIGN.md
+Logo.png

@@ -52,9 +52,8 @@ def log_usage(psid: str, tok_in: int, tok_out: int) -> None:
              "tin": int(tok_in), "tout": int(tok_out)})
 
 
-def _read_events(days: int = 30) -> list[dict]:
-    """Đọc sự kiện trong N ngày gần nhất. File hỏng dòng nào bỏ dòng đó."""
-    cutoff = time.time() - days * 86400
+def _read_local(cutoff: float) -> list[dict]:
+    """Đọc sự kiện từ file local. File hỏng dòng nào bỏ dòng đó."""
     out: list[dict] = []
     try:
         with _EVENTS.open(encoding="utf-8") as f:
@@ -68,6 +67,34 @@ def _read_events(days: int = 30) -> list[dict]:
     except OSError:
         pass
     return out
+
+
+# Firebase là NGUỒN CHÍNH (xem fb.py) nên dashboard phải đọc từ đó, không thì mỗi máy hiện
+# một mảnh: chạy local thấy $0 trong khi VPS đang đốt tiền thật, container dựng lại là trắng
+# số liệu. Cache ngắn để mở nhiều tab / F5 liên tục không đấm RTDB.
+_CACHE: dict = {"at": 0.0, "cutoff": 0.0, "rows": None}
+_CACHE_TTL_S = 60.0
+
+
+def _read_events(days: int = 30) -> list[dict]:
+    """Sự kiện trong N ngày. Ưu tiên Firebase (nguồn chính), lỗi/tắt thì rơi về file local."""
+    now = time.time()
+    cutoff = now - days * 86400
+    # Cache theo CỬA SỔ đã tải, không theo `days`: 1 lần mở dashboard hỏi cả 7 ngày lẫn 30 ngày,
+    # so bằng days thì trượt cache và tải Firebase 3 lần. Cửa sổ hẹp hơn thì lọc lại từ cache.
+    if (_CACHE["rows"] is not None and now - _CACHE["at"] < _CACHE_TTL_S
+            and cutoff >= _CACHE["cutoff"]):
+        return [r for r in _CACHE["rows"] if (r.get("ts") or 0) >= cutoff]
+    rows = fb.fetch_events(cutoff)
+    if rows is None:                       # Firebase tắt hoặc lỗi -> số liệu của riêng máy này
+        return _read_local(cutoff)
+    # Máy này vừa ghi mà Firebase chưa kịp mirror (thread nền) -> gộp thêm local, khử trùng
+    # theo (ts, kind, psid). Thiếu bước này thì số vừa phát sinh biến mất khỏi dashboard vài giây.
+    seen = {(r.get("ts"), r.get("kind"), r.get("psid")) for r in rows}
+    rows = rows + [r for r in _read_local(cutoff)
+                   if (r.get("ts"), r.get("kind"), r.get("psid")) not in seen]
+    _CACHE.update(at=now, cutoff=cutoff, rows=rows)
+    return rows
 
 
 def _usd(tin: int, tout: int) -> float:

@@ -187,6 +187,59 @@ def test_merge_bo_tin_trung():
     assert messenger._merge_texts(["xin giá", "còn hàng"]) == "xin giá\ncòn hàng"
 
 
+def test_moc_goc_khi_tra_loi_bu():
+    """Trả lời bù phải ghi lịch sử theo mốc khách gửi THẬT, không phải lúc bù.
+
+    Ghi lệch -> bot đọc prompt tưởng khách vừa nhắn, không biết đã bỏ khách cả tiếng; follow-up
+    và mọi thứ tính theo mốc này cũng trễ theo."""
+    import asyncio
+    from datetime import datetime
+
+    goc = "2026-07-20T03:12:28+0000"
+    mong_doi = (datetime.strptime(goc, "%Y-%m-%dT%H:%M:%S%z")
+                .astimezone().strftime("%Y-%m-%d %H:%M:%S"))
+    assert messenger._fb_time_to_local(goc) == mong_doi
+    assert messenger._fb_time_to_local("rác") is None, "mốc hỏng không được nổ"
+
+    # Mốc phải đi hết chặng handle_event -> buffer -> _process (chỗ gọi brain.answer).
+    thay = {}
+
+    async def gia_lap():
+        async def bat(psid, text, at=None):
+            thay.update(psid=psid, text=text, at=at)
+
+        orig = messenger._process
+        messenger._process = bat
+        try:
+            await messenger.handle_event("PSID1", "xin giá", mong_doi)
+            await asyncio.sleep(messenger._DEBOUNCE_S + 0.5)
+        finally:
+            messenger._process = orig
+            messenger._BUFFERS.pop("PSID1", None)
+
+    asyncio.run(gia_lap())
+    assert thay.get("at") == mong_doi, f"mốc gốc phải tới _process, nhận {thay.get('at')!r}"
+
+
+def test_ai_quyet_gui_anh():
+    """AI đánh dấu <<ANH>> -> gửi lại cả mã ĐÃ gửi. Không đánh dấu -> chỉ mã nhắc lần đầu.
+
+    Bản cũ dò tin khách bằng regex liệt kê cụm nên 'kèm ảnh' trượt -> bot liệt kê 6 mã, gửi 0 ảnh.
+    Marker phải bị bóc sạch: khách KHÔNG được thấy, lịch sử KHÔNG được lưu."""
+    import brain
+
+    assert brain._wants_image("Dạ em gửi Bác mẫu M01 ạ <<ANH>>")
+    assert brain._wants_image("mẫu M01 << anh >>"), "khoảng trắng/hoa thường vẫn phải nhận"
+    assert not brain._wants_image("Dạ mẫu M01 giá 33.9 triệu ạ")
+
+    assert brain._bo_marker_anh("Dạ mẫu M01 ạ <<ANH>>") == "Dạ mẫu M01 ạ", "marker phải bị bóc"
+    assert brain._bo_marker_anh("Dạ mẫu M01 ạ") == "Dạ mẫu M01 ạ"
+
+    lich_su = [{"role": "assistant", "content": "Mẫu M01 giá 33.9 triệu", "at": "10:00"}]
+    assert brain._image_markers(lich_su, "Mẫu M01 ạ <<ANH>>", "kèm ảnh"), "có <<ANH>> -> gửi lại mã cũ"
+    assert not brain._image_markers(lich_su, "Mẫu M01 ạ", "xin giá"), "không marker -> mã cũ thôi gửi"
+
+
 if __name__ == "__main__":
     test_signature()
     test_verify_webhook()
@@ -197,4 +250,6 @@ if __name__ == "__main__":
     test_trim_resend()
     test_khong_tra_loi_bu_khi_da_co_reply()
     test_merge_bo_tin_trung()
+    test_moc_goc_khi_tra_loi_bu()
+    test_ai_quyet_gui_anh()
     print("OK - all messenger self-checks passed")

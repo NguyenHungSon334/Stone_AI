@@ -1023,3 +1023,6 @@ async def _process_inner(psid: str, text: str, user_at: str | None = None) -> No
             if phone:
                 await notify_admins(f"📞 KHÁCH ĐỂ LẠI SĐT: {phone} - {await _label(psid)}\n"
                                     f"Tin khách: {text}")
+                # SĐT = lead thật, kể cả khi chưa handoff. Trước đây chỉ handoff mới ghi CRM
+                # nên khách để số giữa cuộc tư vấn là mất lead. upsert theo psid -> không trùng.
+                await _save_lead_to_crm(psid)

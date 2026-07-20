@@ -17,7 +17,9 @@ services:
       - ./hon-da-c0444-67c2f3e5de10.json:/app/hon-da-c0444-67c2f3e5de10.json:ro
       - ./data/conversations:/app/conversations       # lịch sử chat + <psid>.crm.json
       - ./data/stats:/app/stats                       # thống kê token/chi phí/sự kiện
-      - ./data/docs:/app/Document_ChatBot_Mess        # persona + bảng sản phẩm (seed lần đầu)
+      # persona + bảng sản phẩm. Mount ĐÈ thư mục trong image -> sửa Personal.md ở local phải
+      # copy lên host (deploy.sh tự scp), build lại image KHÔNG đủ.
+      - ./data/docs:/app/Document_ChatBot_Mess
     expose:
       - "7900"
 

@@ -167,6 +167,7 @@ def _image_markers(history: list, reply: str, user_text: str) -> str:
                 seen |= _codes_in(m["content"])
         codes = _codes_in(reply) - seen
     markers: list[str] = []
+    thieu: list[str] = []
     for code in sorted(codes):
         if len(markers) >= _MAX_NEW_IMAGES:
             break
@@ -181,6 +182,13 @@ def _image_markers(history: list, reply: str, user_text: str) -> str:
             toks = []
         if toks:
             markers.append(f"<<IMG:{toks[0]}>>")
+        else:
+            thieu.append(code)
+    # Bot hứa gửi ảnh mà Base không có ảnh mã đó -> khách chờ hụt, im lặng. Báo admin để bổ sung.
+    if _wants_image(reply) and not markers and thieu:
+        alerts.alert("lark:img:thieu",
+                     f"⚠️ THIẾU ẢNH TRONG LARK BASE - bot hứa gửi ảnh nhưng không có: {', '.join(thieu)}\n"
+                     "➡️ Thêm ảnh vào cột Ảnh của các mã này.")
     return " ".join(markers)
 
 
@@ -640,7 +648,13 @@ def _answer_sync(psid: str, text: str, images: list[tuple[bytes, str]] | None = 
             # Sản phẩm nhắc lần đầu trong hội thoại -> tự kèm marker ảnh (messenger bóc ra gửi).
             # Đọc <<ANH>> TRƯỚC khi bóc; sau đó reply sạch mới đem gửi + lưu lịch sử.
             markers = _image_markers(full, reply, text)
+            hua_anh_khong_co = _wants_image(reply) and not markers
             reply = _bo_marker_anh(reply)
+            if hua_anh_khong_co:
+                # Khách hỏi ảnh mà Base chưa có: nói thật + xin liên hệ, thay vì để khách chờ hụt.
+                reply = (reply + " Mẫu này bên em làm thiết kế riêng theo khuôn viên từng nhà "
+                         "nên chưa có sẵn ảnh dựng ạ. Bác để lại số điện thoại hoặc Zalo, "
+                         "em gửi Bác bộ ảnh công trình thực tế và bản phối riêng ngay hôm nay ạ.").strip()
             if not reply:
                 raise BrainError("API chỉ trả marker ảnh, không có chữ.")
             reply_out = f"{reply} {markers}" if markers else reply   # marker CHỈ để gửi, KHÔNG lưu history

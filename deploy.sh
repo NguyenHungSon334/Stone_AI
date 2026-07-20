@@ -30,6 +30,12 @@ docker build -t "$IMAGE" .
 echo "==> Push lên Artifact Registry"
 docker push "$IMAGE"
 
+# Document_ChatBot_Mess bị bind mount từ ./data/docs trên VPS -> bản trong image KHÔNG có tác dụng.
+# Sửa Personal.md/CSV ở local mà chỉ build image thì VPS vẫn chạy bản cũ. Copy thẳng lên host.
+echo "==> Đồng bộ persona + bảng sản phẩm lên VPS"
+ssh "$VPS_USER@$VPS_HOST" "mkdir -p $VPS_DIR/data/docs"
+scp Document_ChatBot_Mess/* "$VPS_USER@$VPS_HOST:$VPS_DIR/data/docs/"
+
 echo "==> Deploy trên VPS ($VPS_HOST)"
 ssh "$VPS_USER@$VPS_HOST" "cd $VPS_DIR && export IMAGE='$IMAGE' && docker compose pull && docker compose up -d && docker image prune -f"
 

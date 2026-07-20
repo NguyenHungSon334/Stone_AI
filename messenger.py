@@ -792,6 +792,52 @@ async def run_tunnel_check() -> None:
         await notify_admins(f"🟢 TUNNEL SỐNG LẠI: bot nhận tin bình thường qua {config.PUBLIC_URL}")
 
 
+# --- CANH TOKEN PAGE ---
+# Token chết là bot IM HOÀN TOÀN. Không có vòng này thì chỉ lộ lúc gửi tin hỏng, tức là đã có
+# khách không nhận được tin rồi mới biết. Token sinh từ tài khoản cá nhân còn chết bất chợt khi
+# chủ tài khoản đổi mật khẩu (OAuth #190 subcode 460), không đợi tới hạn.
+_TOKEN_SAP_HET_S = 7 * 24 * 3600      # còn dưới ngần này thì kêu trước
+
+
+def danh_gia_token(data: dict, now: float) -> str:
+    """Soi kết quả debug_token. Trả '' nếu ổn, khác rỗng là nội dung cảnh báo. Hàm THUẦN."""
+    if not data.get("is_valid"):
+        ly_do = (data.get("error") or {}).get("message") or "Facebook không nói rõ lý do"
+        return ("🔴 TOKEN PAGE ĐÃ CHẾT - bot KHÔNG gửi được tin nào cho khách.\n"
+                f"{ly_do}\n➡️ Lấy token System User (hạn Never) rồi dán lại vào cấu hình.")
+    het_han = data.get("expires_at") or 0
+    if het_han and het_han - now < _TOKEN_SAP_HET_S:
+        con = max(0, int((het_han - now) // 86400))
+        return (f"⚠️ TOKEN PAGE SẮP HẾT HẠN - còn {con} ngày. Hết là bot im, khách nhắn không ai trả lời.\n"
+                "➡️ Token System User có hạn vĩnh viễn (expires_at = 0), đổi sang loại đó là hết lo.")
+    return ""
+
+
+async def run_token_check() -> None:
+    """1 vòng soi token page. Chết hoặc sắp hết hạn -> báo Lark (có gộp, không spam mỗi vòng)."""
+    if not config.PAGE_TOKEN:
+        return
+    url = f"https://graph.facebook.com/{config.GRAPH_VER}/debug_token"
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(20.0)) as c:
+            r = await c.get(url, params={"input_token": config.PAGE_TOKEN,
+                                         "access_token": config.PAGE_TOKEN})
+        payload = r.json() or {}
+    except Exception as e:
+        # Mạng lỗi != token chết. Im, vòng sau soi lại - kêu ở đây chỉ tổ nhiễu.
+        print(f"[token] gọi debug_token lỗi: {type(e).__name__}: {e}", file=sys.stderr)
+        return
+    if "error" in payload and "data" not in payload:
+        # Token hỏng tới mức không tự soi được chính nó -> chắc chắn có chuyện.
+        await alert_admins("fb:token:debug",
+                           "🔴 KHÔNG SOI ĐƯỢC TOKEN PAGE - nhiều khả năng token đã chết.\n"
+                           + json.dumps(payload["error"], ensure_ascii=False)[:200])
+        return
+    canh_bao = danh_gia_token(payload.get("data") or {}, time.time())
+    if canh_bao:
+        await alert_admins("fb:token:health", canh_bao)
+
+
 async def _save_lead_to_crm(psid: str) -> None:
     """Handoff: trích lead từ hội thoại -> ghi Lark CRM. Best-effort, lỗi chỉ báo admin."""
     lead = await brain.extract_lead(psid)

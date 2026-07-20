@@ -240,6 +240,33 @@ def test_ai_quyet_gui_anh():
     assert not brain._image_markers(lich_su, "Mẫu M01 ạ", "xin giá"), "không marker -> mã cũ thôi gửi"
 
 
+def test_danh_gia_token():
+    """Token page chết = bot im hoàn toàn. Phải kêu TRƯỚC khi khách mất tin.
+
+    Ca thật: token sinh từ tài khoản cá nhân chết vì chủ tài khoản đổi mật khẩu (#190/460) -
+    chưa tới hạn nhưng đã hỏng, chỉ lộ khi gửi tin cho khách và nhận HTTP 400."""
+    now = 1_800_000_000.0
+    ngay = 86400
+
+    danh = messenger.danh_gia_token({"is_valid": False,
+                                     "error": {"message": "session invalidated"}}, now)
+    assert "CHẾT" in danh and "session invalidated" in danh, danh
+
+    assert messenger.danh_gia_token({"is_valid": True, "expires_at": 0}, now) == "", \
+        "token vĩnh viễn (System User) không được kêu"
+    assert messenger.danh_gia_token({"is_valid": True, "expires_at": now + 60 * ngay}, now) == "", \
+        "còn 60 ngày thì im"
+
+    sap = messenger.danh_gia_token({"is_valid": True, "expires_at": now + 3 * ngay}, now)
+    assert "còn 3 ngày" in sap, sap
+
+    # Đã quá hạn nhưng FB chưa kịp đánh is_valid=False -> vẫn phải kêu, không được ra số âm.
+    qua = messenger.danh_gia_token({"is_valid": True, "expires_at": now - ngay}, now)
+    assert "còn 0 ngày" in qua, qua
+
+    assert messenger.danh_gia_token({}, now), "thiếu is_valid phải coi là chết, không im lặng"
+
+
 if __name__ == "__main__":
     test_signature()
     test_verify_webhook()
@@ -252,4 +279,5 @@ if __name__ == "__main__":
     test_merge_bo_tin_trung()
     test_moc_goc_khi_tra_loi_bu()
     test_ai_quyet_gui_anh()
+    test_danh_gia_token()
     print("OK - all messenger self-checks passed")

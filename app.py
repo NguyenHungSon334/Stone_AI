@@ -41,7 +41,8 @@ async def _followup_loop():
         # (khách nhắn mà không ai trả lời) - mất cái quan trọng hơn vì cái phụ hỏng.
         for ten, chay, hau_qua in (
                 ("follow-up", messenger.run_followups, "khách im không được nhắc lại"),
-                ("tin rơi", messenger.run_missed_check, "khách nhắn mà KHÔNG ai trả lời")):
+                ("tin rơi", messenger.run_missed_check, "khách nhắn mà KHÔNG ai trả lời"),
+                ("token FB", messenger.run_token_check, "không biết token chết cho tới khi mất khách")):
             try:
                 await chay()
             except Exception as e:

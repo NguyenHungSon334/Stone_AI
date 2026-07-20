@@ -35,14 +35,56 @@ Meta Developers > App > Messenger > Webhooks:
 - Verify token: khớp `MSGR_VERIFY_TOKEN`
 - Subscribe field: `messages`, `feed` (feed = bot trả lời comment dưới bài viết)
 
+## Token Facebook - VIỆC CẦN LÀM
+
+**Hiện trạng (20/07/2026): đang dùng Page token sinh từ tài khoản cá nhân. Chấp nhận tạm vì
+còn test, CHƯA có Business Manager.**
+
+Soi bằng `debug_token` ra: `type: PAGE`, `user_id: 2274691409966415`, `expires_at: 0`,
+`data_access_expires_at: 1792295595`.
+
+Vấn đề: token Page loại này tuy mang tên Page nhưng vòng đời **buộc vào phiên đăng nhập của
+người dùng đã cấp nó**. `expires_at: 0` chỉ nghĩa là không có hẹn giờ hết hạn, KHÔNG phải
+không thể bị huỷ. Nó chết khi người đó đổi mật khẩu, đăng xuất mọi thiết bị, bật/reset 2FA,
+gỡ app, mất quyền admin Page, hoặc Facebook tự huỷ phiên vì lý do bảo mật. Thêm mốc
+`data_access_expires_at` ~90 ngày, tới đó phải xin quyền lại.
+
+Đã dính thật một lần: `OAuthException #190` subcode `460` - "session has been invalidated
+because the user changed their password". Bot im, khách nhắn không ai trả lời, chỉ lộ khi gửi
+tin hỏng.
+
+**Cách xử lý dứt điểm - System User token.** System User là tài khoản máy thuộc Business,
+không có mật khẩu, không có phiên đăng nhập, nên không chết theo người nào cả. Đặt
+`Token expiration: Never` thì không phải thay định kỳ, và không có đồng hồ 90 ngày.
+
+Các bước (làm 1 lần, cần Business Manager; Page và App đều phải thuộc Business đó):
+
+1. `business.facebook.com` > Business Settings > Users > System Users > Add, role **Admin**
+2. Add Assets > Pages > chọn Page > bật **Manage Page** (full control)
+3. Add Assets > Apps > chọn app Messenger > **Develop**
+4. **Generate New Token** > chọn App > **Token expiration: Never** > tick quyền:
+   `pages_messaging`, `pages_manage_metadata`, `pages_read_engagement`, `pages_show_list`,
+   `pages_manage_engagement` (cần cho trả lời comment)
+5. Copy token (chỉ hiện 1 lần) > dán vào ô **Page Token** ở `/admin` > Lưu > Restart
+
+Xác nhận đã đúng loại: `user_id` TRỐNG, `expires_at: 0`, không còn `data_access_expires_at`.
+
+Token System User không hết hạn nên ai cầm được là dùng vô thời hạn - lộ thì vào Business
+Settings thu hồi và tạo cái mới. `.gitignore` đã chặn mọi biến thể `.env`.
+
+Trong lúc chưa chuyển: vòng canh token (`messenger.run_token_check`, quét mỗi
+`BOT_FOLLOWUP_CHECK_MIN` phút) gọi `debug_token`, token chết hoặc còn dưới 7 ngày là báo Lark
+ngay - không phải đợi khách nhắn mới biết. Vòng này vẫn nên giữ cả sau khi đổi sang System
+User, để bắt các ca thu hồi token / gỡ quyền / Facebook hạn chế app.
+
 ## Cấu trúc
 
 | File | Việc |
 |---|---|
-| `app.py` | Webhook FastAPI + 2 vòng lặp nền (follow-up, canh tunnel) |
+| `app.py` | Webhook FastAPI + vòng lặp nền (follow-up, tin rơi, canh token; canh tunnel chạy riêng) |
 | `messenger.py` | Giao thức FB: chữ ký, bóc tin/comment, gộp tin (debounce), gửi text/ảnh, rate-limit, handoff, ghi CRM |
 | `brain.py` | Gọi Gemini trả lời. Lịch sử + tóm tắt từng khách. Tool `suggest_products` |
-| `admin.py` | Router `/admin`: dashboard, xem khách, sửa `.env`, test Lark, xoá data, restart |
+| `admin.py` | Router `/admin`: dashboard, xem khách, ô nhập cấu hình (ghi `.env`), test Lark, xoá data, restart |
 | `dashboard.html` | Giao diện trang admin |
 | `config.py` | Đọc `.env` + persona + bảng sản phẩm (cache theo mtime) |
 | `stats.py` | Đếm token, chi phí, sự kiện |
@@ -94,15 +136,33 @@ Cần `.env`: `LARK_APP_ID`, `LARK_APP_SECRET` (app đã được chia sẻ Base
 | Việc | Biến | Mặc định |
 |---|---|---|
 | Follow-up: khách im chưa chốt → nhắn nhẹ 1 tin | `BOT_FOLLOWUP_ENABLED` / `_AFTER_H` / `_CHECK_MIN` | bật, 4h, quét 15p |
+| Tin rơi: hỏi thẳng FB xem khách nào nhắn mà chưa được trả lời | `BOT_MISSED_AFTER_MIN` / `BOT_MISSED_AUTOREPLY` | 10p, tự trả lời bù |
+| Canh token: `debug_token`, chết hoặc còn <7 ngày → báo Lark | (không có biến, luôn bật) | theo `BOT_FOLLOWUP_CHECK_MIN` |
 | Canh tunnel: ping `PUBLIC_URL` từ ngoài, đứt → báo Lark | `BOT_TUNNEL_WATCH` / `_CHECK_MIN` / `BOT_TUNNEL_FAILS` | bật khi có `PUBLIC_URL`, 3p, 2 lần fail |
 
 Giữ `BOT_FOLLOWUP_AFTER_H` dưới 24 cho hợp cửa sổ nhắn tin của FB.
 
+Ba vòng đầu dùng CHUNG một loop, mỗi vòng `try` riêng - một cái lỗi không nuốt cái còn lại.
+Loop quét ngay khi khởi động (chờ 30s cho ổn định) chứ không ngủ trọn chu kỳ trước, để restart
+giữa chừng không bỏ khách thêm 15 phút.
+
+Trả lời bù đi ĐÚNG luồng tin bình thường (`handle_event` → gom tin → `brain.answer` → gửi) nên
+đọc lại lịch sử, khớp ngữ cảnh, và mang theo **mốc giờ thật khách gửi** lấy từ FB - không đóng
+dấu giờ xử lý, không thì bot tưởng khách vừa nhắn. Không đánh dấu "đã xử lý" lúc mới giao việc:
+bot chết giữa chừng là khách im vĩnh viễn. Vòng sau tự bỏ qua nhờ lịch sử đã có lượt trả lời.
+
 ## Trang admin
 
 `http://localhost:7900/admin?token=<BOT_DASH_TOKEN>`. **`BOT_DASH_TOKEN` trống = trang admin
-tắt hẳn.** Xem tổng quan token/chi phí, danh sách khách, log từng khách, sửa `.env` ngay trên
-web, test webhook Lark, xoá toàn bộ data (local + Firebase, KHÔNG hoàn tác), restart.
+tắt hẳn.** Xem tổng quan token/chi phí, danh sách khách, log từng khách, sửa cấu hình bằng ô
+nhập, test webhook Lark, xoá toàn bộ data (local + Firebase, KHÔNG hoàn tác), restart.
+
+Cấu hình chỉ sửa qua **ô nhập** (`/api/config`); editor `.env` thô đã bỏ - hai đường ghi cùng
+một file mà đường kia không validate được, dán nhầm là hỏng file và mất luôn token dashboard.
+Ô hiện giá trị **đang có hiệu lực**, biến chưa khai trong `.env` thì hiện mặc định của
+`config.py` kèm ghi chú, không để trống gây tưởng chưa cấu hình. Ô bí mật luôn để trống, giá
+trị che hiện ở dòng riêng bên dưới - đổ vào `value` thì bấm Lưu sẽ ghi đè chính chuỗi che lên
+token thật.
 
 `reload_env()` nạp nóng được: `BOT_MODEL`, `BOT_ADMIN_UIDS`, `BOT_PER_PSID_RATE_S`,
 `BOT_DASH_TOKEN`, 2 biến giá. `BOT_MAX_CONCURRENT` đổi phải **restart** (semaphore tạo lúc import).

@@ -103,6 +103,25 @@ def _extract_images(reply: str) -> tuple[str, list[str]]:
     return (clean, tokens)
 
 
+# Lưới chặn CUỐI: mọi marker nội bộ đều dạng <<...>>, model viết lệch một chút là các hàm bóc
+# ở trên trượt và KHÁCH ĐỌC ĐƯỢC marker (đã xảy ra với <<ANH>>: model tự đóng thẻ thành
+# "<<ANH></anh>>"). Chặn ở đây thì mọi biến thể lệch của MỌI marker đều không lọt ra ngoài.
+# Giới hạn 60 ký tự và cấm '<' '>' bên trong để không nuốt nhầm cả câu.
+_MARKER_THUA_RE = re.compile(r"<+\s*/?\s*[A-Za-z][^<>]{0,60}>+")
+
+
+def _bo_marker_thua(reply: str, psid: str = "") -> str:
+    """Xoá marker nội bộ còn sót sau khi đã bóc handoff + ảnh. Có sót là lỗi prompt -> báo admin."""
+    sot = _MARKER_THUA_RE.findall(reply or "")
+    if not sot:
+        return reply
+    print(f"[marker] sót {sot} ở tin gửi {psid} - đã xoá trước khi gửi", file=sys.stderr)
+    alerts.alert("brain:marker-sot",
+                 "⚠️ BOT VIẾT MARKER SAI ĐỊNH DẠNG - đã chặn kịp, khách không thấy.\n"
+                 f"Sót: {sot[:3]}\n➡️ Xem lại hướng dẫn marker trong Personal.md.")
+    return _MARKER_THUA_RE.sub("", reply).strip()
+
+
 async def lark_ping(text: str = "✅ Test bot admin Lark từ dashboard - kết nối OK.") -> dict:
     """Kiểm tra kết nối bot admin Lark (nút Test ở dashboard). Trả trạng thái cấu hình + kết quả gửi."""
     if not config.LARK_WEBHOOK_URL:
@@ -963,6 +982,7 @@ async def _process_inner(psid: str, text: str, user_at: str | None = None) -> No
             return
         reply, handoff_reason = _extract_handoff(reply)
         reply, img_tokens = _extract_images(reply)
+        reply = _bo_marker_thua(reply, psid)
         if handoff_reason:
             # Handoff: gửi phiếu xác nhận cho KHÁCH trước, rồi báo admin (kèm lý do) để người thật tiếp quản.
             stats.log_event("handoff", psid, duration_s=time.monotonic() - t0)

@@ -134,7 +134,10 @@ def _codes_in(text: str) -> set[str]:
 # xem ảnh. Bản cũ dò tin khách bằng regex liệt kê cụm ("xem ảnh", "gửi ảnh"...) nên mọi cách nói
 # ngoài danh sách ("kèm ảnh", "ảnh đi", "cho ít hình") đều trượt -> bot hứa gửi ảnh rồi gửi chữ
 # trơn. Chỉ AI mới đọc được ý đó; nó đang sinh câu trả lời sẵn rồi nên không tốn thêm lượt gọi.
-_WANT_IMG_RE = re.compile(r"<<\s*ANH\s*>>", re.IGNORECASE)
+# Bắt LỎNG: marker trông như thẻ XML nên model có lúc tự đóng thẻ - ca thật khách nhận được
+# "<<ANH></anh>>" nguyên văn vì regex cũ đòi đúng 2 dấu '>'. Nhận mọi biến thể: thiếu/thừa dấu
+# ngoặc, có gạch chéo mở hoặc đóng, hoa thường lẫn lộn.
+_WANT_IMG_RE = re.compile(r"<+\s*/?\s*ANH\s*/?\s*>+", re.IGNORECASE)
 
 
 def _wants_image(reply: str) -> bool:

@@ -235,9 +235,35 @@ def test_ai_quyet_gui_anh():
     assert brain._bo_marker_anh("Dạ mẫu M01 ạ <<ANH>>") == "Dạ mẫu M01 ạ", "marker phải bị bóc"
     assert brain._bo_marker_anh("Dạ mẫu M01 ạ") == "Dạ mẫu M01 ạ"
 
+    # Model coi <<ANH>> như thẻ XML rồi tự đóng thẻ. Ca THẬT: khách đọc được "<<ANH></anh>>"
+    # nguyên văn và không nhận được ảnh nào, vì regex cũ đòi đúng 2 dấu '>'.
+    for lech in ("<<ANH></anh>>", "<<ANH>", "<ANH>", "<<anh />>", "<< ANH >>", "</ANH>>"):
+        assert brain._wants_image("Dạ mẫu LD12 ạ " + lech), f"phải hiểu là đòi ảnh: {lech!r}"
+        assert brain._bo_marker_anh("Dạ mẫu LD12 ạ " + lech) == "Dạ mẫu LD12 ạ", \
+            f"phải bóc sạch, không để khách đọc được: {lech!r}"
+
     lich_su = [{"role": "assistant", "content": "Mẫu M01 giá 33.9 triệu", "at": "10:00"}]
     assert brain._image_markers(lich_su, "Mẫu M01 ạ <<ANH>>", "kèm ảnh"), "có <<ANH>> -> gửi lại mã cũ"
     assert not brain._image_markers(lich_su, "Mẫu M01 ạ", "xin giá"), "không marker -> mã cũ thôi gửi"
+
+
+def test_bo_marker_thua():
+    """Lưới chặn cuối: marker viết lệch kiểu gì cũng KHÔNG được lọt tới khách."""
+    orig = alerts.notify
+    alerts.notify = lambda *a, **k: None
+    alerts._ALERTS.clear()
+    try:
+        assert messenger._bo_marker_thua("Dạ mẫu LD12 ạ <<ANH></anh>>") == "Dạ mẫu LD12 ạ"
+        assert messenger._bo_marker_thua("Dạ em gửi ạ <<HANDOFF chốt đơn>") == "Dạ em gửi ạ"
+
+        # Câu thường KHÔNG được đụng vào - chặn quá tay là cắt mất chữ của khách.
+        for sach in ("Dạ mẫu LD12 giá 77.835.000đ ạ",
+                     "Bác cho em hỏi kích thước 127x79cm có hợp không ạ",
+                     "Giá < 100 triệu thì bên em có mẫu M01 ạ"):
+            assert messenger._bo_marker_thua(sach) == sach, f"không được sửa câu sạch: {sach!r}"
+    finally:
+        alerts.notify = orig
+        alerts._ALERTS.clear()
 
 
 def test_danh_gia_token():
@@ -279,5 +305,6 @@ if __name__ == "__main__":
     test_merge_bo_tin_trung()
     test_moc_goc_khi_tra_loi_bu()
     test_ai_quyet_gui_anh()
+    test_bo_marker_thua()
     test_danh_gia_token()
     print("OK - all messenger self-checks passed")

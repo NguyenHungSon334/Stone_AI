@@ -14,6 +14,7 @@ import argparse
 import csv
 import re
 import sys
+import unicodedata
 from pathlib import Path
 
 CSV = Path(__file__).resolve().parent.parent / "Document_ChatBot_Mess" / "Danh_Muc_San_Pham.csv"
@@ -112,6 +113,58 @@ def catalog_index() -> str:
     return "\n".join(lines)
 
 
+# Thể loại -> tiền tố mã (theo mục 5 của persona). Mã nào không khớp 4 nhóm dưới đều là Mộ.
+_KIND_BY_PREFIX = {"LD": "long dinh", "HR": "hang rao", "TQ": "cong", "TP": "cuon thu"}
+
+def fold(s: str) -> str:
+    """Bỏ dấu tiếng Việt. Khách Messenger gõ không dấu rất nhiều ('long dinh', 'hang rao')."""
+    s = unicodedata.normalize("NFD", (s or "").lower())
+    return "".join(c for c in s if not unicodedata.combining(c)).replace("đ", "d")
+
+
+# Khách nói gì thì coi là hỏi thể loại đó. Dò trên CẢ bản có dấu lẫn bản bỏ dấu.
+# Bỏ dấu gây ĐỤNG NHAU: "công trình" -> "cong" đụng "cổng", "mô/mo hinh" đụng "mộ". Nên hai
+# nhóm đó chỉ nhận dạng CÓ DẤU, hoặc dạng không dấu đi kèm từ định danh ("cong da", "mo da").
+_KIND_WORDS = {
+    "long dinh": r"long dinh|lau tho|am tho|lang tho|lang chung",
+    "hang rao": r"hang rao|lan can",
+    "cong": r"\bcổng\b|tam quan|cong da|cong nha tho",
+    "cuon thu": r"cuon thu|binh phong",
+    "mo": r"\bmộ\b|lăng mộ|lang mo|mo da|mo doi|mo don|mo tam son|ngoi mo",
+}
+
+
+def kind_of(ma: str) -> str:
+    """Thể loại suy từ tiền tố mã. Không khớp nhóm nào -> Mộ (nhóm lớn nhất, 162 mẫu)."""
+    alpha = re.match(r"[A-Za-z]+", str(ma).strip())
+    return _KIND_BY_PREFIX.get(alpha.group(0).upper() if alpha else "", "mo")
+
+
+def rows_by_kind(text: str, limit: int = 8) -> list:
+    """Khách hỏi theo THỂ LOẠI ('tư vấn các mẫu long đình') -> vài mẫu tiêu biểu của loại đó.
+
+    Công cụ không có tham số lọc thể loại, và bảng giá KHÔNG còn nằm trong prompt, nên nếu
+    không tra sẵn ở đây thì bot chỉ còn cách tự gọi tool - mà mục tiêu 'xin số điện thoại'
+    trong persona lấn át, nó né sang xin số và trả lời chay không có mẫu nào. Tra sẵn bằng code
+    là đường DUY NHẤT chắc chắn có số thật. Ưu tiên hàng Bán chạy, cùng shape với search()."""
+    low = (text or "").lower() + "\n" + fold(text)
+    kinds = {k for k, pat in _KIND_WORDS.items() if re.search(pat, low)}
+    if not kinds:
+        return []
+    header, stone_cols, data = load_rows()
+    hit = [r for r in data if r and r[0].strip() and kind_of(r[0]) in kinds]
+    hit.sort(key=lambda r: 0 if _cell(r, 2) else 1)      # Bán chạy lên trước, còn lại giữ thứ tự
+    out = []
+    for r in hit[:limit]:
+        best = None
+        for i in stone_cols:
+            v = parse_money(r[i]) if i < len(r) else -1.0
+            if v > 0 and (best is None or v < best[0]):
+                best = (v, header[i].strip())
+        out.append((best[0] if best else 0.0, best[1] if best else "", r))
+    return out
+
+
 def _cell(r, i) -> str:
     """Ô CSV đã gộp khoảng trắng. Vài ô (tên, ghi chú) có XUỐNG DÒNG bên trong -> index và
     render đều là định dạng 1-dòng-1-SP, để nguyên là vỡ dòng, bot đọc lệch mã."""
@@ -155,6 +208,8 @@ def render(results) -> str:
         ma, ten = r[0], _cell(r, 1)
         dm = _cell(r, 3)
         head = f"{ma} | {ten} | {dm}"
+        if _cell(r, 2):                      # cột 'Bán chạy' - persona ưu tiên giới thiệu trước
+            head += " | BÁN CHẠY"
         if _spec(header, r):
             head += f" | {_spec(header, r)}"
         if _cell(r, 16):
@@ -196,6 +251,25 @@ def _selftest():
         assert "KT(DxRxC)" in out, f"render mất kích thước: {out}"
         assert "tấn" in out, f"render mất trọng lượng: {out}"
         assert out.count("giá:") == 1 and "Đá" in out, f"render mất giá theo loại đá: {out}"
+
+    assert kind_of("LD02") == "long dinh" and kind_of("HR05") == "hang rao"
+    assert kind_of("M01") == "mo" and kind_of("MCS3") == "mo" and kind_of("TQ01") == "cong"
+    ld = rows_by_kind("Em muon tu van cac mau long dinh")
+    assert ld and all(r[0].startswith("LD") for _, _, r in ld), f"loc long dinh sai: {ld[:2]}"
+    assert len(ld) <= 8, "tra san qua nhieu dong -> phinh prompt"
+    assert "KT(DxRxC)" in render(ld) and "Đá" in render(ld), "tra san thieu thong so/gia"
+    # "một" chứa "mộ" -> khớp lỏng là mọi câu có chữ 'một' đều bị nhồi 8 ngôi mộ
+    assert not rows_by_kind("Em muon hoi mot chut"), "'mot' bi nhan nham thanh 'mo'"
+    assert not rows_by_kind("Xin chao"), "cau chao khong duoc tra san gi"
+    assert all(r[0].startswith("HR") for _, _, r in rows_by_kind("bao gia hang rao da"))
+    # Khach go CO DAU va KHONG DAU phai ra cung ket qua
+    assert rows_by_kind("tư vấn mẫu long đình") == rows_by_kind("tu van mau long dinh")
+    assert all(r[0].startswith("LD") for _, _, r in rows_by_kind("bao gia lang tho"))
+    # Bo dau gay dung nhau: "cong trinh"/"mo hinh" KHONG duoc nhan thanh cong/mo
+    assert not rows_by_kind("Nha em dang lam cong trinh o Nam Dinh"), "'cong trinh' -> cong"
+    assert not rows_by_kind("cho em xem mo hinh 3d"), "'mo hinh' -> mo"
+    assert all(r[0].startswith("TQ") for _, _, r in rows_by_kind("bao gia cổng đá"))
+    assert rows_by_kind("gia mo da bao nhieu"), "'mo da' phai nhan la Mo"
 
     idx = catalog_index()
     assert len(idx.splitlines()) == len([r for r in _data if r and r[0].strip()]), "index thiếu mã"

@@ -27,7 +27,8 @@ import fb
 import stats
 import util
 from bot_tools import lark_image
-from bot_tools.find_by_price import catalog_index, parse_money, render, rows_by_ids, search
+from bot_tools.find_by_price import (catalog_index, parse_money, render, rows_by_ids,
+                                     rows_by_kind, search)
 
 # 1 file/khách, GIỮ TOÀN BỘ log (admin xem đủ). AI đọc NHẸ = tóm tắt phần cũ + đuôi verbatim:
 # token/lượt bị chặn, KHÔNG phình theo độ dài chat. Tóm tắt = sidecar <psid>.sum.json (local,
@@ -641,6 +642,22 @@ def trim_resend(full: list, text: str, user_at: str) -> tuple[list, str]:
     return full, user_at
 
 
+def _prefetch(text: str) -> str:
+    """Số liệu tra sẵn cho tin khách vừa nhắn. Rỗng nếu tin không nhắc mã/thể loại nào.
+
+    Mã cụ thể ưu tiên hơn thể loại: khách hỏi đúng "LD02" thì cần đúng mẫu đó, không phải
+    8 mẫu long đình. Vẫn giữ tool suggest_products cho câu theo tầm giá và cho vòng sau."""
+    if codes := _codes_in(text):
+        rows = rows_by_ids(sorted(codes))
+    else:
+        rows = rows_by_kind(text)
+    if not rows:
+        return ""
+    return ("[Hệ thống tra sẵn - số liệu THẬT từ bảng hàng, dùng ngay, không cần gọi công cụ. "
+            "Chọn vài mẫu hợp nhu cầu khách để tư vấn, KHÔNG trả lời chay không có mẫu nào]\n"
+            + render(rows))
+
+
 def _answer_sync(psid: str, text: str, images: list[tuple[bytes, str]] | None = None,
                  user_at: str | None = None) -> str:
     client = _get_client()
@@ -664,6 +681,11 @@ def _answer_sync(psid: str, text: str, images: list[tuple[bytes, str]] | None = 
         else:
             start = max(0, len(full) - _KEEP_VERBATIM)
         contents += _to_contents(full[start:])        # đuôi nguyên văn (token bị chặn, không phình)
+        # Tra sẵn số liệu cho lượt này: bảng giá KHÔNG còn trong prompt, mà bot thì hay né gọi
+        # tool để nhảy sang xin số điện thoại (mục tiêu ưu tiên trong persona) -> trả lời chay
+        # không mẫu nào. Tra bằng code là đường chắc chắn có số thật, không phụ thuộc bot tự chọn.
+        if (pre := _prefetch(text)):
+            contents.append(types.Content(role="user", parts=[types.Part.from_text(text=pre)]))
         # Ảnh khách gửi: nhét bytes vào lượt hiện tại cho Gemini vision đọc (không lưu vào lịch sử).
         parts = [types.Part.from_text(text=text)]
         for data, ctype in (images or []):

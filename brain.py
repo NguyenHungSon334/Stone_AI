@@ -44,9 +44,9 @@ _MODEL_ALIAS = {"flash": "gemini-3.5-flash", "pro": "gemini-2.5-pro",
 
 # Model chính "high demand" (503) là quá tải của RIÊNG model đó -> đổi sang model khác thường
 # chạy được ngay. Chỉ dùng khi model chính đã thua hết lượt retry.
-# Phải KHÁC model chính mới có nghĩa: lite pool riêng, nhẹ nhất -> ít dính deadline nhất lúc
-# Gemini tải cao (nhịp này nhồi thẳng ~30k token nên càng cần model nhanh).
-_FALLBACK_MODEL = "gemini-2.5-flash-lite"
+# Phải KHÁC model chính mới có nghĩa. Model chính đang là bản preview (pool đông, hay 503/504)
+# nên dự phòng chọn bản GA ổn định nhất, không chọn preview thứ hai.
+_FALLBACK_MODEL = "gemini-2.5-flash"
 
 # Tắt thinking: tư vấn bán hàng theo kịch bản không cần suy luận sâu, mà thinking tính tiền như
 # output + kéo dài thời gian sinh -> chậm, đắt, dễ dính deadline 504 lúc Gemini tải cao.

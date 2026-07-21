@@ -107,7 +107,11 @@ def render(results) -> str:
     for price, stone_name, r in results:
         ma, ten = r[0], (r[1] if len(r) > 1 else "")
         dm = r[3] if len(r) > 3 else ""
-        lines.append(f"{ma} | {ten} | {dm} | {fmt_money(price)} ({stone_name})")
+        # Giá 0 trong bảng = CHƯA CẬP NHẬT, không phải miễn phí. Phải ghi ra chữ: search() lọc
+        # theo tầm giá nên không bao giờ trả mã giá 0, nhưng rows_by_ids() (khách hỏi đích danh
+        # mã) thì trả -> bot đọc "0tr" thành "0 đồng" cho khách là mất mặt + mất đơn.
+        gia = f"{fmt_money(price)} ({stone_name})" if price > 0 else "CHƯA CÓ GIÁ - chuyên gia báo riêng"
+        lines.append(f"{ma} | {ten} | {dm} | {gia}")
     return "\n".join(lines)
 
 
@@ -119,7 +123,13 @@ def _selftest():
     assert fmt_money(235756000).endswith("tr")
     res = search(max_price=1e8)  # <=100tr
     assert all(p <= 1e8 for p, _, _ in res), "lọc max sai"
+    assert all(p > 0 for p, _, _ in res), "mã chưa có giá (0) lọt vào kết quả tầm giá"
     assert res == sorted(res, key=lambda x: x[0]), "chưa sort tăng dần"
+    # Mã chưa có giá: hỏi đích danh vẫn trả về, nhưng KHÔNG được hiện thành "0tr"
+    _zero = [r for r in load_rows()[2] if r and r[0].strip() and parse_money(r[12]) <= 0]
+    if _zero:
+        out = render(rows_by_ids([_zero[0][0].strip()]))
+        assert "CHƯA CÓ GIÁ" in out and "0tr" not in out, f"giá 0 lọt ra dạng số: {out}"
     print(f"selftest OK - {len(res)} sp <=100tr, rẻ nhất {fmt_money(res[0][0])}" if res else "selftest OK - rỗng")
 
 

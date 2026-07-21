@@ -37,11 +37,9 @@ async def _followup_loop():
     # mất luôn lưới an toàn. 30s đủ để lộ crash-loop mà vẫn nhanh hơn chu kỳ thường rất nhiều.
     await asyncio.sleep(_QUET_DAU_S)
     while True:
-        # 2 try TÁCH RIÊNG: chung 1 khối thì follow-up lỗi là nuốt luôn lưới an toàn tin rơi
-        # (khách nhắn mà không ai trả lời) - mất cái quan trọng hơn vì cái phụ hỏng.
+        # 2 try TÁCH RIÊNG: chung 1 khối thì cái này lỗi là nuốt luôn cái kia.
         for ten, chay, hau_qua in (
                 ("follow-up", messenger.run_followups, "khách im không được nhắc lại"),
-                ("tin rơi", messenger.run_missed_check, "khách nhắn mà KHÔNG ai trả lời"),
                 ("token FB", messenger.run_token_check, "không biết token chết cho tới khi mất khách")):
             try:
                 await chay()
@@ -51,6 +49,26 @@ async def _followup_loop():
                     alerts.alert, f"loop:{ten}:{type(e).__name__}",
                     f"⚠️ VÒNG QUÉT {ten.upper()} LỖI - {hau_qua}.\n{type(e).__name__}: {e}")
         await asyncio.sleep(max(1, config.FOLLOWUP_CHECK_MIN) * 60)
+
+
+async def _missed_loop():
+    """Nền: mỗi MISSED_CHECK_MIN phút quét khách nhắn mà chưa được trả lời -> bot trả lời bù.
+
+    Vòng RIÊNG, nhịp nhanh hơn follow-up: đây là đường phục hồi khi 1 lượt hỏng (Gemini 503/504,
+    hết quota, Firebase treo). Lượt hỏng thì khách không nhận được gì và lịch sử cũng chưa ghi,
+    nên vòng này là thứ duy nhất kéo khách đó lại. Chậm 15 phút là khách đã bỏ đi.
+    """
+    await asyncio.sleep(_QUET_DAU_S)
+    while True:
+        try:
+            await messenger.run_missed_check()
+        except Exception as e:
+            print(f"[loop] vòng quét tin rơi lỗi: {type(e).__name__}: {e}", file=sys.stderr)
+            await asyncio.to_thread(
+                alerts.alert, f"loop:tin rơi:{type(e).__name__}",
+                f"⚠️ VÒNG QUÉT TIN RƠI LỖI - khách nhắn mà KHÔNG ai trả lời, "
+                f"và lượt lỗi cũng KHÔNG được nhắn bù.\n{type(e).__name__}: {e}")
+        await asyncio.sleep(max(0.5, config.MISSED_CHECK_MIN) * 60)
 
 
 async def _tunnel_watch_loop():
@@ -106,6 +124,12 @@ async def _start_bg():
         _spawn(_followup_loop())
         print(f"[app] follow-up bật: nhắc sau {config.FOLLOWUP_AFTER_H}h, quét mỗi {config.FOLLOWUP_CHECK_MIN}p",
               file=sys.stderr)
+    # Vòng tin rơi chạy ĐỘC LẬP với follow-up: tắt nhắc-lại không được phép tắt luôn lưới
+    # an toàn + đường trả lời bù khi bot lỗi.
+    _spawn(_missed_loop())
+    print(f"[app] quét tin rơi: mỗi {config.MISSED_CHECK_MIN:g}p, tin chưa trả lời quá "
+          f"{config.MISSED_AFTER_MIN:g}p thì bot nhắn bù "
+          f"({'BẬT' if config.MISSED_AUTOREPLY else 'TẮT - chỉ báo admin'})", file=sys.stderr)
     if config.TUNNEL_WATCH_ENABLED and config.PUBLIC_URL:
         _spawn(_tunnel_watch_loop())
         print(f"[app] canh tunnel bật: ping {config.PUBLIC_URL} mỗi {config.TUNNEL_CHECK_MIN}p",

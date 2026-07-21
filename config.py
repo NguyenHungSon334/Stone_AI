@@ -69,9 +69,13 @@ FOLLOWUP_ENABLED = os.getenv("BOT_FOLLOWUP_ENABLED", "1").strip() not in ("0", "
 FOLLOWUP_AFTER_H = float(os.getenv("BOT_FOLLOWUP_AFTER_H", "4"))     # im bao lâu thì nhắc
 FOLLOWUP_CHECK_MIN = int(os.getenv("BOT_FOLLOWUP_CHECK_MIN", "15"))  # chu kỳ quét
 
-# Lưới an toàn tin RƠI: khách nhắn mà bot chưa trả lời quá X phút -> báo admin trả lời tay.
+# Lưới an toàn tin RƠI: khách nhắn mà bot chưa trả lời quá X phút -> bot trả lời bù.
+# Đây cũng là đường phục hồi khi Gemini lỗi: lượt đó bot im, vòng quét này nhắn bù.
 # Ngưỡng phải > thời gian gom tin (debounce 4s) + thời gian bot nghĩ, không thì báo giả.
-MISSED_AFTER_MIN = float(os.getenv("BOT_MISSED_AFTER_MIN", "10"))
+# 2 phút: đủ dài cho 1 lượt chậm nhất (retry 4 lần + đổi model dự phòng ~90s), đủ ngắn để
+# khách không chờ lâu. Khách đang được xử lý vẫn được _INFLIGHT/_BUFFERS chặn nên không trùng.
+MISSED_AFTER_MIN = float(os.getenv("BOT_MISSED_AFTER_MIN", "2"))
+MISSED_CHECK_MIN = float(os.getenv("BOT_MISSED_CHECK_MIN", "2"))     # chu kỳ quét tin rơi
 # Bot TỰ trả lời bù khách bị bỏ sót (đọc lại lịch sử nên khớp ngữ cảnh). Không áp dụng cho
 # khách đã handoff (chuyên gia đang cầm) và tin quá 24h (FB chặn gửi).
 MISSED_AUTOREPLY = os.getenv("BOT_MISSED_AUTOREPLY", "1").strip() not in ("0", "", "false")

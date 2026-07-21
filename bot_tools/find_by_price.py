@@ -100,18 +100,71 @@ def rows_by_ids(ids) -> list:
     return out
 
 
+def catalog_index() -> str:
+    """Index GỌN cho system prompt: mã | tên | danh mục, 1 dòng/SP (~5.5k token).
+
+    Trước đây nhồi NGUYÊN CSV (~26k token) vào prompt mỗi lượt -> prefill 33k, hàng đợi dài,
+    dính 504 kể cả với tin 'Xin chào'. Nhưng bỏ sạch thì bot không biết có mẫu nào mà gọi tool.
+    Index giữ đúng phần bot cần để BIẾT + CHỌN mã; giá/kích thước lấy qua suggest_products."""
+    _, _, data = load_rows()
+    lines = [f"{r[0].strip()} | {_cell(r, 1)} | {_cell(r, 3)}"
+             for r in data if r and r[0].strip()]
+    return "\n".join(lines)
+
+
+def _cell(r, i) -> str:
+    """Ô CSV đã gộp khoảng trắng. Vài ô (tên, ghi chú) có XUỐNG DÒNG bên trong -> index và
+    render đều là định dạng 1-dòng-1-SP, để nguyên là vỡ dòng, bot đọc lệch mã."""
+    if i >= len(r) or not r[i]:
+        return ""
+    return " ".join(r[i].split())
+
+
+def _spec(header, r) -> str:
+    """Kích thước + trọng lượng, bỏ ô trống. Bảng SP KHÔNG còn nằm trong prompt (chỉ còn
+    index mã|tên|danh mục) nên đây là đường DUY NHẤT bot biết thông số - thiếu là bot bịa."""
+    d, rg, c = _cell(r, 6), _cell(r, 7), _cell(r, 8)
+    parts = []
+    kt = " x ".join(x for x in (d, rg, c) if x)
+    if kt:
+        parts.append(f"KT(DxRxC) {kt}mm")
+    if _cell(r, 9):
+        parts.append(f"hộp thờ {_cell(r, 9)}mm")
+    if _cell(r, 11):
+        parts.append(f"{_cell(r, 11)} tấn")
+    return ", ".join(parts)
+
+
+def _prices(header, stone_cols, r) -> str:
+    """Giá TỪNG loại đá. Trước đây bot đọc thẳng từ CSV trong prompt; giờ phải lấy qua đây.
+    Ô <=0 = CHƯA CẬP NHẬT -> bỏ hẳn, không được in ra thành '0tr' (khách đọc thành miễn phí)."""
+    out = []
+    for i in stone_cols:
+        v = parse_money(r[i]) if i < len(r) else -1.0
+        if v > 0:
+            out.append(f"{header[i].strip()} {fmt_money(v)}")
+    return "; ".join(out)
+
+
 def render(results) -> str:
     if not results:
         return "Không có sản phẩm nào trong tầm giá này."
+    header, stone_cols, _ = load_rows()
     lines = [f"Tìm thấy {len(results)} sản phẩm (giá tăng dần):"]
     for price, stone_name, r in results:
-        ma, ten = r[0], (r[1] if len(r) > 1 else "")
-        dm = r[3] if len(r) > 3 else ""
+        ma, ten = r[0], _cell(r, 1)
+        dm = _cell(r, 3)
+        head = f"{ma} | {ten} | {dm}"
+        if _spec(header, r):
+            head += f" | {_spec(header, r)}"
+        if _cell(r, 16):
+            head += f" | ghi chú: {_cell(r, 16)}"
+        lines.append(head)
         # Giá 0 trong bảng = CHƯA CẬP NHẬT, không phải miễn phí. Phải ghi ra chữ: search() lọc
         # theo tầm giá nên không bao giờ trả mã giá 0, nhưng rows_by_ids() (khách hỏi đích danh
         # mã) thì trả -> bot đọc "0tr" thành "0 đồng" cho khách là mất mặt + mất đơn.
-        gia = f"{fmt_money(price)} ({stone_name})" if price > 0 else "CHƯA CÓ GIÁ - chuyên gia báo riêng"
-        lines.append(f"{ma} | {ten} | {dm} | {gia}")
+        gia = _prices(header, stone_cols, r)
+        lines.append(f"    giá: {gia}" if gia else "    giá: CHƯA CÓ GIÁ - chuyên gia báo riêng")
     return "\n".join(lines)
 
 
@@ -126,10 +179,27 @@ def _selftest():
     assert all(p > 0 for p, _, _ in res), "mã chưa có giá (0) lọt vào kết quả tầm giá"
     assert res == sorted(res, key=lambda x: x[0]), "chưa sort tăng dần"
     # Mã chưa có giá: hỏi đích danh vẫn trả về, nhưng KHÔNG được hiện thành "0tr"
-    _zero = [r for r in load_rows()[2] if r and r[0].strip() and parse_money(r[12]) <= 0]
+    _hdr, _cols, _data = load_rows()
+    _zero = [r for r in _data if r and r[0].strip() and parse_money(r[12]) <= 0]
     if _zero:
         out = render(rows_by_ids([_zero[0][0].strip()]))
-        assert "CHƯA CÓ GIÁ" in out and "0tr" not in out, f"giá 0 lọt ra dạng số: {out}"
+        assert "0tr" not in out, f"giá 0 lọt ra dạng số: {out}"
+        # Mã trống SẠCH mọi cột đá mới được nói 'chưa có giá'; trống 1 cột thì vẫn phải báo giá
+        # các loại đá còn lại, không được im.
+        if not any(parse_money(_zero[0][i]) > 0 for i in _cols if i < len(_zero[0])):
+            assert "CHƯA CÓ GIÁ" in out, f"mã không có giá nào mà không báo: {out}"
+
+    # Bỏ CSV khỏi prompt -> tool là đường DUY NHẤT lấy thông số. Thiếu = bot bịa với khách.
+    _spec_row = next((r for r in _data if r and r[0].strip() and _cell(r, 6) and _cell(r, 11)), None)
+    if _spec_row:
+        out = render(rows_by_ids([_spec_row[0].strip()]))
+        assert "KT(DxRxC)" in out, f"render mất kích thước: {out}"
+        assert "tấn" in out, f"render mất trọng lượng: {out}"
+        assert out.count("giá:") == 1 and "Đá" in out, f"render mất giá theo loại đá: {out}"
+
+    idx = catalog_index()
+    assert len(idx.splitlines()) == len([r for r in _data if r and r[0].strip()]), "index thiếu mã"
+    assert "179624000" not in idx, "index lọt giá (phải gọn, giá lấy qua tool)"
     print(f"selftest OK - {len(res)} sp <=100tr, rẻ nhất {fmt_money(res[0][0])}" if res else "selftest OK - rỗng")
 
 

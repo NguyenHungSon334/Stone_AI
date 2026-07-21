@@ -490,20 +490,23 @@ def _now_str() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-_RETRY_STATUS = {500, 503, 504}   # lỗi server tạm của Gemini (gồm 504 DEADLINE_EXCEEDED)
+# Lỗi TẠM của Gemini, thử lại là qua. 499 CANCELLED nằm dải 4xx nên SDK ném ClientError chứ
+# không phải ServerError: bắt theo LỚP là trượt, phải soi mã. Đó là lý do đối sánh bằng code.
+_RETRY_STATUS = {499, 500, 503, 504}
 
 
 def _generate(client, tries: int = 4, **kw):
-    """generate_content + retry lỗi server tạm (500/503/504). 4 lần, backoff 2s/4s/8s.
+    """generate_content + retry lỗi tạm (499/500/503/504). 4 lần, backoff 2s/4s/8s.
 
-    504 DEADLINE_EXCEEDED / 503 UNAVAILABLE hay xảy ra lúc Gemini quá tải -> thử lại thường qua
-    ngay, đỡ phải báo lỗi cho admin + bỏ lượt khách. Trần chờ 14s: lâu hơn thì giữ mãi slot
-    _SEM (4 slot) -> Gemini sập là khách khác xếp hàng theo."""
+    504 DEADLINE_EXCEEDED, 503 UNAVAILABLE, 499 CANCELLED đều là mặt khác nhau của cùng một
+    chuyện: Gemini quá tải, request bị cắt giữa chừng. Thử lại thường qua ngay, đỡ phải báo lỗi
+    cho admin + bỏ lượt khách. Trần chờ 14s: lâu hơn thì giữ mãi slot _SEM (4 slot) -> Gemini
+    sập là khách khác xếp hàng theo."""
     last = None
     for i in range(tries):
         try:
             return client.models.generate_content(**kw)
-        except genai_errors.ServerError as e:
+        except genai_errors.APIError as e:          # gồm cả ClientError (499) lẫn ServerError (5xx)
             if getattr(e, "code", None) not in _RETRY_STATUS:
                 raise
             last = e
@@ -585,7 +588,7 @@ def _gen_answer(client, model_id: str, contents: list, handle: str | None):
     đắt hơn, nhưng chỉ chạy lúc sự cố."""
     try:
         return _gen_answer_once(client, model_id, contents, handle)
-    except genai_errors.ServerError as e:
+    except genai_errors.APIError as e:              # 499 là ClientError, không phải ServerError
         if getattr(e, "code", None) not in _RETRY_STATUS:
             raise
         print(f"[gemini] {model_id} thua ({e.code}), đổi {_FALLBACK_MODEL}", file=sys.stderr)

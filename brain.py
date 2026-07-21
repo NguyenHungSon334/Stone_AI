@@ -42,6 +42,14 @@ _MAX_TOOL_LOOPS = 5      # trần số vòng gọi tool trong 1 câu trả lời
 _MODEL_ALIAS = {"flash": "gemini-3.5-flash", "pro": "gemini-2.5-pro",
                 "lite": "gemini-2.5-flash-lite"}
 
+# Model chính "high demand" (503) là quá tải của RIÊNG model đó -> đổi sang model khác thường
+# chạy được ngay. Chỉ dùng khi model chính đã thua hết lượt retry.
+_FALLBACK_MODEL = "gemini-2.5-flash"
+
+# Tắt thinking: tư vấn bán hàng theo kịch bản không cần suy luận sâu, mà thinking tính tiền như
+# output + kéo dài thời gian sinh -> chậm, đắt, dễ dính deadline 504 lúc Gemini tải cao.
+_NO_THINK = types.ThinkingConfig(thinking_budget=0)
+
 _MAX_NEW_IMAGES = 4      # trần ảnh gửi kèm 1 tin (mỗi sản phẩm nhắc lần đầu = 1 ảnh)
 
 _TOOLS = [types.Tool(function_declarations=[types.FunctionDeclaration(
@@ -428,7 +436,7 @@ def _summarize(client, model_id: str, prev: str, new_msgs: list) -> str:
         "Chỉ xuất bản tóm tắt, không thêm lời dẫn.\n\n"
         f"# Tóm tắt hiện có\n{prev or '(chưa có)'}\n\n# Tin mới cần gộp vào\n{_msgs_as_text(new_msgs)}")
     try:
-        cfg = types.GenerateContentConfig(max_output_tokens=1024)
+        cfg = types.GenerateContentConfig(max_output_tokens=1024, thinking_config=_NO_THINK)
         resp = _generate(client, model=model_id,
                          contents=[types.Content(role="user", parts=[types.Part.from_text(text=prompt)])],
                          config=cfg)
@@ -485,21 +493,23 @@ def _now_str() -> str:
 _RETRY_STATUS = {500, 503, 504}   # lỗi server tạm của Gemini (gồm 504 DEADLINE_EXCEEDED)
 
 
-def _generate(client, **kw):
-    """generate_content + retry lỗi server tạm (500/503/504). 3 lần, backoff 1.5s/3s.
+def _generate(client, tries: int = 4, **kw):
+    """generate_content + retry lỗi server tạm (500/503/504). 4 lần, backoff 2s/4s/8s.
 
-    504 DEADLINE_EXCEEDED hay xảy ra lúc Gemini quá tải -> thử lại thường qua ngay,
-    đỡ phải báo lỗi cho admin + bỏ lượt khách."""
+    504 DEADLINE_EXCEEDED / 503 UNAVAILABLE hay xảy ra lúc Gemini quá tải -> thử lại thường qua
+    ngay, đỡ phải báo lỗi cho admin + bỏ lượt khách. Trần chờ 14s: lâu hơn thì giữ mãi slot
+    _SEM (4 slot) -> Gemini sập là khách khác xếp hàng theo."""
     last = None
-    for i in range(3):
+    for i in range(tries):
         try:
             return client.models.generate_content(**kw)
         except genai_errors.ServerError as e:
             if getattr(e, "code", None) not in _RETRY_STATUS:
                 raise
             last = e
-            print(f"[gemini] {e.code} thử lại lần {i + 1}/3", file=sys.stderr)
-            time.sleep(1.5 * (i + 1))
+            print(f"[gemini] {e.code} thử lại lần {i + 1}/{tries}", file=sys.stderr)
+            if i < tries - 1:                      # lần cuối thua thì ném luôn, không chờ vô ích
+                time.sleep(2 * 2 ** i)
     raise last
 
 
@@ -561,23 +571,46 @@ def _is_cache_error(e) -> bool:
     return getattr(e, "code", None) in (400, 403, 404) and "cach" in msg
 
 
+def _inline_cfg() -> types.GenerateContentConfig:
+    """Config nhồi thẳng persona+bảng SP (không cache). 8192: trần đủ rộng cho câu dài."""
+    return types.GenerateContentConfig(system_instruction=_system_text(), tools=_TOOLS,
+                                       max_output_tokens=8192, thinking_config=_NO_THINK)
+
+
 def _gen_answer(client, model_id: str, contents: list, handle: str | None):
     """1 lần generate luồng trả lời. Trả (resp, handle_dùng_tiếp).
 
-    handle hỏng (cache bị xoá) -> huỷ handle, nhồi thẳng, trả None để vòng sau khỏi thử lại."""
-    # 8192: Gemini 3.x "thinking" tính chung output budget - thấp làm cụt câu trả lời.
+    Model chính quá tải kể cả sau retry -> đánh nốt 1 nhịp bằng _FALLBACK_MODEL (pool khác)
+    thay vì bỏ lượt khách. Cache gắn chặt với model chính nên nhịp này phải nhồi thẳng:
+    đắt hơn, nhưng chỉ chạy lúc sự cố."""
+    try:
+        return _gen_answer_once(client, model_id, contents, handle)
+    except genai_errors.ServerError as e:
+        if getattr(e, "code", None) not in _RETRY_STATUS:
+            raise
+        print(f"[gemini] {model_id} thua ({e.code}), đổi {_FALLBACK_MODEL}", file=sys.stderr)
+        alerts.alert(f"gemini:fallback:{getattr(e, 'code', '?')}",
+                     f"⚠️ {model_id} QUÁ TẢI ({e.code}) - bot tạm chạy {_FALLBACK_MODEL}, nhồi thẳng "
+                     f"persona mỗi tin nên tốn token hơn. Tự hết khi Gemini rảnh.")
+        # tries=2: fallback cũng chết thì thua thật, chờ thêm chỉ giữ slot _SEM vô ích.
+        resp = _generate(client, tries=2, model=_FALLBACK_MODEL, contents=contents,
+                         config=_inline_cfg())
+        return resp, handle          # handle giữ nguyên: vòng sau thử lại model chính + cache
+
+
+def _gen_answer_once(client, model_id: str, contents: list, handle: str | None):
+    """Gọi model chính. handle hỏng (cache bị xoá) -> huỷ handle, nhồi thẳng, trả None."""
     if handle:
         try:
-            cfg = types.GenerateContentConfig(cached_content=handle, max_output_tokens=8192)
+            cfg = types.GenerateContentConfig(cached_content=handle, max_output_tokens=8192,
+                                              thinking_config=_NO_THINK)
             return _generate(client, model=model_id, contents=contents, config=cfg), handle
         except genai_errors.ClientError as e:
             if not _is_cache_error(e):
                 raise
             print(f"[cache] handle hỏng, chuyển nhồi thẳng: {e}", file=sys.stderr)
             _invalidate_cache()
-    cfg = types.GenerateContentConfig(
-        system_instruction=_system_text(), tools=_TOOLS, max_output_tokens=8192)
-    return _generate(client, model=model_id, contents=contents, config=cfg), None
+    return _generate(client, model=model_id, contents=contents, config=_inline_cfg()), None
 
 
 def trim_resend(full: list, text: str, user_at: str) -> tuple[list, str]:
@@ -713,7 +746,7 @@ def _extract_lead_sync(psid: str) -> dict | None:
             contents=[types.Content(role="user", parts=[types.Part.from_text(text=prompt)])],
             config=types.GenerateContentConfig(
                 response_mime_type="application/json", response_json_schema=_LEAD_SCHEMA,
-                max_output_tokens=2048),
+                max_output_tokens=2048, thinking_config=_NO_THINK),
         )
         cand = (resp.candidates or [None])[0]
         raw = "".join(p.text for p in (cand.content.parts or []) if p.text) if cand and cand.content else ""

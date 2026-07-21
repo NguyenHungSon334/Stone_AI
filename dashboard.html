@@ -335,11 +335,20 @@ td .psid{color:var(--ink);font-weight:700}
         <h2 style="margin-bottom:24px">Tham số vận hành</h2>
         <div class="field">
           <label class="label">Model AI</label>
-          <select id="envModel">
+          <!-- Ô NHẬP + gợi ý, KHÔNG phải <select>. .env hay đặt mã model đầy đủ
+               (gemini-2.5-flash, gemini-3-flash-preview...); select chỉ có 3 alias nên gán
+               value không khớp option nào -> .value thành "" -> bấm Lưu là 400
+               "BOT_MODEL sai định dạng", chặn luôn cả việc lưu các ô khác. -->
+          <input id="envModel" list="modelList" spellcheck="false"
+                 placeholder="vd gemini-2.5-flash">
+          <datalist id="modelList">
             <option value="lite">Gemini Flash-Lite (nhanh nhất, rẻ nhất)</option>
             <option value="flash">Gemini 3.5 Flash (cân bằng)</option>
             <option value="pro">Gemini Pro (thông minh nhất, đắt)</option>
-          </select>
+            <option value="gemini-2.5-flash">Mã đầy đủ - đang ổn định nhất</option>
+            <option value="gemini-3-flash-preview">Mã đầy đủ - bản preview, hay 503</option>
+          </datalist>
+          <p class="hint">Nhập alias (lite/flash/pro) hoặc mã model đầy đủ.</p>
         </div>
         <div class="field">
           <label class="label">Admin PSID (nhận báo lỗi / handoff)</label>

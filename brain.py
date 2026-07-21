@@ -45,14 +45,18 @@ _MODEL_ALIAS = {"flash": "gemini-3.5-flash", "pro": "gemini-2.5-pro",
 
 # Model chính "high demand" (503) là quá tải của RIÊNG model đó -> đổi sang model khác thường
 # chạy được ngay. Chỉ dùng khi model chính đã thua hết lượt retry.
-# Phải KHÁC model chính mới có nghĩa. Model chính đang là bản GA ổn định; dự phòng lấy bản
-# lite (pool riêng, nhẹ nhất) - hợp vì nhịp dự phòng nhồi thẳng persona, cần model nhanh.
-# ĐỪNG đặt bản preview làm model chính: đo thực tế gemini-3-flash-preview dính 504/503 liên
-# tục ngay cả với tin "Xin chào", phải rơi xuống dự phòng.
+# Phải KHÁC model chính mới có nghĩa; lấy bản lite (pool riêng, nhẹ nhất) - hợp vì nhịp dự
+# phòng nhồi thẳng persona, cần model nhanh.
+# LƯU Ý bản preview làm model chính: gemini-3-flash-preview từng dính 504/503 liên tục kể cả
+# với tin "Xin chào" (commit 3a508ee phải quay về 2.5). Theo dõi cảnh báo "QUÁ TẢI" trên
+# dashboard; rơi dự phòng liên tục thì đổi BOT_MODEL về gemini-2.5-flash, KHÔNG cần deploy lại.
 _FALLBACK_MODEL = "gemini-2.5-flash-lite"
 
 # Tắt thinking: tư vấn bán hàng theo kịch bản không cần suy luận sâu, mà thinking tính tiền như
 # output + kéo dài thời gian sinh -> chậm, đắt, dễ dính deadline 504 lúc Gemini tải cao.
+# Gemini 3 thay thinking_budget bằng thinking_level, nhưng thinking_budget=0 vẫn được chấp nhận
+# và vẫn tắt thật (đo trên gemini-3-flash-preview: 377 -> 0 token nghĩ, 6.3s -> 2.8s). Giữ
+# nguyên 1 field để chạy chung được cả model 2.5 lẫn 3.x.
 _NO_THINK = types.ThinkingConfig(thinking_budget=0)
 
 _MAX_NEW_IMAGES = 4      # trần ảnh gửi kèm 1 tin (mỗi sản phẩm nhắc lần đầu = 1 ảnh)

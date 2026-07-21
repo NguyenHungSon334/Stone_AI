@@ -189,12 +189,13 @@ async def save_settings(request: Request):
     _check_token(request)
     body = await request.json()
 
+    # VALIDATE HẾT trước khi ghi bất cứ gì. Bản cũ ghi Personal.md xong mới soi env -> một ô env
+    # sai là persona đã lưu rồi mà env thì không, user thấy báo lỗi nên tưởng chưa lưu gì cả.
+    persona = None
     if isinstance(body.get("persona"), str):
         persona = body["persona"].strip()
         if not persona:
             raise HTTPException(400, "persona không được trống")
-        config.DOCS_DIR.mkdir(parents=True, exist_ok=True)
-        (config.DOCS_DIR / "Personal.md").write_text(persona + "\n", encoding="utf-8")
 
     env_in = body.get("env") or {}
     updates: dict[str, str] = {}
@@ -202,8 +203,12 @@ async def save_settings(request: Request):
         if key in env_in:
             val = str(env_in[key]).strip()
             if not re.match(pattern, val):
-                raise HTTPException(400, f"{key} sai định dạng")
+                raise HTTPException(400, f"{key} sai định dạng (nhận được: {val!r})")
             updates[key] = val
+
+    if persona is not None:
+        config.DOCS_DIR.mkdir(parents=True, exist_ok=True)
+        (config.DOCS_DIR / "Personal.md").write_text(persona + "\n", encoding="utf-8")
     if updates:
         _update_env_file(updates)
         config.reload_env()
@@ -230,8 +235,11 @@ _CONFIG_FIELDS = [
 
     _F("GEMINI_API_KEY", "Gemini API Key", "AI", bi_mat=True, restart=True,
        goi_y="Lấy ở aistudio.google.com/apikey."),
-    _F("BOT_MODEL", "Model", "AI", kieu="chon",
-       chon=[["lite", "Flash-Lite (rẻ nhất)"], ["flash", "Flash (cân bằng)"], ["pro", "Pro (đắt nhất)"]]),
+    # Ô NHẬP, KHÔNG phải kieu="chon". .env hay đặt mã model đầy đủ (gemini-2.5-flash,
+    # gemini-3-flash-preview...) mà danh sách chọn chỉ có 3 alias -> giá trị thật không khớp
+    # option nào, ô rỗng, bấm Lưu là 400 "sai định dạng" và chặn luôn cả các ô khác.
+    _F("BOT_MODEL", "Model", "AI", mau=r"^[a-z0-9.-]+$", restart=False,
+       goi_y="Alias lite/flash/pro, hoặc mã đầy đủ vd gemini-2.5-flash, gemini-3-flash-preview."),
     _F("GEMINI_PRICE_IN_USD", "Giá token VÀO (USD/1 triệu)", "AI", kieu="so",
        goi_y="Chỉ để tính tiền trên dashboard. Google đổi giá thì sửa ở đây."),
     _F("GEMINI_PRICE_OUT_USD", "Giá token RA (USD/1 triệu)", "AI", kieu="so"),

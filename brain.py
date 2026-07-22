@@ -71,7 +71,8 @@ _TOOLS = [types.Tool(function_declarations=[types.FunctionDeclaration(
                  "'category', hoặc 'product_ids' cho mẫu đã biết mã. Kết quả gồm mã, tên, danh "
                  "mục, kích thước, trọng lượng và giá THEO TỪNG LOẠI ĐÁ, sắp xếp giá tăng dần. "
                  "Trả TỐI ĐA 3 mẫu tiêu biểu - đừng liệt kê cả bảng, khách cần thêm thì gọi lại "
-                 "với bộ lọc khác. "
+                 "với 'exclude_ids' là các mã đã gửi (cùng bộ lọc mà thiếu exclude_ids sẽ trả "
+                 "lại đúng mấy mẫu cũ). "
                  "Ảnh sản phẩm hệ thống TỰ ĐỘNG gửi kèm khi tin nhắn nhắc tới mã lần đầu, "
                  "không cần làm gì thêm."),
     parameters_json_schema={
@@ -87,6 +88,8 @@ _TOOLS = [types.Tool(function_declarations=[types.FunctionDeclaration(
             "limit": {"type": "integer", "description": "Số kết quả tối đa (mặc định 3, trần 3)"},
             "product_ids": {"type": "array", "items": {"type": "string"},
                             "description": "Danh sách mã cụ thể (vd ['M01','LD03']) - dùng thay cho các bộ lọc trên"},
+            "exclude_ids": {"type": "array", "items": {"type": "string"},
+                            "description": "Các mã ĐÃ giới thiệu ở lượt trước - BẮT BUỘC truyền khi khách đòi 'mẫu khác', nếu không tool trả lại đúng mấy mẫu cũ"},
         },
     },
 )])]
@@ -247,7 +250,8 @@ def _run_tool(name: str, inp: dict) -> str:
         results = search(mx, mn if mn > 0 else 0.0, inp.get("stone"), inp.get("category"),
                          # Chốt trần 3 mẫu: khách hỏi "cho xem long đình" mà dội cả bảng thì
                          # tin nhắn dài, khách không chọn nổi. Muốn nhiều hơn thì gọi tool lại.
-                         min(int(inp.get("limit") or 3), 3), kind, q)
+                         min(int(inp.get("limit") or 3), 3), kind, q,
+                         inp.get("exclude_ids"))
     if not results:
         # Nói RÕ thiếu ở đâu + gợi ý bộ lọc hợp lệ: bot trượt 1 lần thì thử lại được, thay vì
         # bỏ cuộc trả lời chay không mẫu nào (lỗi cũ hay gặp nhất).

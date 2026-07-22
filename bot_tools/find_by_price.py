@@ -80,9 +80,14 @@ def kinds_available() -> list[str]:
     return sorted(seen)
 
 
-def search(max_price, min_price=0.0, stone=None, category=None, limit=15, kind=None, q=None):
-    """Lọc bảng hàng. max_price=None -> không giới hạn trần (dùng khi chỉ lọc kind/q)."""
+def search(max_price, min_price=0.0, stone=None, category=None, limit=15, kind=None, q=None,
+           exclude_ids=None):
+    """Lọc bảng hàng. max_price=None -> không giới hạn trần (dùng khi chỉ lọc kind/q).
+
+    exclude_ids: bỏ các mã ĐÃ giới thiệu. Kết quả sort giá tăng dần rồi cắt [:limit] nên cùng bộ
+    lọc luôn ra đúng ngần ấy mã; khách đòi 'mẫu khác' mà không loại mã cũ là bot đưa lại y hệt."""
     header, stone_cols, data = load_rows()
+    skip = {str(i).strip().upper() for i in (exclude_ids or [])}
     if max_price is None:
         max_price = float("inf")
     i_dm, i_tl, i_ten = _col(header, "Danh mục"), _col(header, "Thể Loại"), _col(header, "Tên sản phẩm")
@@ -99,6 +104,8 @@ def search(max_price, min_price=0.0, stone=None, category=None, limit=15, kind=N
     out = []
     for r in data:
         if not r or not r[0].strip():
+            continue
+        if skip and r[0].strip().upper() in skip:
             continue
         if category and category.strip().lower() not in _cell(r, i_dm).lower():
             continue
@@ -272,6 +279,11 @@ def _selftest():
         assert got, f"kind '{k}' không ra mẫu nào"
         assert all(_cell(r, i_tl) == k for _, _, r in got), f"kind '{k}' lọt mẫu loại khác"
     assert search(None, kind="long dinh") == search(None, kind="Long đình"), "kind phải bỏ dấu được"
+
+    # Khách đòi "mẫu khác": loại mã đã gửi thì phải ra mã MỚI, không lặp lại 3 mẫu cũ.
+    _l1 = [r[0].strip() for _, _, r in search(None, kind="Long đình", limit=3)]
+    _l2 = [r[0].strip() for _, _, r in search(None, kind="Long đình", limit=3, exclude_ids=_l1)]
+    assert _l1 and _l2 and not set(_l1) & set(_l2), f"exclude_ids không loại được mã cũ: {_l1} {_l2}"
 
     # Tìm theo tên: "mộ tròn" phải ra mộ tròn, KHÔNG ra mộ 2 cấp (bug cũ của rows_by_kind).
     tron = search(None, q="mộ tròn", limit=50)

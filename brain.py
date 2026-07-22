@@ -219,11 +219,13 @@ def _image_markers(history: list, reply: str, user_text: str) -> str:
             markers.append(f"<<IMG:{toks[0]}>>")
         else:
             thieu.append(code)
-    # Bot hứa gửi ảnh mà Base không có ảnh mã đó -> khách chờ hụt, im lặng. Báo admin để bổ sung.
-    if _wants_image(reply) and not markers and thieu:
+    # Base thiếu ảnh mã nào thì bot lặng lẽ bỏ qua -> khách xem mẫu chay, admin không hề biết.
+    # Báo MỌI lần thiếu (không chỉ lúc bot hứa ảnh): ~50% bảng hàng chưa có ảnh, cần biết mã nào
+    # để bổ sung. alerts.alert đã dedup theo key nên không spam.
+    if thieu:
         alerts.alert("lark:img:thieu",
-                     f"⚠️ THIẾU ẢNH TRONG LARK BASE - bot hứa gửi ảnh nhưng không có: {', '.join(thieu)}\n"
-                     "➡️ Thêm ảnh vào cột Ảnh của các mã này.")
+                     f"⚠️ THIẾU ẢNH TRONG LARK BASE - bot giới thiệu mẫu nhưng không có ảnh: "
+                     f"{', '.join(thieu)}\n➡️ Thêm ảnh vào cột Ảnh của các mã này.")
     return " ".join(markers)
 
 

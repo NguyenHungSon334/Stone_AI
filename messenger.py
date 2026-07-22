@@ -344,12 +344,12 @@ _IMAGE_REPLY = ("Dạ mẫu này bên em có khá nhiều biến thể về kíc
                 "Để tư vấn chính xác nhất cho Bác, Bác cho em xin số điện thoại, "
                 "chuyên gia bên em sẽ liên hệ tư vấn cụ thể cho Bác ngay ạ!")
 # Like/sticker lần đầu: chào hỏi mời tư vấn như bình thường (KHÔNG xin SĐT dồn).
-_STICKER_REPLY = ("Dạ em chào Bác ạ. Bác đang quan tâm mẫu nào để em tư vấn giúp Bác ạ? "
-                  "(Mộ đá, Lăng thờ, Cổng hay Lan can đá...)")
+_STICKER_REPLY = ("Dạ em chào Bác ạ. Bác đang quan tâm hạng mục nào để em tư vấn giúp Bác ạ? "
+                  "(Nhà thờ họ, Khu lăng mộ hay sản phẩm đá mỹ nghệ...)")
 # Khách vừa bấm quảng cáo/link mở chat (chưa gõ gì): chào chủ động mời tư vấn.
 _REFERRAL_REPLY = ("Dạ em chào Bác ạ. Cảm ơn Bác đã quan tâm bên em. "
-                   "Bác đang tìm mẫu nào để em tư vấn giúp Bác ạ? "
-                   "(Mộ đá, Lăng thờ, Cổng hay Lan can đá...)")
+                   "Bác đang tìm hạng mục nào để em tư vấn giúp Bác ạ? "
+                   "(Nhà thờ họ, Khu lăng mộ hay sản phẩm đá mỹ nghệ...)")
 
 # Đếm like/sticker liên tiếp mỗi khách -> lần 2 thì ngừng trả lời + báo admin. Reset khi có tin thật.
 _STICKER_COUNT: dict[str, int] = {}

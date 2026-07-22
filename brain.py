@@ -70,6 +70,8 @@ _TOOLS = [types.Tool(function_declarations=[types.FunctionDeclaration(
                  "(thể loại), 'q' (từ khoá tên, vd 'mộ tròn'), 'max'/'min' (tầm giá), 'stone', "
                  "'category', hoặc 'product_ids' cho mẫu đã biết mã. Kết quả gồm mã, tên, danh "
                  "mục, kích thước, trọng lượng và giá THEO TỪNG LOẠI ĐÁ, sắp xếp giá tăng dần. "
+                 "Trả TỐI ĐA 3 mẫu tiêu biểu - đừng liệt kê cả bảng, khách cần thêm thì gọi lại "
+                 "với bộ lọc khác. "
                  "Ảnh sản phẩm hệ thống TỰ ĐỘNG gửi kèm khi tin nhắn nhắc tới mã lần đầu, "
                  "không cần làm gì thêm."),
     parameters_json_schema={
@@ -82,7 +84,7 @@ _TOOLS = [types.Tool(function_declarations=[types.FunctionDeclaration(
             "min": {"type": "string", "description": "Giá tối thiểu, mặc định 0"},
             "stone": {"type": "string", "description": "Loại đá: xanh đen, xanh rêu, xám BĐ, GRN, xanh Bình Định, trắng Yên Bái"},
             "category": {"type": "string", "description": "Danh mục, vd 'Trường Tồn'"},
-            "limit": {"type": "integer", "description": "Số kết quả tối đa (mặc định 15)"},
+            "limit": {"type": "integer", "description": "Số kết quả tối đa (mặc định 3, trần 3)"},
             "product_ids": {"type": "array", "items": {"type": "string"},
                             "description": "Danh sách mã cụ thể (vd ['M01','LD03']) - dùng thay cho các bộ lọc trên"},
         },
@@ -241,7 +243,9 @@ def _run_tool(name: str, inp: dict) -> str:
             return "Cần ít nhất một điều kiện: 'kind', 'q', 'max' hoặc 'product_ids'."
         mn = parse_money(inp.get("min", "0"))
         results = search(mx, mn if mn > 0 else 0.0, inp.get("stone"), inp.get("category"),
-                         int(inp.get("limit") or 15), kind, q)
+                         # Chốt trần 3 mẫu: khách hỏi "cho xem long đình" mà dội cả bảng thì
+                         # tin nhắn dài, khách không chọn nổi. Muốn nhiều hơn thì gọi tool lại.
+                         min(int(inp.get("limit") or 3), 3), kind, q)
     if not results:
         # Nói RÕ thiếu ở đâu + gợi ý bộ lọc hợp lệ: bot trượt 1 lần thì thử lại được, thay vì
         # bỏ cuộc trả lời chay không mẫu nào (lỗi cũ hay gặp nhất).

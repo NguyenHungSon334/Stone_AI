@@ -359,10 +359,18 @@ _IMAGE_REPLY = ("Dạ mẫu này bên em có khá nhiều biến thể về kíc
 # Like/sticker lần đầu: chào hỏi mời tư vấn như bình thường (KHÔNG xin SĐT dồn).
 _STICKER_REPLY = ("Dạ em chào Bác ạ. Bác đang quan tâm hạng mục nào để em tư vấn giúp Bác ạ? "
                   "(Nhà thờ họ, Khu lăng mộ hay sản phẩm đá mỹ nghệ...)")
-# Khách vừa bấm quảng cáo/link mở chat (chưa gõ gì): chào chủ động mời tư vấn.
-_REFERRAL_REPLY = ("Dạ em chào Bác ạ. Cảm ơn Bác đã quan tâm bên em. "
-                   "Bác đang tìm hạng mục nào để em tư vấn giúp Bác ạ? "
-                   "(Nhà thờ họ, Khu lăng mộ hay sản phẩm đá mỹ nghệ...)")
+# Khách MỚI bấm quảng cáo/link mở chat (chưa gõ gì): chào chủ động mời tư vấn.
+_REFERRAL_REPLY = ("Dạ em chào Bác ạ. Em là Thảo Vân bên Đá mỹ nghệ Hồn Đá. "
+                   "Bác đang dự kiến làm nhà thờ họ, khu lăng mộ hay một sản phẩm "
+                   "đá mỹ nghệ riêng ạ?")
+# Khách CŨ bấm lại quảng cáo: chào trơ như người lạ là lộ ra bot quên sạch hội thoại trước
+# -> đẩy vào AI kèm lịch sử để mở lời tiếp nối. Khách KHÔNG thấy prompt này.
+_REFERRAL_PROMPT = (
+    "(Khách vừa bấm lại quảng cáo mở chat nhưng CHƯA gõ gì. Mở lời TIẾP NỐI hội thoại trước, "
+    "KHÔNG chào như người lạ, KHÔNG hỏi lại thứ khách đã nói: nhắc đúng 1 điều khách đã trao "
+    "đổi rồi hỏi tiếp đúng 1 ý còn dở. Chưa có SĐT thì đây là lúc xin lại.)")
+# Bot vừa nhắn xong mà khách bấm ad thêm lần nữa -> im, khỏi nhắn chồng lên tin chưa ai đọc.
+_REFERRAL_IM_H = 0.5
 
 # Đếm like/sticker liên tiếp mỗi khách -> lần 2 thì ngừng trả lời + báo admin. Reset khi có tin thật.
 _STICKER_COUNT: dict[str, int] = {}
@@ -968,11 +976,20 @@ async def _process_inner(psid: str, text: str, user_at: str | None = None) -> No
             return
         text = _IMG_ONLY_PROMPT                         # ảnh không kèm chữ -> Gemini tự nhìn ảnh tư vấn
     if text == _REFERRAL_EVENT:
-        # Khách bấm quảng cáo/link mở chat, chưa gõ gì: chào chủ động 1 lần, không gọi AI.
+        # Khách bấm quảng cáo/link mở chat, chưa gõ gì -> bot mở lời trước.
         _STICKER_COUNT.pop(psid, None)
         stats.log_event("referral", psid)
-        await send_text(psid, _REFERRAL_REPLY)
-        return
+        hist = await brain.load_history_async(psid)
+        if not hist:                                   # khách mới: câu chào cố định, khỏi gọi AI
+            await send_text(psid, _REFERRAL_REPLY)
+            return
+        im_h = returning.gio_im_lang(hist)
+        if 0 <= im_h < _REFERRAL_IM_H:
+            # Bấm ad mấy lần liên tiếp (Doàn Luyến bấm 4 lần/2 ngày) -> đừng nhắn chồng.
+            print(f"[referral] {psid}: bot vừa nhắn {im_h:.2f}h trước, không mở lời lại",
+                  file=sys.stderr)
+            return
+        text = _REFERRAL_PROMPT                        # khách cũ: AI tự mở lời theo ngữ cảnh
     if text == _STICKER_EVENT:
         # Like/sticker/icon: lần đầu chào hỏi mời tư vấn; lần 2 liên tiếp -> im + báo admin.
         n = _STICKER_COUNT.get(psid, 0) + 1

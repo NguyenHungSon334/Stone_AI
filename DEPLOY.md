@@ -19,9 +19,14 @@ State (lịch sử khách, stats, CRM meta, persona, .env) nằm trên VPS ở `
 ## 2. DuckDNS (domain miễn phí)
 
 1. https://www.duckdns.org -> đăng nhập (Google/GitHub).
-2. Tạo subdomain, vd `hondastone` -> `hondastone.duckdns.org`.
+2. Tạo subdomain, vd `hondabotchat` -> `hondabotchat.duckdns.org`.
 3. Ô "current ip" điền **External IP của VPS** -> Update.
 4. (Nếu IP VPS đổi: chạy lại update, hoặc đặt IP tĩnh trong GCP.)
+
+> Hiện tại: domain `hondabotchat.duckdns.org` -> `35.232.204.224` (IP tĩnh đã reserve,
+> tên `staticip-honda`). DuckDNS XOÁ subdomain không được update trong ~30 ngày - đã mất
+> 1 lần khiến webhook FB chết. Nên có cron ping định kỳ trên VPS:
+> `*/30 * * * * curl -fsS "https://www.duckdns.org/update?domains=hondabotchat&token=<TOKEN>&ip=" >/dev/null`
 
 ## 3. Cài Docker trên VPS
 
@@ -43,7 +48,7 @@ mkdir -p ~/chatbot-mess/data && cd ~/chatbot-mess
 Copy 3 file từ repo lên `~/chatbot-mess/` (dùng scp hoặc dán tay):
 - `docker-compose.yml`
 - `Caddyfile`
-- `.env`  (copy từ `.env.example`, ĐIỀN đủ token thật + `DOMAIN=hondastone.duckdns.org`)
+- `.env`  (copy từ `.env.example`, ĐIỀN đủ token thật + `DOMAIN=hondabotchat.duckdns.org`)
 
 ## 5. Artifact Registry + auth (máy local)
 
@@ -62,7 +67,7 @@ Trong thư mục repo, export biến rồi chạy `deploy.sh`:
 export GCP_PROJECT=PROJECT_ID
 export GCP_REGION=us-central1
 export VPS_USER=<user-ssh>          # tên user SSH trên VPS
-export VPS_HOST=hondastone.duckdns.org   # hoặc External IP
+export VPS_HOST=hondabotchat.duckdns.org   # hoặc External IP
 ./deploy.sh
 ```
 
@@ -74,18 +79,18 @@ Lần đầu chưa có SSH key tới VPS thì thêm public key vào VPS (`~/.ssh
 
 Meta app -> Messenger -> Webhooks -> sửa Callback URL:
 ```
-https://hondastone.duckdns.org/webhook/messenger
+https://hondabotchat.duckdns.org/webhook/messenger
 ```
 Verify token giữ nguyên. Verify + Save.
 
-Trong `.env` trên VPS đổi `PUBLIC_URL=https://hondastone.duckdns.org` (để gửi ảnh), rồi bấm Restart trên dashboard hoặc `docker compose restart bot`.
+Trong `.env` trên VPS đổi `PUBLIC_URL=https://hondabotchat.duckdns.org` (để gửi ảnh), rồi bấm Restart trên dashboard hoặc `docker compose restart bot`.
 
 ## 8. Kiểm tra
 
 ```bash
-curl https://hondastone.duckdns.org/healthz     # {"ok":true,...}
+curl https://hondabotchat.duckdns.org/healthz     # {"ok":true,...}
 ```
-Dashboard: `https://hondastone.duckdns.org/admin?token=<BOT_DASH_TOKEN>`
+Dashboard: `https://hondabotchat.duckdns.org/admin?token=<BOT_DASH_TOKEN>`
 
 ---
 

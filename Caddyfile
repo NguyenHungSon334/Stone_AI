@@ -1,5 +1,63 @@
 # Caddy tự xin + gia hạn SSL Let's Encrypt cho DOMAIN, proxy về bot:7900.
 # DOMAIN lấy từ biến môi trường (docker-compose truyền vào).
 {$DOMAIN} {
-	reverse_proxy bot:7900
+	# Trang Chính sách bảo mật - Meta BẮT BUỘC có URL này mới cho App lên Live.
+	# Phục vụ thẳng từ Caddy: không đụng code Python, không rebuild image.
+	handle /privacy {
+		header Content-Type "text/html; charset=utf-8"
+		respond `<!doctype html>
+<html lang="vi">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Chính sách bảo mật</title>
+<style>
+body{max-width:760px;margin:40px auto;padding:0 20px;font:16px/1.7 system-ui,sans-serif;color:#222}
+h1{font-size:28px} h2{font-size:19px;margin-top:32px} code{background:#f4f4f4;padding:2px 5px;border-radius:3px}
+</style>
+<h1>Chính sách bảo mật</h1>
+<p><em>Cập nhật: 27/07/2026</em></p>
+
+<p>Trang này mô tả cách <strong>__TEN_CONG_TY__</strong> ("chúng tôi") thu thập và sử dụng
+dữ liệu khi bạn nhắn tin hoặc bình luận với Trang Facebook của chúng tôi qua trợ lý tự động.</p>
+
+<h2>1. Dữ liệu chúng tôi thu thập</h2>
+<ul>
+<li><strong>Mã người dùng Trang (PSID)</strong> - mã ẩn danh do Facebook cấp, dùng để nhận ra cuộc trò chuyện của bạn.</li>
+<li><strong>Nội dung tin nhắn và bình luận</strong> bạn gửi cho Trang.</li>
+<li><strong>Ảnh</strong> bạn chủ động gửi trong cuộc trò chuyện.</li>
+<li><strong>Thông tin liên hệ</strong> (tên, số điện thoại) chỉ khi bạn tự cung cấp để được tư vấn.</li>
+</ul>
+<p>Chúng tôi <strong>không</strong> thu thập mật khẩu, dữ liệu thanh toán, danh bạ, vị trí,
+hay bất kỳ thông tin nào ngoài cuộc trò chuyện bạn chủ động gửi.</p>
+
+<h2>2. Mục đích sử dụng</h2>
+<p>Trả lời câu hỏi của bạn, tư vấn sản phẩm, và chuyển cho nhân viên khi cần hỗ trợ sâu hơn.
+Chúng tôi <strong>không bán</strong> dữ liệu của bạn cho bên thứ ba.</p>
+
+<h2>3. Bên thứ ba xử lý dữ liệu</h2>
+<ul>
+<li><strong>Meta Platforms</strong> - nền tảng Messenger, nơi cuộc trò chuyện diễn ra.</li>
+<li><strong>Google (Gemini API)</strong> - sinh câu trả lời tự động từ nội dung tin nhắn.</li>
+<li><strong>Google Firebase</strong> - lưu trữ lịch sử trò chuyện.</li>
+<li><strong>Lark (Feishu)</strong> - lưu thông tin liên hệ khi bạn yêu cầu được tư vấn.</li>
+</ul>
+
+<h2>4. Lưu trữ và bảo mật</h2>
+<p>Dữ liệu lưu trên máy chủ riêng có mã hoá HTTPS, chỉ nhân sự được uỷ quyền truy cập được.
+Lịch sử trò chuyện được giữ trong thời gian cần thiết để hỗ trợ bạn, sau đó xoá định kỳ.</p>
+
+<h2>5. Quyền của bạn</h2>
+<p>Bạn có quyền yêu cầu xem, sửa hoặc <strong>xoá toàn bộ</strong> dữ liệu của mình. Gửi yêu cầu tới
+<code>__EMAIL_LIEN_HE__</code>, chúng tôi xử lý trong vòng 30 ngày.</p>
+<p>Bạn cũng có thể xoá cuộc trò chuyện trực tiếp trong Messenger, hoặc gỡ quyền của Trang
+tại <a href="https://www.facebook.com/settings?tab=business_tools">Cài đặt Facebook &gt; Công cụ kinh doanh</a>.</p>
+
+<h2>6. Liên hệ</h2>
+<p>__TEN_CONG_TY__<br>Email: <code>__EMAIL_LIEN_HE__</code></p>
+</html>` 200
+	}
+
+	handle {
+		reverse_proxy bot:7900
+	}
 }

@@ -31,7 +31,7 @@ services:
       - "80:80"
       - "443:443"
     environment:
-      - DOMAIN=${DOMAIN:?đặt DOMAIN trong .env deploy, vd hondastone.duckdns.org}
+      - DOMAIN=${DOMAIN:?đặt DOMAIN trong .env deploy, vd hondabotchat.duckdns.org}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data          # cert Let's Encrypt (giữ qua restart, tránh xin lại bị rate-limit)

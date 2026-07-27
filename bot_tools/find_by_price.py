@@ -57,6 +57,20 @@ def load_rows():
     return header, stone_cols, rows[1:]
 
 
+def _stone_cols(header, stone_cols, stone: str | None):
+    if not stone:
+        return stone_cols
+    s = fold(stone)
+    aliases = {
+        "granite": "grn",
+        "granit": "grn",
+        "g20": "grn",
+        "an do": "grn",
+    }
+    s = aliases.get(s, s)
+    return [i for i in stone_cols if s in fold(header[i])]
+
+
 def _col(header, name: str) -> int:
     """Index cột theo TÊN header (bỏ dấu, khớp lỏng). -1 nếu CSV không có cột đó.
 
@@ -91,12 +105,9 @@ def search(max_price, min_price=0.0, stone=None, category=None, limit=15, kind=N
     if max_price is None:
         max_price = float("inf")
     i_dm, i_tl, i_ten = _col(header, "Danh mục"), _col(header, "Thể Loại"), _col(header, "Tên sản phẩm")
-    cols = stone_cols
-    if stone:
-        s = stone.strip().lower()
-        cols = [i for i in stone_cols if s in header[i].strip().lower()]
-        if not cols:
-            return []  # loại đá không khớp cột nào
+    cols = _stone_cols(header, stone_cols, stone)
+    if stone and not cols:
+        return []  # loai da khong khop cot nao
     kind_f = fold(kind) if kind else ""
     # Khách/AI gõ "mộ tròn" -> mọi từ phải có mặt trong tên. Bỏ dấu cả hai phía: bảng hàng ghi
     # có dấu, khách Messenger gõ không dấu rất nhiều.
@@ -124,25 +135,28 @@ def search(max_price, min_price=0.0, stone=None, category=None, limit=15, kind=N
             if min_price <= v <= max_price and (best is None or v < best[0]):
                 best = (v, header[i].strip())
         if best:
-            out.append((best[0], best[1], r))
+            out.append((best[0], best[1], r, bool(stone)) if stone else (best[0], best[1], r))
     out.sort(key=lambda x: x[0])
     return out[:limit]
 
 
-def rows_by_ids(ids) -> list:
+def rows_by_ids(ids, stone=None) -> list:
     """Lấy sản phẩm theo danh sách mã (khớp chính xác). Trả cùng shape với search(): (giá_rẻ_nhất, tên_đá, row)."""
     header, stone_cols, data = load_rows()
+    cols = _stone_cols(header, stone_cols, stone)
+    if stone and not cols:
+        return []
     want = {str(i).strip().upper() for i in ids}
     out = []
     for r in data:
         if not r or r[0].strip().upper() not in want:
             continue
         best = None
-        for i in stone_cols:
+        for i in cols:
             v = parse_money(r[i]) if i < len(r) else -1.0
             if v > 0 and (best is None or v < best[0]):
                 best = (v, header[i].strip())
-        out.append((best[0] if best else 0.0, best[1] if best else "", r))
+        out.append((best[0] if best else 0.0, best[1] if best else "", r, bool(stone)) if stone else (best[0] if best else 0.0, best[1] if best else "", r))
     return out
 
 
@@ -199,11 +213,12 @@ def _spec(header, r) -> str:
     return ", ".join(parts)
 
 
-def _prices(header, stone_cols, r) -> str:
+def _prices(header, stone_cols, r, only_stone: str | None = None) -> str:
     """Giá TỪNG loại đá. Trước đây bot đọc thẳng từ CSV trong prompt; giờ phải lấy qua đây.
     Ô <=0 = CHƯA CẬP NHẬT -> bỏ hẳn, không được in ra thành '0tr' (khách đọc thành miễn phí)."""
     out = []
-    for i in stone_cols:
+    cols = [i for i in stone_cols if header[i].strip() == only_stone] if only_stone else stone_cols
+    for i in cols:
         v = parse_money(r[i]) if i < len(r) else -1.0
         if v > 0:
             out.append(f"{header[i].strip()} {fmt_money(v)}")
@@ -217,7 +232,9 @@ def render(results) -> str:
     i_ten, i_dm, i_bc, i_gc = (_col(header, n) for n in
                                ("Tên sản phẩm", "Danh mục", "Bán chạy", "Ghi chú"))
     lines = [f"Tìm thấy {len(results)} sản phẩm (giá tăng dần):"]
-    for price, stone_name, r in results:
+    for item in results:
+        price, stone_name, r = item[:3]
+        only_stone = stone_name if len(item) > 3 and item[3] else None
         head = f"{r[0]} | {_cell(r, i_ten)} | {_cell(r, i_dm)}"
         if _cell(r, i_bc):                   # cột 'Bán chạy' - persona ưu tiên giới thiệu trước
             head += " | BÁN CHẠY"
@@ -229,7 +246,7 @@ def render(results) -> str:
         # Giá 0 trong bảng = CHƯA CẬP NHẬT, không phải miễn phí. Phải ghi ra chữ: search() lọc
         # theo tầm giá nên không bao giờ trả mã giá 0, nhưng rows_by_ids() (khách hỏi đích danh
         # mã) thì trả -> bot đọc "0tr" thành "0 đồng" cho khách là mất mặt + mất đơn.
-        gia = _prices(header, stone_cols, r)
+        gia = _prices(header, stone_cols, r, only_stone)
         lines.append(f"    giá: {gia}" if gia else "    giá: CHƯA CÓ GIÁ - chuyên gia báo riêng")
     return "\n".join(lines)
 
@@ -293,6 +310,13 @@ def _selftest():
     # Thể loại nằm ngoài tên sản phẩm (TP01 tên 'Trấn phong', Thể Loại 'Cuốn thư') vẫn tìm ra.
     assert search(None, q="cuốn thư"), "q phải dò cả cột Thể Loại"
     # Lọc chồng: thể loại + trần giá
+    # alias granite/G20 maps to GRN, including product-id lookups from image matches.
+    grn = search(None, stone="granite", limit=1)
+    assert grn == search(None, stone="g20", limit=1), "granite/G20 ph?i c?ng map v? GRN"
+    assert grn and "GRN" in render(grn), "loc granite phai in gia GRN"
+    m01_grn = render(rows_by_ids(["M01"], stone="granite"))
+    assert "GRN" in m01_grn and "xanh" not in m01_grn.lower(), "tra ma + granite chi in gia GRN"
+
     ld100 = search(1e8, kind="Long đình")
     assert ld100 and all(p <= 1e8 and _cell(r, i_tl) == "Long đình" for p, _, r in ld100)
 

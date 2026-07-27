@@ -365,10 +365,11 @@ _MAX_CUSTOMER_IMAGES = 4
 _IMG_ONLY_PROMPT = (
     "(Khách vừa gửi ảnh, chưa nhắn gì thêm. Hãy NHÌN KỸ ảnh và tư vấn:\n"
     "1. Nhận diện hạng mục (mộ đá, lăng thờ, cổng, lan can...) và đặc điểm (số mái, kiểu dáng, loại đá nếu thấy).\n"
-    "2. DÒ trong BẢNG SẢN PHẨM tìm 1-3 mẫu GIỐNG/gần nhất với ảnh, nêu rõ mã + tên "
+    "2. Neu lich su truoc do da co loai da/vat lieu khach chon (dac biet granite/GRN/G20/An Do), PHAI giu loai da do khi tra gia; anh chi dung de nhan dien kieu dang, khong duoc tu doi vat lieu.\n"
+    "3. DÒ trong BẢNG SẢN PHẨM tìm 1-3 mẫu GIỐNG/gần nhất với ảnh, nêu rõ mã + tên "
     "(nhắc mã -> hệ thống tự gửi ảnh mẫu kèm). Nếu không chắc mẫu chính xác, nói rõ đây là mẫu gần giống "
     "cùng dòng, đừng khẳng định chắc nịch.\n"
-    "3. Nếu ảnh không phải sản phẩm đá (ảnh khác/không rõ), hỏi khách cần tư vấn gì.)")
+    "4. Nếu ảnh không phải sản phẩm đá (ảnh khác/không rõ), hỏi khách cần tư vấn gì.)")
 
 
 def _stash_customer_images(psid: str, urls: list[str]) -> None:

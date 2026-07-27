@@ -237,7 +237,7 @@ def _run_tool(name: str, inp: dict) -> str:
         return f"Tool {name} không tồn tại."
     ids = inp.get("product_ids")
     if ids:
-        results = rows_by_ids(ids if isinstance(ids, list) else [ids])
+        results = rows_by_ids(ids if isinstance(ids, list) else [ids], inp.get("stone"))
     else:
         kind, q = inp.get("kind"), inp.get("q")
         raw_max = inp.get("max", "")

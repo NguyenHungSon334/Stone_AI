@@ -16,6 +16,7 @@ import httpx
 import alerts
 import brain
 import config
+import returning
 import stats
 import util
 from bot_tools import lark_crm, lark_image
@@ -986,6 +987,10 @@ async def _process_inner(psid: str, text: str, user_at: str | None = None) -> No
             await _save_lead_to_crm(psid)
             return
         await send_action(psid, "typing_on")
+        # Khách nhắn từ TRƯỚC khi bot lên: chưa có log -> dựng lại từ Graph API để brain trả
+        # lời có ngữ cảnh. Im quá 1 ngày rồi quay lại -> báo admin qua Lark. Chạy TRƯỚC
+        # is_new_customer: nạp được log thì khách này là khách CŨ, không phải khách mới.
+        await returning.xu_ly_khach_quay_lai(psid)
         # to_thread: is_new_customer có thể chạm Firebase (cache miss) - offload để
         # Firebase chậm/chết không block event loop (mọi khách khác đứng).
         is_new = await asyncio.to_thread(brain.is_new_customer, psid)  # TRƯỚC khi brain ghi lịch sử

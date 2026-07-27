@@ -1,0 +1,71 @@
+"""Test phần thuần logic của returning.py (không chạm mạng, không chạm đĩa)."""
+import sys
+from datetime import datetime, timedelta
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import returning
+
+
+def _fb_time(s: str) -> str:
+    """Giả lập messenger._fb_time_to_local: ISO FB -> '%Y-%m-%d %H:%M:%S'."""
+    return s.replace("T", " ")[:19]
+
+
+def test_doi_tin_fb_dao_thu_tu_va_gan_dung_vai():
+    # Arrange - Graph trả MỚI TRƯỚC
+    tin = [
+        {"from": {"id": "PAGE"}, "message": "Dạ em chào Bác",
+         "created_time": "2026-07-20T10:05:00+0000"},
+        {"from": {"id": "KHACH"}, "message": "cho hỏi giá mộ đá",
+         "created_time": "2026-07-20T10:00:00+0000"},
+    ]
+
+    # Act
+    out = returning.doi_tin_fb(tin, "PAGE", _fb_time)
+
+    # Assert - cũ trước mới sau, vai đúng
+    assert [m["role"] for m in out] == ["user", "assistant"]
+    assert out[0]["content"] == "cho hỏi giá mộ đá"
+    assert out[0]["at"] == "2026-07-20 10:00:00"
+
+
+def test_doi_tin_fb_bo_tin_rong():
+    # Ảnh/sticker về dưới dạng message rỗng -> bỏ hẳn, không tạo lượt trống
+    tin = [{"from": {"id": "KHACH"}, "message": "", "created_time": "2026-07-20T10:00:00+0000"},
+           {"from": {"id": "KHACH"}, "message": "  ", "created_time": "2026-07-20T09:00:00+0000"}]
+    assert returning.doi_tin_fb(tin, "PAGE", _fb_time) == []
+
+
+def test_doi_tin_fb_moc_hong_van_giu_noi_dung():
+    tin = [{"from": {"id": "KHACH"}, "message": "alo", "created_time": "khong-phai-ngay"}]
+
+    def _no(_):
+        raise ValueError("mốc hỏng")
+
+    out = returning.doi_tin_fb(tin, "PAGE", _no)
+    assert out == [{"role": "user", "content": "alo"}]     # mất mốc, KHÔNG mất tin
+
+
+def test_gio_im_lang_lay_moc_cuoi_cung():
+    bay_gio = datetime(2026, 7, 27, 12, 0, 0)
+    msgs = [{"role": "user", "content": "a", "at": "2026-07-20 12:00:00"},
+            {"role": "assistant", "content": "b", "at": "2026-07-25 12:00:00"}]
+    assert returning.gio_im_lang(msgs, bay_gio) == 48.0
+
+
+def test_gio_im_lang_khong_co_moc_tra_am_mot():
+    assert returning.gio_im_lang([{"role": "user", "content": "a"}]) == -1.0
+    assert returning.gio_im_lang([]) == -1.0
+    assert returning.gio_im_lang([{"at": "sai dinh dang"}]) == -1.0
+
+
+def test_nguong_quay_lai_dung_1_ngay():
+    # Luật nghiệp vụ: chỉ báo admin khi khách im HƠN 1 ngày
+    assert returning.NGUONG_QUAY_LAI_H == 24.0
+    bay_gio = datetime(2026, 7, 27, 12, 0, 0)
+    vua_nhan = [{"at": (bay_gio - timedelta(hours=2)).strftime("%Y-%m-%d %H:%M:%S")}]
+    lau_roi = [{"at": (bay_gio - timedelta(hours=30)).strftime("%Y-%m-%d %H:%M:%S")}]
+    assert returning.gio_im_lang(vua_nhan, bay_gio) < returning.NGUONG_QUAY_LAI_H
+    assert returning.gio_im_lang(lau_roi, bay_gio) >= returning.NGUONG_QUAY_LAI_H

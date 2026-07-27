@@ -341,6 +341,26 @@ def load_history(psid: str) -> list:
     return _load_hist(psid)
 
 
+def seed_history(psid: str, msgs: list) -> bool:
+    """Nạp lịch sử cũ dựng từ Graph API cho khách CHƯA có log. True = đã ghi.
+
+    CHỈ ghi khi log đang trống. Bản dựng từ FB thiếu ảnh và marker nội bộ, đè lên log
+    thật là mất dữ liệu không lấy lại được."""
+    if not msgs or _load_hist(psid):
+        return False
+    _save_hist(psid, msgs, msgs)
+    return True
+
+
+async def load_history_async(psid: str) -> list:
+    """load_history chạy trong thread: cache miss có thể chạm Firebase (chậm/chết)."""
+    return await asyncio.to_thread(load_history, psid)
+
+
+async def seed_history_async(psid: str, msgs: list) -> bool:
+    return await asyncio.to_thread(seed_history, psid, msgs)
+
+
 def is_closed(psid: str) -> bool:
     """Khách đã chốt phiếu CRM (handoff xong / người thật tiếp quản) -> khỏi báo tin rơi."""
     return (_HIST_DIR / f"{_psid_path(psid).stem}.crm.json").exists()

@@ -33,49 +33,84 @@ Bot cần URL public. Dev: ngrok/cloudflared (`ngrok http 7900`). Production: xe
 Meta Developers > App > Messenger > Webhooks:
 - Callback URL: `https://<domain>/webhook/messenger`
 - Verify token: khớp `MSGR_VERIFY_TOKEN`
-- Subscribe field: `messages`, `feed` (feed = bot trả lời comment dưới bài viết)
+- Subscribe field (đủ 4): `messages`, `messaging_postbacks`, `messaging_referrals`, `feed`
+  (`feed` = bot trả lời comment dưới bài viết; thiếu nó thì comment KHÔNG tới bot và log
+  không có dòng `[comment]` nào). `message_echoes` KHÔNG cần - code chỉ dùng để bỏ qua.
 
-## Token Facebook - VIỆC CẦN LÀM
+## Token Facebook
 
-**Hiện trạng (20/07/2026): đang dùng Page token sinh từ tài khoản cá nhân. Chấp nhận tạm vì
-còn test, CHƯA có Business Manager.**
+**Hiện trạng (27/07/2026):** Page token vĩnh viễn (`expires_at: 0`), sinh từ **user token dài
+hạn**. App `2073944916564638`, Page `Hồn Đá - Lăng Mộ Đá Gia Tộc` (`122094807350018300`).
 
-Soi bằng `debug_token` ra: `type: PAGE`, `user_id: 2274691409966415`, `expires_at: 0`,
-`data_access_expires_at: 1792295595`.
+Scope đang có (8): `pages_messaging`, `pages_manage_engagement`, `pages_manage_metadata`,
+`pages_read_engagement`, `pages_read_user_content`, `pages_show_list`, `business_management`,
+`public_profile`.
 
-Vấn đề: token Page loại này tuy mang tên Page nhưng vòng đời **buộc vào phiên đăng nhập của
-người dùng đã cấp nó**. `expires_at: 0` chỉ nghĩa là không có hẹn giờ hết hạn, KHÔNG phải
-không thể bị huỷ. Nó chết khi người đó đổi mật khẩu, đăng xuất mọi thiết bị, bật/reset 2FA,
-gỡ app, mất quyền admin Page, hoặc Facebook tự huỷ phiên vì lý do bảo mật. Thêm mốc
-`data_access_expires_at` ~90 ngày, tới đó phải xin quyền lại.
+### Hai cái bẫy đã dính thật, đọc trước khi đụng token
 
-Đã dính thật một lần: `OAuthException #190` subcode `460` - "session has been invalidated
-because the user changed their password". Bot im, khách nhắn không ai trả lời, chỉ lộ khi gửi
-tin hỏng.
+**1. KHÔNG đổi token/secret qua dashboard.** `admin.py` `_ENV_EDITABLE` chỉ cho ghi 4 key:
+`BOT_MODEL`, `BOT_ADMIN_UIDS`, `BOT_PER_PSID_RATE_S`, `BOT_MAX_CONCURRENT`. Ô nhập cho
+`MSGR_PAGE_TOKEN` / `MSGR_APP_SECRET` / `GEMINI_API_KEY` vẫn hiện trên giao diện nhưng
+backend **vứt im lặng** và trả `{"ok": true}` - tưởng đã lưu mà không có gì đổi. Sửa tay:
 
-**Cách xử lý dứt điểm - System User token.** System User là tài khoản máy thuộc Business,
-không có mật khẩu, không có phiên đăng nhập, nên không chết theo người nào cả. Đặt
-`Token expiration: Never` thì không phải thay định kỳ, và không có đồng hồ 90 ngày.
+```bash
+gcloud compute ssh hon-da-vps --zone=us-central1-a
+cd ~/chatbot-mess && sudo nano .env      # file thuộc user admin -> phải sudo
+docker compose restart bot
+```
 
-Các bước (làm 1 lần, cần Business Manager; Page và App đều phải thuộc Business đó):
+**2. Token và App Secret phải CÙNG một App.** Lấy token ở app A mà `.env` giữ secret của app B
+thì `verify_signature` (`messenger.py:207`) fail-closed, mọi webhook trả **403** và bot câm -
+trong khi lưới tin rơi vẫn trả lời bù qua Graph API nên nhìn như "lúc được lúc không".
 
-1. `business.facebook.com` > Business Settings > Users > System Users > Add, role **Admin**
-2. Add Assets > Pages > chọn Page > bật **Manage Page** (full control)
-3. Add Assets > Apps > chọn app Messenger > **Develop**
-4. **Generate New Token** > chọn App > **Token expiration: Never** > tick quyền:
-   `pages_messaging`, `pages_manage_metadata`, `pages_read_engagement`, `pages_show_list`,
-   `pages_manage_engagement` (cần cho trả lời comment)
-5. Copy token (chỉ hiện 1 lần) > dán vào ô **Page Token** ở `/admin` > Lưu > Restart
+### Lấy lại token vĩnh viễn (khi token chết)
 
-Xác nhận đã đúng loại: `user_id` TRỐNG, `expires_at: 0`, không còn `data_access_expires_at`.
+Page token chỉ vĩnh viễn khi sinh từ **user token dài hạn**. Đổi thẳng từ page token ngắn hạn
+chỉ ra 60 ngày.
 
-Token System User không hết hạn nên ai cầm được là dùng vô thời hạn - lộ thì vào Business
-Settings thu hồi và tạo cái mới. `.gitignore` đã chặn mọi biến thể `.env`.
+1. Graph API Explorer, chọn đúng App, để **User Token**, tick `pages_show_list`,
+   `pages_messaging`, `pages_read_engagement`, `pages_manage_metadata`,
+   `pages_manage_engagement`, `business_management` > Generate. Popup: chọn Page + **bật hết**
+   nút gạt (Facebook nhớ cái đã từ chối - bị `declined` thì phải gỡ app ở
+   `facebook.com/settings?tab=business_tools` rồi cấp lại từ đầu).
+2. Trên VPS, đổi user token ngắn hạn -> dài hạn, rồi lấy page token từ đó:
 
-Trong lúc chưa chuyển: vòng canh token (`messenger.run_token_check`, quét mỗi
-`BOT_FOLLOWUP_CHECK_MIN` phút) gọi `debug_token`, token chết hoặc còn dưới 7 ngày là báo Lark
-ngay - không phải đợi khách nhắn mới biết. Vòng này vẫn nên giữ cả sau khi đổi sang System
-User, để bắt các ca thu hồi token / gỡ quyền / Facebook hạn chế app.
+```bash
+cd ~/chatbot-mess
+U='<user-token-tu-explorer>'; A=2073944916564638
+S=$(sudo grep -m1 '^MSGR_APP_SECRET=' .env | cut -d= -f2-)
+LU=$(curl -s "https://graph.facebook.com/v21.0/oauth/access_token?grant_type=fb_exchange_token&client_id=$A&client_secret=$S&fb_exchange_token=$U" | python3 -c 'import sys,json;print(json.load(sys.stdin)["access_token"])')
+PT=$(curl -s "https://graph.facebook.com/v21.0/me/accounts?access_token=$LU" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(next(p["access_token"] for p in d["data"] if p["id"]=="122094807350018300"))')
+curl -s "https://graph.facebook.com/v21.0/debug_token?input_token=$PT&access_token=$A|$S" | python3 -m json.tool | grep expires_at
+```
+
+`expires_at` phải là **0**. Khác 0 thì bước đổi user token trượt, ĐỪNG ghi vào `.env`.
+
+3. Ghi + restart (dùng đường dẫn tuyệt đối, `/home/admin/chatbot-mess`):
+
+```bash
+sudo cp .env .env.bak-$(date +%F-%H%M%S)
+sudo sed -i '/^MSGR_PAGE_TOKEN=/d' .env
+printf 'MSGR_PAGE_TOKEN=%s\n' "$PT" | sudo tee -a /home/admin/chatbot-mess/.env >/dev/null
+docker compose restart bot
+```
+
+### "Vĩnh viễn" vẫn có thể chết
+
+Không có hẹn giờ, nhưng vẫn huỷ khi: đổi mật khẩu Facebook, gỡ app khỏi Business
+Integrations, mất quyền Admin Page, reset App Secret, hoặc Meta thu hồi. Đã dính một lần:
+`OAuthException #190` subcode `460` - "session has been invalidated because the user changed
+their password".
+
+Vòng canh token (`messenger.run_token_check`, quét mỗi `BOT_FOLLOWUP_CHECK_MIN` phút) gọi
+`debug_token` và báo Lark khi token chết hoặc còn dưới 7 ngày - không phải đợi khách nhắn mới
+biết. **Giữ vòng này kể cả sau khi có token vĩnh viễn.**
+
+**Nâng cấp còn treo - System User token.** Tài khoản máy thuộc Business, không có mật khẩu
+nên không chết theo người nào. Cần Business Verification. Các bước: `business.facebook.com` >
+Business Settings > Users > System Users > Add (role Admin) > Add Assets (Page: Manage Page;
+App: Develop) > Generate New Token > **Token expiration: Never** + tick 5 quyền `pages_*`.
+Đúng loại khi `debug_token` cho `user_id` TRỐNG và không còn `data_access_expires_at`.
 
 ## Cấu trúc
 
@@ -88,6 +123,7 @@ User, để bắt các ca thu hồi token / gỡ quyền / Facebook hạn chế 
 | `dashboard.html` | Giao diện trang admin |
 | `config.py` | Đọc `.env` + persona + bảng sản phẩm (cache theo mtime) |
 | `stats.py` | Đếm token, chi phí, sự kiện |
+| `returning.py` | Khách cũ quay lại: dựng lại lịch sử từ Graph API + báo Lark khi khách im >24h nhắn lại |
 | `fb.py` | Mirror hội thoại + stats lên Firebase Realtime DB |
 | `util.py` | psid an toàn, ghi JSON atomic |
 | `Document_ChatBot_Mess/` | Kiến thức bot. `Personal.md` = persona; `Danh_Muc_San_Pham.csv` = bảng sản phẩm |
@@ -121,6 +157,26 @@ tải bytes từ Lark rồi **upload thẳng lên FB (multipart)** - không qua 
 Cần `.env`: `LARK_APP_ID`, `LARK_APP_SECRET` (app đã được chia sẻ Base), quyền `bitable:read`
 + `drive:read`. `LARK_BASE_APP_TOKEN` / `LARK_TABLE_ID` có mặc định hardcode trong `config.py`
 - dùng Base khác thì phải override trong `.env`.
+
+## Khách cũ quay lại (`returning.py`)
+
+Bot lên SAU khi Page đã chạy -> khách từng nhắn trước đó không có log ở local lẫn Firebase,
+bot tiếp như người lạ và hỏi lại những thứ khách đã nói. Mỗi lượt khách nhắn, trước khi gọi
+`brain.answer`:
+
+1. Chưa có log -> `GET me/conversations?user_id=<psid>` kéo 30 tin cũ, dựng lại thành log
+   (`brain.seed_history`, CHỈ ghi khi log đang trống - bản dựng từ FB thiếu ảnh và marker nội
+   bộ, đè lên log thật là mất dữ liệu).
+2. Im >= 24h rồi nhắn lại -> báo Lark kèm mã lead + SĐT đọc từ `conversations/<psid>.crm.json`.
+   File mốc `.quaylai` chặn báo lặp khi khách nhắn liền nhiều tin.
+
+Chạy TRƯỚC `is_new_customer` - nạp được log thì khách này là khách CŨ. Cần scope
+`pages_read_user_content`. Mọi lỗi đều nuốt: Graph hỏng thì bot vẫn trả lời, chỉ thiếu ngữ
+cảnh cũ. Log: `[quaylai] nạp N tin cũ cho <psid>` / `[quaylai] báo admin`.
+
+Lưu ý nghiệp vụ: tin **nhân viên nhắn tay** trước đây vào log với vai `assistant`, bot coi là
+lời của chính mình. Liền mạch thì tốt, nhưng nếu nhân viên từng báo giá/hứa hẹn thì bot sẽ
+tiếp nối cam kết đó. Thấy lệch thì hạ `_MAX_TIN` (mặc định 30).
 
 ## Handoff, CRM, báo admin
 
@@ -159,6 +215,13 @@ nhập, test webhook Lark, xoá toàn bộ data (local + Firebase, KHÔNG hoàn 
 
 Cấu hình chỉ sửa qua **ô nhập** (`/api/config`); editor `.env` thô đã bỏ - hai đường ghi cùng
 một file mà đường kia không validate được, dán nhầm là hỏng file và mất luôn token dashboard.
+
+> **Ô nhập KHÔNG ghi được token/secret.** `_ENV_EDITABLE` (`admin.py:36`) chỉ whitelist 4 key
+> `BOT_MODEL`, `BOT_ADMIN_UIDS`, `BOT_PER_PSID_RATE_S`, `BOT_MAX_CONCURRENT`. Các ô bí mật vẫn
+> hiện ra mời điền nhưng vòng ghi (`admin.py:202`) chỉ duyệt whitelist nên giá trị bị **vứt im
+> lặng**, API vẫn trả `{"ok": true}`. Đây là bug thật đã tốn hàng giờ debug. Muốn đổi secret:
+> sửa `.env` tay qua SSH (xem mục Token Facebook). Muốn sửa hẳn thì hoặc thêm key vào
+> `_ENV_EDITABLE`, hoặc ẩn các ô bí mật khỏi giao diện - đừng để nguyên trạng đánh lừa.
 Ô hiện giá trị **đang có hiệu lực**, biến chưa khai trong `.env` thì hiện mặc định của
 `config.py` kèm ghi chú, không để trống gây tưởng chưa cấu hình. Ô bí mật luôn để trống, giá
 trị che hiện ở dòng riêng bên dưới - đổ vào `value` thì bấm Lưu sẽ ghi đè chính chuỗi che lên

@@ -20,11 +20,24 @@ def _fake_resp(text: str):
 
 def test_parse_kem_noi_dung():
     """Không có nội dung comment thì không phân loại được -> phải bóc kèm text."""
+    import tempfile
+    from pathlib import Path
+
     payload = {"object": "page", "entry": [{"id": "PAGE", "changes": [
         {"field": "feed", "value": {"item": "comment", "verb": "add", "comment_id": "CX1",
                                     "from": {"id": "U1"}, "message": "giá bao nhiêu vậy shop"}},
     ]}]}
-    assert messenger.parse_comment_events(payload) == [("CX1", "U1", "giá bao nhiêu vậy shop")]
+    # Dedupe ghi ra đĩa và sống qua restart -> chạy test lần 2 sẽ bị coi là trùng. Tách state.
+    orig = (messenger._SEEN_PATH, dict(messenger._SEEN_COMMENTS), messenger._seen_loaded)
+    messenger._SEEN_PATH = Path(tempfile.mkdtemp()) / "_comments_seen.state"
+    messenger._SEEN_COMMENTS.clear()
+    messenger._seen_loaded = False
+    try:
+        assert messenger.parse_comment_events(payload) == [("CX1", "U1", "giá bao nhiêu vậy shop")]
+    finally:
+        messenger._SEEN_PATH, seen, messenger._seen_loaded = orig
+        messenger._SEEN_COMMENTS.clear()
+        messenger._SEEN_COMMENTS.update(seen)
 
 
 def test_intent_khong_goi_api():

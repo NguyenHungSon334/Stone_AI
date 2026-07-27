@@ -12,6 +12,7 @@ Module vá đúng chỗ đó, 2 việc mỗi khi khách nhắn tới:
 Mọi lỗi đều NUỐT: nạp lịch sử hỏng không được chặn bot trả lời khách. Thà trả lời thiếu
 ngữ cảnh còn hơn im lặng.
 """
+import re
 import sys
 import time
 from datetime import datetime
@@ -47,18 +48,42 @@ async def _page_id() -> str:
     return _page_id_cache
 
 
+# Tin do Meta/automation của Page sinh ra, KHÔNG phải bot nói. Nạp vào log dưới role
+# "assistant" là model coi đó như văn mẫu của chính mình rồi CHÉP LẠI vào câu trả lời -
+# khách đã nhận nguyên câu quảng cáo dán ở đuôi tin tư vấn.
+_TIN_HE_THONG = re.compile(
+    r"replied to an ad|started a conversation|was sent from|đã trả lời quảng cáo"
+    r"|^bạn đã gửi|^you sent", re.I)
+# Auto-reply quảng cáo của Page: câu chào rập khuôn xin SĐT, luôn giống hệt nhau mỗi lần
+# khách bấm ad. Nhận diện bằng cụm đặc trưng để không nuốt nhầm tin tư vấn thật.
+_CHAO_QUANG_CAO = re.compile(
+    r"(quan tâm đến hạng mục|để nắm rõ nhu cầu cũng như mong muốn)", re.I)
+
+
+def _bo_tin_page_may(noi_dung: str, la_page: bool) -> bool:
+    """True = bỏ tin này khỏi lịch sử nạp lại."""
+    if _TIN_HE_THONG.search(noi_dung):
+        return True
+    return la_page and bool(_CHAO_QUANG_CAO.search(noi_dung))
+
+
 def doi_tin_fb(msgs: list, page_id: str, fb_time_to_local) -> list:
     """Tin thô Graph -> log bot ({"role", "content", "at"}), cũ trước mới sau.
 
-    Graph trả MỚI TRƯỚC nên phải đảo. Tin rỗng (ảnh/sticker/file) bỏ hẳn: API không trả
-    nội dung ảnh, giữ lại chỉ tạo lượt trống làm nhiễu ngữ cảnh."""
+    Graph trả MỚI TRƯỚC nên phải đảo. Bỏ: tin rỗng (ảnh/sticker/file - API không trả nội
+    dung, giữ lại chỉ tạo lượt trống), tin hệ thống FB, auto-reply quảng cáo của Page, và
+    tin Page trùng lặp liên tiếp."""
     out = []
     for m in reversed(msgs or []):
         noi_dung = (m.get("message") or "").strip()
         if not noi_dung:
             continue
-        tu = str((m.get("from") or {}).get("id") or "")
-        ban_ghi = {"role": "assistant" if tu == page_id else "user", "content": noi_dung}
+        la_page = str((m.get("from") or {}).get("id") or "") == page_id
+        if _bo_tin_page_may(noi_dung, la_page):
+            continue
+        if out and out[-1]["content"] == noi_dung:      # Page/khách gửi trùng liên tiếp
+            continue
+        ban_ghi = {"role": "assistant" if la_page else "user", "content": noi_dung}
         at = m.get("created_time")
         if at:
             try:

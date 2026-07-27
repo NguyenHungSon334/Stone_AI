@@ -48,6 +48,35 @@ def test_doi_tin_fb_moc_hong_van_giu_noi_dung():
     assert out == [{"role": "user", "content": "alo"}]     # mất mốc, KHÔNG mất tin
 
 
+def test_doi_tin_fb_bo_tin_quang_cao_cua_page():
+    """Tin hệ thống FB + auto-reply quảng cáo của Page KHÔNG được vào log dưới role assistant:
+    model coi đó là văn mẫu của chính nó rồi chép lại vào tin gửi khách (đã xảy ra thật)."""
+    chao_ad = ("Chào Bác Luyến! Bác đang quan tâm đến hạng mục Lăng Mộ Đá hay Nhà Thờ Họ ạ ? "
+               "Để nắm rõ nhu cầu cũng như mong muốn của bác . Bác gửi em số điện thoại")
+    tin = [
+        {"from": {"id": "KHACH"}, "message": "Tôi cần tư vấn",
+         "created_time": "2026-07-20T10:02:00+0000"},
+        {"from": {"id": "PAGE"}, "message": chao_ad, "created_time": "2026-07-20T10:01:00+0000"},
+        {"from": {"id": "PAGE"}, "message": "Doàn Luyến replied to an ad.",
+         "created_time": "2026-07-20T10:00:00+0000"},
+    ]
+    out = returning.doi_tin_fb(tin, "PAGE", _fb_time)
+    assert out == [{"role": "user", "content": "Tôi cần tư vấn", "at": "2026-07-20 10:02:00"}]
+
+
+def test_doi_tin_fb_giu_tin_tu_van_that_va_bo_trung_lien_tiep():
+    tin = [
+        {"from": {"id": "PAGE"}, "message": "Dạ mẫu LD03 khoảng 67 triệu ạ",
+         "created_time": "2026-07-20T10:03:00+0000"},
+        {"from": {"id": "PAGE"}, "message": "Dạ em chào Bác",
+         "created_time": "2026-07-20T10:02:00+0000"},
+        {"from": {"id": "PAGE"}, "message": "Dạ em chào Bác",      # gửi trùng liên tiếp
+         "created_time": "2026-07-20T10:01:00+0000"},
+    ]
+    out = returning.doi_tin_fb(tin, "PAGE", _fb_time)
+    assert [m["content"] for m in out] == ["Dạ em chào Bác", "Dạ mẫu LD03 khoảng 67 triệu ạ"]
+
+
 def test_gio_im_lang_lay_moc_cuoi_cung():
     bay_gio = datetime(2026, 7, 27, 12, 0, 0)
     msgs = [{"role": "user", "content": "a", "at": "2026-07-20 12:00:00"},

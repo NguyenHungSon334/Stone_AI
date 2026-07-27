@@ -851,6 +851,48 @@ def _extract_lead_sync(psid: str) -> dict | None:
         return None
 
 
+# Comment có nhu cầu -> mới nhắn riêng vào inbox. Comment khen/chào/spam thì chỉ cảm ơn công khai,
+# nhắn riêng mấy người này là làm phiền và đốt luôn quyền private reply (FB chỉ cho 1 lần/comment).
+_INTENT_RE = re.compile(
+    r"\d{9,}"                                        # SĐT trong comment
+    r"|\b(gia|giá|bao nhieu|bao nhiêu|bn|inbox|ib|tu van|tư vấn|bao gia|báo giá|quan tam|quan tâm"
+    r"|mau|mẫu|lam|làm|dat|đặt|mua|kich thuoc|kích thước|chi phi|chi phí|lien he|liên hệ|sdt|sđt"
+    r"|zalo|so dt|số đt|xin so|xin số|can|cần|muon|muốn|xem|hoi|hỏi)\b", re.I)
+# Comment không có chữ nào (chỉ icon/ảnh/dấu câu) -> không đủ căn cứ để coi là nhu cầu.
+_WORD_RE = re.compile(r"[0-9A-Za-zÀ-ỹ]")
+
+
+def _comment_intent_sync(text: str) -> bool:
+    """True = comment có dấu hiệu nhu cầu -> đáng nhắn riêng.
+
+    3 tầng, dừng ở tầng rẻ nhất: không có chữ -> False; khớp từ khoá -> True; còn lại hỏi model lite.
+    Model lỗi -> True (fail-open): thà nhắn thừa 1 người còn hơn bỏ lọt khách thật."""
+    text = (text or "").strip()
+    if not _WORD_RE.search(text):
+        return False
+    if _INTENT_RE.search(text):
+        return True
+    prompt = ("Đây là bình luận dưới bài đăng của xưởng đá mỹ nghệ (mộ đá, lăng mộ, long đình, cổng đá). "
+              "Người này có dấu hiệu MUỐN MUA / hỏi giá / hỏi sản phẩm / nhờ tư vấn không? "
+              "Chỉ khen đẹp, chào hỏi, cảm thán, tag bạn bè, spam thì KHÔNG. "
+              "Trả lời đúng một từ: CO hoặc KHONG.\n\nBình luận: " + text)
+    try:
+        resp = _generate(_get_client(), tries=2, model=_FALLBACK_MODEL,
+                         contents=[types.Content(role="user", parts=[types.Part.from_text(text=prompt)])],
+                         config=types.GenerateContentConfig(max_output_tokens=8, thinking_config=_NO_THINK))
+        cand = (resp.candidates or [None])[0]
+        out = "".join(p.text for p in (cand.content.parts or []) if p.text).strip().upper() if cand and cand.content else ""
+        return not out.startswith("KHONG")
+    except Exception as e:
+        print(f"[comment] phân loại lỗi: {type(e).__name__}: {e}", file=sys.stderr)
+        return True
+
+
+async def comment_has_intent(text: str) -> bool:
+    """Phân loại comment (async wrapper)."""
+    return await asyncio.to_thread(_comment_intent_sync, text)
+
+
 async def answer(psid: str, text: str, images: list[tuple[bytes, str]] | None = None,
                  user_at: str | None = None) -> str:
     """Trả lời 1 tin của khách. Chạy API trong thread để không chặn event loop.

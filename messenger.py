@@ -268,7 +268,7 @@ def _comment_seen(cid: str) -> bool:
 
 
 def parse_comment_events(payload: dict):
-    """[(comment_id, from_id)] từ webhook feed. Bỏ comment của chính Page, verb != add, đã xử lý.
+    """[(comment_id, from_id, text)] từ webhook feed. Bỏ comment của chính Page, verb != add, đã xử lý.
 
     Log MỌI lần bỏ kèm lý do: không có log thì 'FB không gửi event' và 'bot tự bỏ event'
     nhìn giống hệt nhau (đều im lặng), debug thành đoán mò."""
@@ -296,8 +296,9 @@ def parse_comment_events(payload: dict):
             if _comment_seen(cid):
                 print(f"[comment] bỏ qua {cid}: FB gửi trùng, đã xử lý rồi", file=sys.stderr)
                 continue
-            print(f"[comment] NHẬN {cid} từ {from_id}", file=sys.stderr)
-            out.append((cid, from_id))
+            text = str(v.get("message") or "")
+            print(f"[comment] NHẬN {cid} từ {from_id}: {text[:80]!r}", file=sys.stderr)
+            out.append((cid, from_id, text))
     return out
 
 
@@ -318,16 +319,27 @@ async def reply_private(comment_id: str) -> bool:
                           tag="comment-private")
 
 
-async def handle_comment(comment_id: str, from_id: str) -> None:
-    """1 comment: cảm ơn công khai + nhắn riêng mời vào inbox. Lỗi 1 kênh không chặn kênh kia.
+async def handle_comment(comment_id: str, from_id: str, text: str = "") -> None:
+    """1 comment: LUÔN cảm ơn công khai; chỉ nhắn riêng khi comment có dấu hiệu nhu cầu.
 
-    2 kênh hỏng theo cách KHÁC nhau (public cần pages_manage_engagement; private chỉ được 1
-    lần/comment và hết hạn sau 7 ngày) -> ghi rõ kênh nào được, kênh nào không."""
+    Khen đẹp/chào hỏi mà nhắn riêng là làm phiền, và đốt mất quyền private reply (FB chỉ cho
+    1 lần/comment). Lỗi 1 kênh không chặn kênh kia; 2 kênh hỏng theo cách KHÁC nhau (public cần
+    pages_manage_engagement; private chỉ 1 lần/comment và hết hạn sau 7 ngày) -> ghi rõ kênh nào."""
     pub = await reply_public(comment_id)
-    priv = await reply_private(comment_id)
-    print(f"[comment] {comment_id}: công khai={'OK' if pub else 'HỎNG'} | riêng={'OK' if priv else 'HỎNG'}",
+    want_private = await brain.comment_has_intent(text)
+    priv = await reply_private(comment_id) if want_private else False
+    priv_log = ("OK" if priv else "HỎNG") if want_private else "BỎ QUA (không có nhu cầu)"
+    print(f"[comment] {comment_id}: công khai={'OK' if pub else 'HỎNG'} | riêng={priv_log}",
           file=sys.stderr)
-    stats.log_event("comment", from_id, note=f"public={pub} private={priv}")
+    stats.log_event("comment", from_id,
+                    note=f"public={pub} private={priv if want_private else 'skip'}")
+    if not (pub or want_private):
+        # Chủ ý không nhắn riêng -> chỉ còn public là kênh duy nhất, hỏng là khách không thấy gì.
+        await alert_admins("comment:dead",
+                           f"🔴 COMMENT KHÔNG ĐƯỢC TRẢ LỜI - trả lời công khai hỏng.\n"
+                           f"comment_id: {comment_id}\n"
+                           f"➡️ Thường do thiếu pages_manage_engagement hoặc token page hết hạn.")
+        return
     if not (pub or priv):
         # Cả 2 kênh chết = khách comment xong KHÔNG nhận được gì. Chi tiết HTTP đã nằm ở
         # cảnh báo của _fb_post; đây là tin gộp cho biết comment thật sự rơi.

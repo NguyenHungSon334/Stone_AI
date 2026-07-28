@@ -198,7 +198,33 @@ def _bo_marker_anh(reply: str) -> str:
     return _WANT_IMG_RE.sub("", reply or "").strip()
 
 
-def _image_markers(history: list, reply: str, user_text: str) -> str:
+
+def _image_state_path(psid: str) -> Path:
+    return _HIST_DIR / (_psid_path(psid).stem + ".images.json")
+
+
+def _next_image_token(psid: str, code: str, tokens: list[str]) -> str:
+    """Return the next image for one customer/product, wrapping after the last image."""
+    if not tokens:
+        return ""
+    if not psid:
+        return tokens[0]
+    state = util.read_json(_image_state_path(psid), {})
+    state = state if isinstance(state, dict) else {}
+    try:
+        index = max(0, int(state.get(code, 0)))
+    except (TypeError, ValueError):
+        index = 0
+    token = tokens[index % len(tokens)]
+    state[code] = (index + 1) % len(tokens)
+    try:
+        util.write_json_atomic(_image_state_path(psid), state)
+    except Exception as e:
+        print(f"[img] state write failed psid={psid}: {type(e).__name__}: {e}", file=sys.stderr)
+    return token
+
+
+def _image_markers(history: list, reply: str, user_text: str, psid: str = "") -> str:
     """Marker ảnh (1 mã = 1 ảnh, tối đa _MAX_NEW_IMAGES/tin, mã không ảnh bỏ im lặng).
 
     2 trường hợp gửi ảnh:
@@ -229,7 +255,8 @@ def _image_markers(history: list, reply: str, user_text: str) -> str:
                          f"{type(e).__name__}: {e}\n➡️ Kiểm tra LARK_APP_ID/SECRET và quyền Base.")
             toks = []
         if toks:
-            markers.append(f"<<IMG:{toks[0]}>>")
+            token = _next_image_token(psid, code, toks)
+            markers.append(f"<<IMG:{token}>>")
         else:
             thieu.append(code)
     # Base thiếu ảnh mã nào thì bot lặng lẽ bỏ qua -> khách xem mẫu chay, admin không hề biết.
@@ -786,7 +813,7 @@ def _answer_sync(psid: str, text: str, images: list[tuple[bytes, str]] | None = 
                 raise BrainError(f"API không trả nội dung. finish_reason={cand.finish_reason}")
             # Sản phẩm nhắc lần đầu trong hội thoại -> tự kèm marker ảnh (messenger bóc ra gửi).
             # Đọc <<ANH>> TRƯỚC khi bóc; sau đó reply sạch mới đem gửi + lưu lịch sử.
-            markers = _image_markers(full, reply, text)
+            markers = _image_markers(full, reply, text, psid)
             hua_anh_khong_co = _wants_image(reply) and not markers
             reply = _bo_marker_anh(reply)
             if hua_anh_khong_co:

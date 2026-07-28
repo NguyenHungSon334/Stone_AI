@@ -330,7 +330,7 @@ def _followup_mark(psid: str) -> Path:
     return _HIST_DIR / (_psid_path(psid).stem + ".followup")
 
 
-def followup_candidates(after_h: float, max_h: float = 23.0) -> list[tuple[str, str]]:
+def followup_candidates(after_h: float, max_h: float = 23.75) -> list[tuple[str, str]]:
     """Khách cần nhắc: bot đã trả lời cuối, khách im trong [after_h, max_h) giờ, CHƯA chốt.
 
     max_h < 24 để còn trong cửa sổ 24h của FB (gửi RESPONSE hợp lệ). Trả [(psid, last_user_at)].

@@ -316,10 +316,14 @@ def followup_candidates(after_h: float, max_h: float = 23.0) -> list[tuple[str, 
     for p in _HIST_DIR.glob("*.json"):
         if p.name.endswith((".crm.json", ".sum.json")):   # bỏ sidecar CRM / tóm tắt
             continue
+        if p.name.endswith(".profile.json"):
+            continue
         psid = p.stem
         try:
             msgs = json.loads(p.read_text(encoding="utf-8"))
         except Exception:
+            continue
+        if not isinstance(msgs, list):
             continue
         if not msgs or msgs[-1].get("role") != "assistant":   # khách nhắn cuối -> đang chờ bot, bỏ
             continue

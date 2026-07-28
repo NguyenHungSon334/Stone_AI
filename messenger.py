@@ -9,6 +9,7 @@ import json
 import re
 import sys
 import time
+import unicodedata
 from datetime import datetime, timezone
 
 import httpx
@@ -87,7 +88,70 @@ def _find_phone(text: str) -> str | None:
     """SĐT VN đầu tiên trong tin (đã nén khoảng trắng/chấm/gạch). None nếu không có."""
     compact = re.sub(r"[\s.\-()]", "", text or "")
     m = _PHONE_RE.search(compact)
+
     return m.group(0) if m else None
+_NOISE_TERMS = {
+    "gia", "mau", "mo", "lang", "da", "tu", "van", "bao", "xem", "gui", "can", "muon",
+    "lam", "xay", "ngoi", "met", "cong", "hang", "rao", "long", "dinh", "zalo",
+}
+_SHORT_VALID_REPLIES = {"co", "khong", "ok", "uh", "um", "roi", "duoc", "dongy", "vang"}
+_NOISE_REPLY = "Dạ Bác vui lòng nói rõ mình cần xem mẫu, hỏi giá hay làm hạng mục nào để em hỗ trợ đúng ạ."
+
+
+def _plain_text(text: str) -> str:
+    folded = unicodedata.normalize("NFD", text or "").encode("ascii", "ignore").decode().lower()
+    return re.sub(r"[^a-z0-9]+", " ", folded).strip()
+
+
+def _is_meaningful_text(text: str) -> bool:
+    plain = _plain_text(text)
+    if not plain:
+        return False
+    if _find_phone(text) or any(char.isdigit() for char in plain):
+        return True
+    compact = plain.replace(" ", "")
+    if compact in _SHORT_VALID_REPLIES or len(compact) >= 6:
+        return True
+    return bool(set(plain.split()) & _NOISE_TERMS)
+
+
+def _noise_path(psid: str):
+    return brain._HIST_DIR / (util.safe_psid(psid) + ".noise.state")
+
+
+def _noise_state(psid: str) -> dict:
+    data = util.read_json(_noise_path(psid), {})
+    return data if isinstance(data, dict) else {}
+
+
+def _save_noise_state(psid: str, state: dict) -> None:
+    try:
+        util.write_json_atomic(_noise_path(psid), state)
+    except Exception as e:
+        print(f"[noise] state write failed psid={psid}: {type(e).__name__}: {e}", file=sys.stderr)
+
+
+def _noise_decision(psid: str, text: str) -> tuple[str, dict]:
+    state = _noise_state(psid)
+    if _is_meaningful_text(text):
+        if state:
+            _save_noise_state(psid, {})
+        return "allow", state
+    recent = list(state.get("recent") or [])[-2:]
+    recent.append((text or "").strip()[:80])
+    state["recent"] = recent
+    if state.get("stopped"):
+        _save_noise_state(psid, state)
+        return "blocked", state
+    count = int(state.get("count") or 0) + 1
+    state["count"] = count
+    if count == 1:
+        _save_noise_state(psid, state)
+        return "clarify", state
+    state["stopped"] = True
+    _save_noise_state(psid, state)
+    return "stop", state
+
 
 
 def _extract_handoff(reply: str) -> tuple[str, str | None]:
@@ -1007,6 +1071,23 @@ async def _process_inner(psid: str, text: str, user_at: str | None = None) -> No
         return
     async with _SEM:
         _STICKER_COUNT.pop(psid, None)                 # có tin chữ thật -> reset đếm sticker
+
+        decision, noise = _noise_decision(psid, text)
+        if decision == "clarify":
+            stats.log_event("unclear", psid)
+            await send_text(psid, _NOISE_REPLY)
+            return
+        if decision == "stop":
+            stats.log_event("noise_stop", psid)
+            recent = "\n".join(f"• {item}" for item in noise.get("recent", []) if item) or "(trống)"
+            await notify_admins(f"🔕 BOT DỪNG TRẢ LỜI: {await _label(psid)}\n"
+                                f"PSID: {psid}\nLý do: {noise.get('count')} tin mơ hồ liên tiếp.\n"
+                                f"Tin gần nhất:\n{recent}\n"
+                                "Bot sẽ tự mở lại khi khách gửi nội dung có ý nghĩa.")
+            return
+        if decision == "blocked":
+            stats.log_event("noise_blocked", psid)
+            return
         # Handoff cưỡng bức (tín hiệu tường minh): chặn trước AI, người thật vào ngay.
         forced = _forced_handoff_reason(text) if not images else None
         if forced:

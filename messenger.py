@@ -154,6 +154,24 @@ def _noise_decision(psid: str, text: str) -> tuple[str, dict]:
 
 
 
+
+def _sticker_decision(psid: str) -> tuple[str, dict]:
+    state = _noise_state(psid)
+    if state.get("stopped"):
+        return "blocked", state
+    recent = list(state.get("recent") or [])[-2:]
+    recent.append("[sticker]")
+    state["recent"] = recent
+    count = int(state.get("count") or 0) + 1
+    state["count"] = count
+    if count == 1:
+        _save_noise_state(psid, state)
+        return "welcome", state
+    state["stopped"] = True
+    state["reason"] = "sticker"
+    _save_noise_state(psid, state)
+    return "stop", state
+
 def _extract_handoff(reply: str) -> tuple[str, str | None]:
     """Bóc marker handoff khỏi tin gửi khách. Trả (reply_sạch, lý_do | None)."""
     m = _HANDOFF_RE.search(reply)
@@ -1055,6 +1073,18 @@ async def _process_inner(psid: str, text: str, user_at: str | None = None) -> No
             return
         text = _REFERRAL_PROMPT                        # khách cũ: AI tự mở lời theo ngữ cảnh
     if text == _STICKER_EVENT:
+
+        decision, noise = _sticker_decision(psid)
+        if decision == "blocked":
+            stats.log_event("sticker_blocked", psid)
+            return
+        if decision == "stop":
+            stats.log_event("sticker_stop", psid)
+            await notify_admins(f"🔕 BOT DỪNG TRẢ LỜI: {await _label(psid)}\n"
+                                f"PSID: {psid}\nLý do: {noise.get('count')} tương tác nhiễu liên tiếp, gồm sticker.\n"
+                                "Bot sẽ tự mở lại khi khách gửi nội dung có ý nghĩa.")
+            return
+        _STICKER_COUNT[psid] = 0
         # Like/sticker/icon: lần đầu chào hỏi mời tư vấn; lần 2 liên tiếp -> im + báo admin.
         n = _STICKER_COUNT.get(psid, 0) + 1
         if len(_STICKER_COUNT) > _STICKER_COUNT_MAX:   # ponytail: chặn phình, xoá sạch (thô nhưng đủ)

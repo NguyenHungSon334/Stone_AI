@@ -39,6 +39,16 @@ _KEEP_VERBATIM = _MAX_TURNS * 2   # số TIN cuối luôn gửi nguyên văn (~1
 _SUMMARY_TRIGGER = 20    # phần chưa-tóm vượt _KEEP_VERBATIM + ngần này -> cập nhật tóm tắt
 _MAX_TOOL_LOOPS = 5      # trần số vòng gọi tool trong 1 câu trả lời
 
+_PROFILE_FIELDS = ("ten", "sdt", "nhu_cau", "hang_muc", "so_luong", "vat_lieu",
+                   "dia_chi", "tinh", "khu_vuc", "xe_cau", "thoi_gian", "ghi_chu")
+_PROFILE_LABELS = {
+    "ten": "T?n", "sdt": "S?T/Zalo", "nhu_cau": "Nhu c?u", "hang_muc": "H?ng m?c",
+    "so_luong": "S? l??ng", "vat_lieu": "V?t li?u/??", "dia_chi": "??a ch?",
+    "tinh": "T?nh/TP", "khu_vuc": "Khu v?c", "xe_cau": "Xe c?u/???ng v?o",
+    "thoi_gian": "Th?i gian", "ghi_chu": "Ghi ch?",
+}
+_PHONE_RE = re.compile(r"(?<!\d)(?:\+?84|0)\d{9,10}(?!\d)")
+
 # BOT_MODEL: alias -> model id API. Có dấu '.' hoặc bắt đầu 'gemini' thì coi là id đầy đủ.
 _MODEL_ALIAS = {"flash": "gemini-3.5-flash", "pro": "gemini-2.5-pro",
                 "lite": "gemini-2.5-flash-lite"}
@@ -721,8 +731,11 @@ def _answer_sync(psid: str, text: str, images: list[tuple[bytes, str]] | None = 
     with _psid_lock(psid):
         full = _load_hist(psid)                       # TOÀN BỘ log (lưu đủ cho admin)
         full, user_at = trim_resend(full, text, user_at)
+        profile = _profile_from_history_sync(psid, full)
         # thời gian thực nhét ĐẦU contents (tách khỏi cache tĩnh)
         contents = [types.Content(role="user", parts=[types.Part.from_text(text=_time_note_text())])]
+        if profile_context := _profile_prompt(profile):
+            contents.append(types.Content(role="user", parts=[types.Part.from_text(text=profile_context)]))
         # AI đọc NHẸ: tóm tắt phần cũ + đuôi verbatim. upto = tin đã gộp vào tóm tắt.
         summ = _load_summary(psid)
         if summ:
@@ -789,10 +802,108 @@ def _answer_sync(psid: str, text: str, images: list[tuple[bytes, str]] | None = 
                         {"role": "assistant", "content": reply, "at": _now_str()}]
             new_full = full + new_msgs
             _save_hist(psid, new_full, new_msgs)       # Firebase chỉ append phần mới (O(1))
+            _refresh_profile_bg(psid, new_full)
             # Chat dài -> cập nhật tóm tắt cuốn chiếu ở NỀN (không trễ tin khách; ~1/10 lượt mới chạy).
             _summarize_bg(client, model_id, psid, new_full)
             return reply_out
         raise BrainError("Quá nhiều vòng tool, không chốt được câu trả lời.")
+
+
+_PROFILE_SCHEMA = {
+    "type": "object",
+    "properties": {field: {"type": "string"} for field in _PROFILE_FIELDS},
+    "required": list(_PROFILE_FIELDS),
+}
+_PROFILE_UPDATING: set[str] = set()
+_PROFILE_UPDATING_LOCK = threading.Lock()
+
+
+def _profile_path(psid: str) -> Path:
+    return _HIST_DIR / (_psid_path(psid).stem + ".profile.json")
+
+
+def _clean_profile(raw: object) -> dict:
+    raw = raw if isinstance(raw, dict) else {}
+    out = {field: str(raw.get(field) or "").strip() for field in _PROFILE_FIELDS}
+    out["upto"] = int(raw.get("upto") or 0)
+    return out
+
+
+def _phones_in_history(hist: list) -> str:
+    phones = []
+    for msg in hist:
+        if msg.get("role") != "user" or not isinstance(msg.get("content"), str):
+            continue
+        compact = re.sub(r"[.\s()-]", "", msg["content"])
+        phones.extend(_PHONE_RE.findall(compact))
+    if not phones:
+        return ""
+    phone = phones[-1]
+    return "0" + phone[3:] if phone.startswith("+84") else "0" + phone[2:] if phone.startswith("84") else phone
+
+
+def _profile_prompt(profile: dict) -> str:
+    lines = [f"{_PROFILE_LABELS[field]}: {profile[field]}" for field in _PROFILE_FIELDS if profile.get(field)]
+    if not lines:
+        return ""
+    return ("[H? s? kh?ch ?? x?c nh?n - coi l? d? ki?n; KH?NG h?i l?i b?t k? m?c n?o c? gi? tr?]\n"
+            + "\n".join(lines))
+
+
+def _profile_from_history_sync(psid: str, hist: list) -> dict:
+    current = _clean_profile(util.read_json(_profile_path(psid), {}))
+    if current["upto"] >= len(hist):
+        return current
+    user_lines = [f"Kh?ch: {msg['content']}" for msg in hist
+                  if msg.get("role") == "user" and isinstance(msg.get("content"), str)]
+    if not user_lines:
+        return current
+    prompt = (
+        "Tr?ch h? s? kh?ch t? c?c tin NH?N C?A KH?CH d??i ??y th?nh JSON. Ch? ghi th?ng tin kh?ch ?? n?i r?; "
+        "kh?ng suy ?o?n, kh?ng l?y d? ki?n do bot g?i ?. M?u thu?n th? d?ng th?ng tin m?i nh?t. "
+        "C?c tr??ng: t?n, S?T/Zalo, nhu c?u, h?ng m?c, s? l??ng, v?t li?u/??, ??a ch?, t?nh/TP, "
+        "khu v?c, xe c?u/???ng v?o, th?i gian, ghi ch?. Tr??ng ch?a c? ph?i l? chu?i r?ng.\n\n"
+        + "\n".join(user_lines))
+    try:
+        resp = _generate(
+            _get_client(), tries=2, model=_model_id(),
+            contents=[types.Content(role="user", parts=[types.Part.from_text(text=prompt)])],
+            config=types.GenerateContentConfig(response_mime_type="application/json",
+                                               response_json_schema=_PROFILE_SCHEMA,
+                                               max_output_tokens=1024, thinking_config=_NO_THINK),
+        )
+        cand = (resp.candidates or [None])[0]
+        raw = "".join(part.text for part in (cand.content.parts or []) if part.text) if cand and cand.content else ""
+        profile = _clean_profile(json.loads(raw))
+        profile["upto"] = len(hist)
+    except Exception as e:
+        print(f"[profile] tr?ch l?i psid={psid}: {type(e).__name__}: {e}", file=sys.stderr)
+        profile = current
+    phone = _phones_in_history(hist)
+    if phone:
+        profile["sdt"] = phone
+    if profile != current:
+        try:
+            util.write_json_atomic(_profile_path(psid), profile)
+        except Exception as e:
+            print(f"[profile] ghi l?i psid={psid}: {type(e).__name__}: {e}", file=sys.stderr)
+    return profile
+
+
+def _refresh_profile_bg(psid: str, hist: list) -> None:
+    with _PROFILE_UPDATING_LOCK:
+        if psid in _PROFILE_UPDATING:
+            return
+        _PROFILE_UPDATING.add(psid)
+
+    def run() -> None:
+        try:
+            _profile_from_history_sync(psid, hist)
+        finally:
+            with _PROFILE_UPDATING_LOCK:
+                _PROFILE_UPDATING.discard(psid)
+
+    threading.Thread(target=run, daemon=True).start()
 
 
 _LEAD_SCHEMA = {
@@ -824,6 +935,7 @@ def _extract_lead_sync(psid: str) -> dict | None:
     hist = _load_hist(psid)
     if not hist:
         return None
+    profile = _profile_from_history_sync(psid, hist)
     convo = "\n".join(f"{'Khách' if m.get('role') == 'user' else 'Bot'}: {m.get('content', '')}"
                       for m in hist if isinstance(m.get("content"), str))
     prompt = (f"Trích thông tin khách từ hội thoại dưới đây thành JSON. "
@@ -840,6 +952,9 @@ def _extract_lead_sync(psid: str) -> dict | None:
         cand = (resp.candidates or [None])[0]
         raw = "".join(p.text for p in (cand.content.parts or []) if p.text) if cand and cand.content else ""
         lead = json.loads(raw)
+        for field in ("ten", "sdt", "dia_chi", "tinh", "khu_vuc"):
+            if profile.get(field):
+                lead[field] = profile[field]
         return lead if (lead.get("sdt") or "").strip() else None
     except Exception as e:
         print(f"[lead] trích lỗi psid={psid}: {type(e).__name__}: {e}", file=sys.stderr)

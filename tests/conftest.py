@@ -21,8 +21,9 @@ import fb
 def _chan_ra_ngoai(monkeypatch):
     # Lark: cổng duy nhất mọi cảnh báo/thông báo nghiệp vụ đi ra.
     monkeypatch.setattr(alerts, "post_lark", lambda text: (True, "test: khong gui"))
-    # Firebase: _run bọc mọi thao tác ghi (conversations + stats) trong thread nền.
+    # Firebase: _init là CỬA DUY NHẤT - mọi hàm trong fb.py đều gọi nó trước khi đụng mạng,
+    # trả False là tất cả thành no-op. Chặn ở đây thay vì liệt kê từng hàm: liệt kê thì thêm
+    # hàm ghi mới là quên, và đã quên thật một lần (save_daily ghi đồng bộ, không qua _run,
+    # lọt qua bản chặn cũ rồi đẩy 3 bản ghi rác lên stats/daily của prod).
+    monkeypatch.setattr(fb, "_init", lambda: False)
     monkeypatch.setattr(fb, "_run", lambda fn: None)
-    # Đọc cũng chặn: test không được phụ thuộc dữ liệu khách thật trên prod.
-    monkeypatch.setattr(fb, "fetch_conversation", lambda psid: None)
-    monkeypatch.setattr(fb, "list_psids", lambda: None)

@@ -145,6 +145,32 @@ def fetch_events(since_ts: float) -> list | None:
     return [r for r in rows if isinstance(r, dict) and (r.get("ts") or 0) >= since_ts]
 
 
+def save_daily(gop: dict) -> bool:
+    """Ghi ĐÈ bản ghi tổng theo ngày vào stats/daily/<YYYY-MM-DD>. True = đã ghi.
+
+    Đồng bộ (KHÔNG dùng _run thread nền): stats.prune xoá sự kiện thô ngay sau lời gọi này,
+    ghi nền mà hỏng thì số liệu bay mất mà không ai biết. Lỗi -> ném lên cho caller dừng lại.
+    """
+    if not _init():
+        return False
+    from firebase_admin import db
+    db.reference("stats/daily").update(gop)
+    return True
+
+
+def fetch_daily() -> dict | None:
+    """Bản ghi tổng theo ngày. None = Firebase tắt/lỗi -> caller rơi về file local."""
+    if not _init():
+        return None
+    try:
+        from firebase_admin import db
+        d = db.reference("stats/daily").get()
+        return d if isinstance(d, dict) else {}
+    except Exception as e:
+        print(f"[fb] đọc daily lỗi: {type(e).__name__}: {e}", file=sys.stderr)
+        return None
+
+
 _PRUNE_BATCH = 500        # số key xoá / request. Gộp cả nghìn key vào 1 update dễ bị RTDB từ chối.
 
 

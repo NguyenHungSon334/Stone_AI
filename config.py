@@ -80,6 +80,12 @@ MISSED_CHECK_MIN = float(os.getenv("BOT_MISSED_CHECK_MIN", "2"))     # chu kỳ 
 # khách đã handoff (chuyên gia đang cầm) và tin quá 24h (FB chặn gửi).
 MISSED_AUTOREPLY = os.getenv("BOT_MISSED_AUTOREPLY", "1").strip() not in ("0", "", "false")
 
+# Dọn stats: kho sự kiện phình mãi (~700 bản ghi/ngày, riêng vòng quét tin rơi đã 720/ngày).
+# Giữ N ngày gần nhất, cũ hơn thì xoá. CHỈ đụng stats/events - lịch sử khách và CRM KHÔNG bao giờ
+# bị dọn. Nới số ngày nếu cần biểu đồ chi phí dài hơn (xem STATS_KEEP_DAYS trong README).
+STATS_KEEP_DAYS = float(os.getenv("BOT_STATS_KEEP_DAYS", "2"))
+STATS_PRUNE_H = float(os.getenv("BOT_STATS_PRUNE_H", "12"))          # chu kỳ dọn
+
 # Canh tunnel (ngrok/cloudflared) chết: tự ping PUBLIC_URL/webhook từ ngoài -> đứt thì báo Lark.
 # Mặc định bật khi có PUBLIC_URL. Tắt: BOT_TUNNEL_WATCH=0.
 TUNNEL_WATCH_ENABLED = os.getenv("BOT_TUNNEL_WATCH", "1").strip() not in ("0", "", "false")

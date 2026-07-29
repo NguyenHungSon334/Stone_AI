@@ -97,6 +97,43 @@ def _read_events(days: int = 30) -> list[dict]:
     return rows
 
 
+def _prune_local(cutoff: float) -> int:
+    """Viết lại events.jsonl chỉ giữ dòng >= cutoff. Trả số dòng đã bỏ. Atomic (tmp + replace)."""
+    with _LOCK:
+        try:
+            lines = _EVENTS.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return 0
+        giu = []
+        for line in lines:
+            try:
+                if (json.loads(line).get("ts") or 0) >= cutoff:
+                    giu.append(line)
+            except Exception:
+                continue                       # dòng hỏng -> bỏ luôn, đằng nào cũng không đọc được
+        if len(giu) == len(lines):
+            return 0
+        tmp = _EVENTS.with_name(_EVENTS.name + ".tmp")
+        tmp.write_text("\n".join(giu) + ("\n" if giu else ""), encoding="utf-8")
+        tmp.replace(_EVENTS)
+        return len(lines) - len(giu)
+
+
+def prune(keep_days: float | None = None) -> dict:
+    """Xoá sự kiện stats cũ hơn `keep_days` ngày, cả Firebase lẫn file local.
+
+    CHỈ dọn stats. Lịch sử khách (conversations/) và hồ sơ CRM KHÔNG bị đụng - hàm này không
+    tham chiếu tới thư mục đó.
+    """
+    keep = config.STATS_KEEP_DAYS if keep_days is None else keep_days
+    cutoff = time.time() - keep * 86400
+    tren_cloud = fb.prune_events(cutoff)
+    o_may = _prune_local(cutoff)
+    # Cache còn giữ hàng vừa xoá -> dashboard hiện số của dữ liệu không còn tồn tại. Ép nạp lại.
+    _CACHE.update(at=0.0, cutoff=0.0, rows=None)
+    return {"keep_days": keep, "firebase": tren_cloud, "local": o_may}
+
+
 def _usd(tin: int, tout: int) -> float:
     return tin / 1e6 * config.PRICE_IN_USD + tout / 1e6 * config.PRICE_OUT_USD
 

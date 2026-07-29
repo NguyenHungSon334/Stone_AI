@@ -145,6 +145,44 @@ def fetch_events(since_ts: float) -> list | None:
     return [r for r in rows if isinstance(r, dict) and (r.get("ts") or 0) >= since_ts]
 
 
+_PRUNE_BATCH = 500        # số key xoá / request. Gộp cả nghìn key vào 1 update dễ bị RTDB từ chối.
+
+
+def prune_events(cutoff_ts: float) -> int | None:
+    """Xoá sự kiện stats CŨ HƠN `cutoff_ts`. Trả số bản ghi đã xoá. None = Firebase tắt/lỗi.
+
+    CHỈ đụng node stats/events. conversations/ (lịch sử khách + sidecar CRM) KHÔNG bao giờ bị
+    chạm tới ở đây - hàm này không có đường nào tới nhánh đó.
+    """
+    if not _init():
+        return None
+    try:
+        from firebase_admin import db
+        ref = db.reference("stats/events")
+        try:
+            cu = ref.order_by_child("ts").end_at(cutoff_ts).get()
+        except Exception as e:
+            if "Index not defined" not in str(e):
+                raise
+            # Chưa deploy .indexOn ts -> tải hết rồi tự lọc (chậm hơn nhưng vẫn dọn được).
+            cu = ref.get()
+        if not isinstance(cu, dict):
+            return 0
+        # Lọc lại ở client: end_at của RTDB là INCLUSIVE, để nguyên sẽ xoá cả bản ghi đúng mốc.
+        keys = [k for k, v in cu.items()
+                if isinstance(v, dict) and (v.get("ts") or 0) < cutoff_ts]
+        for i in range(0, len(keys), _PRUNE_BATCH):
+            ref.update({k: None for k in keys[i:i + _PRUNE_BATCH]})
+        return len(keys)
+    except Exception as e:
+        print(f"[fb] dọn stats lỗi: {type(e).__name__}: {e}", file=sys.stderr)
+        # Dọn hỏng = kho phình mãi -> dashboard chậm dần rồi chạm httpTimeout 10s và tắt số liệu.
+        alerts.alert(f"fb:prune:{type(e).__name__}",
+                     f"⚠️ DỌN STATS FIREBASE LỖI - kho sự kiện phình mãi, dashboard sẽ chậm dần.\n"
+                     f"{type(e).__name__}: {e}")
+        return None
+
+
 def fetch_conversation(psid: str) -> list | None:
     """Kéo lịch sử 1 khách từ Firebase (dùng khi cache local miss).
 

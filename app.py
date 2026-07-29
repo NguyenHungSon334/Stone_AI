@@ -19,6 +19,7 @@ import admin
 import alerts
 import config
 import messenger
+import stats
 
 app = FastAPI(title="Chatbot Messenger (standalone)")
 app.include_router(admin.router)
@@ -69,6 +70,29 @@ async def _missed_loop():
                 f"⚠️ VÒNG QUÉT TIN RƠI LỖI - khách nhắn mà KHÔNG ai trả lời, "
                 f"và lượt lỗi cũng KHÔNG được nhắn bù.\n{type(e).__name__}: {e}")
         await asyncio.sleep(max(0.5, config.MISSED_CHECK_MIN) * 60)
+
+
+async def _prune_loop():
+    """Nền: mỗi STATS_PRUNE_H giờ xoá sự kiện stats cũ hơn STATS_KEEP_DAYS ngày.
+
+    CHỈ dọn stats/events (Firebase + file local). Lịch sử khách, hồ sơ CRM, mark follow-up/tin
+    rơi/noise trong conversations/ KHÔNG bị đụng.
+
+    Dọn NGAY lần đầu rồi mới ngủ: container mới lên sau nhiều ngày chết thì kho đang phình nhất
+    đúng lúc đó, ngủ trước là để nguyên thêm nửa ngày.
+    """
+    while True:
+        try:
+            kq = await asyncio.to_thread(stats.prune)
+            print(f"[dọn] stats giữ {kq['keep_days']:g} ngày: Firebase {kq['firebase']}, "
+                  f"local {kq['local']} bản ghi đã xoá", file=sys.stderr)
+        except Exception as e:
+            print(f"[dọn] vòng dọn stats lỗi: {type(e).__name__}: {e}", file=sys.stderr)
+            await asyncio.to_thread(
+                alerts.alert, f"loop:dọn stats:{type(e).__name__}",
+                f"⚠️ VÒNG DỌN STATS LỖI - kho sự kiện phình mãi, dashboard chậm dần rồi mất "
+                f"số liệu.\n{type(e).__name__}: {e}")
+        await asyncio.sleep(max(1.0, config.STATS_PRUNE_H) * 3600)
 
 
 async def _tunnel_watch_loop():
@@ -130,6 +154,9 @@ async def _start_bg():
     print(f"[app] quét tin rơi: mỗi {config.MISSED_CHECK_MIN:g}p, tin chưa trả lời quá "
           f"{config.MISSED_AFTER_MIN:g}p thì bot nhắn bù "
           f"({'BẬT' if config.MISSED_AUTOREPLY else 'TẮT - chỉ báo admin'})", file=sys.stderr)
+    _spawn(_prune_loop())
+    print(f"[app] dọn stats: giữ {config.STATS_KEEP_DAYS:g} ngày, chạy mỗi "
+          f"{config.STATS_PRUNE_H:g}h (KHÔNG đụng lịch sử khách)", file=sys.stderr)
     if config.TUNNEL_WATCH_ENABLED and config.PUBLIC_URL:
         _spawn(_tunnel_watch_loop())
         print(f"[app] canh tunnel bật: ping {config.PUBLIC_URL} mỗi {config.TUNNEL_CHECK_MIN}p",

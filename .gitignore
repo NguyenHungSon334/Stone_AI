@@ -10,5 +10,12 @@ __pycache__/
 .history.json
 conversations/
 stats/
+# Trên VPS state nằm ở ./data (bind mount trong docker-compose.yml), KHÔNG phải ./conversations
+# - 2 dòng trên không chặn được. Thiếu dòng này thì một lệnh `git add -A` trên VPS là đẩy toàn
+# bộ hội thoại + SĐT khách lên GitHub.
+data/
 .claude/
 *.log
+# Cấu hình riêng từng máy chủ: trần RAM/CPU, mount thêm. Compose tự merge file này.
+docker-compose.override.yml
+*.bak

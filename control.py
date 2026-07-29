@@ -59,8 +59,11 @@ async def _inbox_cho(page_id: str) -> list[dict]:
     from datetime import datetime, timezone
     rows = messenger.pick_unanswered(d.get("data"), page_id, config.MISSED_AFTER_MIN,
                                      datetime.now(timezone.utc))
+    # Khách bot CỐ Ý ngưng trả lời (nhiễu/sticker) không phải "đang chờ" - để lại thì bảng
+    # lúc nào cũng đỏ vì đúng những ca mình đã quyết định bỏ, che mất khách chờ thật.
     return [{"psid": p, "ten": ten, "tin": txt[:100], "luc": at,
-             "da_chot": brain.is_closed(p)} for p, ten, txt, at in rows]
+             "da_chot": brain.is_closed(p)} for p, ten, txt, at in rows
+            if not messenger._noise_state(p).get("stopped")]
 
 
 async def _comment_cho(page_id: str) -> list[dict]:

@@ -838,6 +838,11 @@ async def run_missed_check() -> None:
             # -> không rơi nữa. Đánh dấu để khỏi soi lại mãi.
             brain.mark_missed_reported(psid, at)
             continue
+        if _noise_state(psid).get("stopped"):
+            # Bot đã CỐ Ý ngưng trả lời khách này (nhiễu/sticker liên tiếp, đã báo admin 1 lần).
+            # Không đánh dấu = mỗi vòng quét lại thấy "chưa trả lời" -> báo lặp mãi mãi.
+            brain.mark_missed_reported(psid, at)
+            continue
         if brain.is_closed(psid):
             # Đã handoff/chốt phiếu -> chuyên gia đang cầm khách này, bot nhảy vào là phá.
             nguoi_that.append((psid, name, text, at, "đã handoff cho chuyên gia"))

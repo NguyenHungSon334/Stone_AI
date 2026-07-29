@@ -56,6 +56,9 @@ _TIN_HE_THONG = re.compile(
     r"|^bạn đã gửi|^you sent", re.I)
 # Auto-reply quảng cáo của Page: câu chào rập khuôn xin SĐT, luôn giống hệt nhau mỗi lần
 # khách bấm ad. Nhận diện bằng cụm đặc trưng để không nuốt nhầm tin tư vấn thật.
+_TIN_TRANG_THAI_LEAD = re.compile(
+    r"^lead (?:stage|status) (?:set to|changed to)\b|^assigned to\b"
+    r"|^lead (?:stage|status):\b", re.I)
 _CHAO_QUANG_CAO = re.compile(
     r"(quan tâm đến hạng mục|để nắm rõ nhu cầu cũng như mong muốn)", re.I)
 
@@ -63,6 +66,8 @@ _CHAO_QUANG_CAO = re.compile(
 def _bo_tin_page_may(noi_dung: str, la_page: bool) -> bool:
     """True = bỏ tin này khỏi lịch sử nạp lại."""
     if _TIN_HE_THONG.search(noi_dung):
+        return True
+    if la_page and _TIN_TRANG_THAI_LEAD.search(noi_dung):
         return True
     return la_page and bool(_CHAO_QUANG_CAO.search(noi_dung))
 
@@ -193,3 +198,4 @@ async def xu_ly_khach_quay_lai(psid: str) -> None:
         print(f"[quaylai] báo admin {psid}: im {int(im_h)}h", file=sys.stderr)
     except Exception as e:
         print(f"[quaylai] {type(e).__name__}: {e}", file=sys.stderr)
+

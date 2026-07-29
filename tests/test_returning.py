@@ -98,3 +98,17 @@ def test_nguong_quay_lai_dung_1_ngay():
     lau_roi = [{"at": (bay_gio - timedelta(hours=30)).strftime("%Y-%m-%d %H:%M:%S")}]
     assert returning.gio_im_lang(vua_nhan, bay_gio) < returning.NGUONG_QUAY_LAI_H
     assert returning.gio_im_lang(lau_roi, bay_gio) >= returning.NGUONG_QUAY_LAI_H
+def test_doi_tin_fb_bo_su_kien_trang_thai_lead_cua_meta():
+    tin = [
+        {"from": {"id": "PAGE"}, "message": "Lead stage set to Qualified",
+         "created_time": "2026-07-20T10:02:00+0000"},
+        {"from": {"id": "PAGE"}, "message": "Real advice message",
+         "created_time": "2026-07-20T10:01:00+0000"},
+    ]
+
+    out = returning.doi_tin_fb(tin, "PAGE", _fb_time)
+
+    assert out == [{"role": "assistant", "content": "Real advice message",
+                    "at": "2026-07-20 10:01:00"}]
+
+

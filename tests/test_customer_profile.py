@@ -23,6 +23,6 @@ def test_ho_so_khach_con_trong_prompt_sau_khi_lich_su_dai(monkeypatch, tmp_path)
     restored = brain._profile_from_history_sync(psid, hist)
     prompt = brain._profile_prompt(restored)
 
-    assert "S?T/Zalo: 0912345678" in prompt
-    assert "H?ng m?c: Long dinh" in prompt
-    assert "Th?i gian: thang 9/2026" in prompt
+    assert "SĐT/Zalo: 0912345678" in prompt
+    assert "Hạng mục: Long dinh" in prompt
+    assert "Thời gian: thang 9/2026" in prompt

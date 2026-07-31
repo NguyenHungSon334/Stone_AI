@@ -40,12 +40,13 @@ _SUMMARY_TRIGGER = 20    # phần chưa-tóm vượt _KEEP_VERBATIM + ngần nà
 _MAX_TOOL_LOOPS = 5      # trần số vòng gọi tool trong 1 câu trả lời
 
 _PROFILE_FIELDS = ("ten", "sdt", "nhu_cau", "hang_muc", "so_luong", "vat_lieu",
-                   "dia_chi", "tinh", "khu_vuc", "xe_cau", "thoi_gian", "ghi_chu")
+                   "dia_chi", "tinh", "khu_vuc", "xe_cau", "thoi_gian", "ghi_chu",
+                   "y_dinh")
 _PROFILE_LABELS = {
-    "ten": "T?n", "sdt": "S?T/Zalo", "nhu_cau": "Nhu c?u", "hang_muc": "H?ng m?c",
-    "so_luong": "S? l??ng", "vat_lieu": "V?t li?u/??", "dia_chi": "??a ch?",
-    "tinh": "T?nh/TP", "khu_vuc": "Khu v?c", "xe_cau": "Xe c?u/???ng v?o",
-    "thoi_gian": "Th?i gian", "ghi_chu": "Ghi ch?",
+    "ten": "Tên", "sdt": "SĐT/Zalo", "nhu_cau": "Nhu cầu", "hang_muc": "Hạng mục",
+    "so_luong": "Số lượng", "vat_lieu": "Vật liệu/đá", "dia_chi": "Địa chỉ",
+    "tinh": "Tỉnh/TP", "khu_vuc": "Khu vực", "xe_cau": "Xe cẩu/đường vào",
+    "thoi_gian": "Thời gian", "ghi_chu": "Ghi chú", "y_dinh": "Ý định hiện tại",
 }
 _PHONE_RE = re.compile(r"(?<!\d)(?:\+?84|0)\d{9,10}(?!\d)")
 
@@ -330,6 +331,15 @@ def _followup_mark(psid: str) -> Path:
     return _HIST_DIR / (_psid_path(psid).stem + ".followup")
 
 
+# Ý định do lượt trích hồ sơ (chạy sẵn ở nền mỗi lượt) chấm - không tốn thêm lượt gọi AI.
+_KHONG_NHAC = ("tu choi", "hoan lai")
+
+
+def y_dinh(psid: str) -> str:
+    """Thái độ mua gần nhất của khách: 'quan tam' | 'hoan lai' | 'tu choi' | '' (chưa rõ)."""
+    return str(util.read_json(_profile_path(psid), {}).get("y_dinh") or "").strip().lower()
+
+
 def followup_candidates(after_h: float, max_h: float = 23.75) -> list[tuple[str, str]]:
     """Khách cần nhắc: bot đã trả lời cuối, khách im trong [after_h, max_h) giờ, CHƯA chốt.
 
@@ -365,6 +375,8 @@ def followup_candidates(after_h: float, max_h: float = 23.75) -> list[tuple[str,
         if not (after_h <= age_h < max_h):
             continue
         if (_HIST_DIR / f"{psid}.crm.json").exists():          # đã chốt phiếu -> thôi
+            continue
+        if y_dinh(psid) in _KHONG_NHAC:                        # khách đã từ chối/hoãn -> đừng nhắc
             continue
         mark = _followup_mark(psid)
         if mark.exists() and mark.read_text(encoding="utf-8").strip() == last_user_at:
@@ -877,7 +889,7 @@ def _profile_prompt(profile: dict) -> str:
     lines = [f"{_PROFILE_LABELS[field]}: {profile[field]}" for field in _PROFILE_FIELDS if profile.get(field)]
     if not lines:
         return ""
-    return ("[H? s? kh?ch ?? x?c nh?n - coi l? d? ki?n; KH?NG h?i l?i b?t k? m?c n?o c? gi? tr?]\n"
+    return ("[Hồ sơ khách đã xác nhận - coi là dữ kiện; KHÔNG hỏi lại bất kỳ mục nào có giá trị]\n"
             + "\n".join(lines))
 
 
@@ -885,15 +897,23 @@ def _profile_from_history_sync(psid: str, hist: list) -> dict:
     current = _clean_profile(util.read_json(_profile_path(psid), {}))
     if current["upto"] >= len(hist):
         return current
-    user_lines = [f"Kh?ch: {msg['content']}" for msg in hist
+    user_lines = [f"Khách: {msg['content']}" for msg in hist
                   if msg.get("role") == "user" and isinstance(msg.get("content"), str)]
     if not user_lines:
         return current
     prompt = (
-        "Tr?ch h? s? kh?ch t? c?c tin NH?N C?A KH?CH d??i ??y th?nh JSON. Ch? ghi th?ng tin kh?ch ?? n?i r?; "
-        "kh?ng suy ?o?n, kh?ng l?y d? ki?n do bot g?i ?. M?u thu?n th? d?ng th?ng tin m?i nh?t. "
-        "C?c tr??ng: t?n, S?T/Zalo, nhu c?u, h?ng m?c, s? l??ng, v?t li?u/??, ??a ch?, t?nh/TP, "
-        "khu v?c, xe c?u/???ng v?o, th?i gian, ghi ch?. Tr??ng ch?a c? ph?i l? chu?i r?ng.\n\n"
+        "Trích hồ sơ khách từ các tin NHẮN CỦA KHÁCH dưới đây thành JSON. Chỉ ghi thông tin khách đã nói rõ; "
+        "không suy đoán, không lấy dữ kiện do bot gợi ý. Mâu thuẫn thì dùng thông tin mới nhất. "
+        "Các trường: tên, SĐT/Zalo, nhu cầu, hạng mục, số lượng, vật liệu/đá, địa chỉ, tỉnh/TP, "
+        "khu vực, xe cẩu/đường vào, thời gian, ghi chú. Trường chưa có phải là chuỗi rỗng.\n"
+        "Riêng trường y_dinh (Ý ĐỊNH HIỆN TẠI) là ĐÁNH GIÁ thái độ mua của khách qua lời lẽ và "
+        "giọng điệu ở các tin GẦN NHẤT, chọn ĐÚNG một trong ba giá trị:\n"
+        "- quan tam: đang hỏi mẫu, hỏi giá, cho thông tin, hoặc mới nhắn chưa đủ để kết luận.\n"
+        "- hoan lai: muốn làm nhưng chưa phải lúc - chưa có tiền, chưa có đất, để sang năm, "
+        "đang hỏi giúp người khác, hẹn hôm khác nhắn lại.\n"
+        "- tu choi: không có nhu cầu, nhắn nhầm, bảo đừng nhắn nữa, khó chịu, chửi bới, "
+        "hoặc là bên bán/đại lý chào mời ngược lại.\n"
+        "Không chắc thì để chuỗi rỗng.\n\n"
         + "\n".join(user_lines))
     try:
         resp = _generate(
@@ -908,7 +928,7 @@ def _profile_from_history_sync(psid: str, hist: list) -> dict:
         profile = _clean_profile(json.loads(raw))
         profile["upto"] = len(hist)
     except Exception as e:
-        print(f"[profile] tr?ch l?i psid={psid}: {type(e).__name__}: {e}", file=sys.stderr)
+        print(f"[profile] trích lỗi psid={psid}: {type(e).__name__}: {e}", file=sys.stderr)
         profile = current
     phone = _phones_in_history(hist)
     if phone:
@@ -917,7 +937,7 @@ def _profile_from_history_sync(psid: str, hist: list) -> dict:
         try:
             util.write_json_atomic(_profile_path(psid), profile)
         except Exception as e:
-            print(f"[profile] ghi l?i psid={psid}: {type(e).__name__}: {e}", file=sys.stderr)
+            print(f"[profile] ghi lỗi psid={psid}: {type(e).__name__}: {e}", file=sys.stderr)
     return profile
 
 

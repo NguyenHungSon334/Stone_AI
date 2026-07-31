@@ -54,6 +54,9 @@ _TEXT_MAX = 2000
 # Marker persona chèn khi chuyển chuyên gia (khách KHÔNG thấy). Kèm lý do: <<HANDOFF:lý do ngắn>>.
 _HANDOFF_RE = re.compile(r"<<HANDOFF(?::([^>]*))?>>")
 _IMG_RE = re.compile(r"<<IMG:([^>]+)>>")   # marker ảnh: file_token Lark, bóc ra gửi ảnh riêng
+# Marker persona chèn khi khách KHÓ CHỊU: gửi nốt tin xoa dịu rồi bot im, người thật vào.
+_PAUSE_RE = re.compile(r"<<TAMDUNG(?::([^>]*))?>>")
+_PAUSE_H = 24.0        # im bấy nhiêu giờ; đủ để chuyên gia gọi, không khoá khách vĩnh viễn
 _PHONE_RE = re.compile(r"(?<!\d)(?:\+?84|0)\d{9,10}(?!\d)")   # SĐT VN trong tin khách
 
 # Handoff CƯỠNG BỨC ở code (chặn trước AI, tin cậy 100%): khách gõ tín hiệu tường minh.
@@ -68,6 +71,15 @@ _COMPLAINT_KEYWORDS = ("lừa đảo", "cắt cổ", "chặt chém", "báo công
 # hỗ trợ trực tiếp" -> khách ngồi đợi người vào chat, không ai vào, khách bỏ.
 _HUMAN_HANDOFF_REPLY = ("Dạ nội dung này em nhờ chuyên gia bên em trao đổi với Bác cho chính xác ạ. "
                         "Bác cho em xin SĐT hoặc Zalo, chuyên gia sẽ gọi cho Bác ngay nhé!")
+# Khách đang gắt: KHÔNG xin số, KHÔNG hỏi thêm, KHÔNG chào mời - chỉ nhận lỗi rồi nhường người thật.
+_XOA_DIU_REPLY = ("Dạ em xin ghi nhận phản ánh của Bác ạ. Em rất tiếc vì đã làm Bác không hài lòng. "
+                  "Em báo ngay quản lý bên em liên hệ trực tiếp với Bác để xử lý ạ.")
+
+
+_LY_DO_KHIEU_NAI = "Khách bức xúc/khiếu nại (từ ngữ tiêu cực mạnh)"
+_LY_DO_VIET_HOA = "Khách viết HOA toàn bộ câu (dấu hiệu bức xúc)"
+# Hai lý do này là khách ĐANG KHÓ CHỊU (khác với chỉ xin gặp người thật) -> bot phải im luôn.
+_LY_DO_KHO_CHIU = (_LY_DO_KHIEU_NAI, _LY_DO_VIET_HOA)
 
 
 def _forced_handoff_reason(text: str) -> str | None:
@@ -76,11 +88,11 @@ def _forced_handoff_reason(text: str) -> str | None:
     if any(k in t for k in _HUMAN_KEYWORDS):
         return "Khách chủ động xin gặp người thật"
     if any(k in t for k in _COMPLAINT_KEYWORDS):
-        return "Khách bức xúc/khiếu nại (từ ngữ tiêu cực mạnh)"
+        return _LY_DO_KHIEU_NAI
     raw = (text or "").strip()
     letters = [c for c in raw if c.isalpha()]
     if len(letters) >= 12 and raw == raw.upper() and " " in raw:   # viết HOA cả câu -> đang gắt
-        return "Khách viết HOA toàn bộ câu (dấu hiệu bức xúc)"
+        return _LY_DO_VIET_HOA
     return None
 
 
@@ -133,6 +145,14 @@ def _save_noise_state(psid: str, state: dict) -> None:
 
 def _noise_decision(psid: str, text: str) -> tuple[str, dict]:
     state = _noise_state(psid)
+    # Tạm dừng vì khách khó chịu KHÔNG được tin có nghĩa mở lại: khách gắt tiếp vẫn là tin
+    # có nghĩa, mở ra thì bot lại nhảy vào đúng lúc không nên. Chỉ hết hạn giờ mới mở.
+    het_han = float(state.get("paused_until") or 0)
+    if het_han:
+        if time.time() < het_han:
+            return "blocked", state
+        state = {}                                   # hết hạn tạm dừng -> khách quay lại bình thường
+        _save_noise_state(psid, state)
     if _is_meaningful_text(text):
         if state:
             _save_noise_state(psid, {})
@@ -179,6 +199,23 @@ def _extract_handoff(reply: str) -> tuple[str, str | None]:
         return (reply, None)
     reason = (m.group(1) or "").strip() or "Khách cần chuyên gia (persona không ghi rõ lý do)"
     return (_HANDOFF_RE.sub("", reply).strip(), reason)
+
+
+def _extract_pause(reply: str) -> tuple[str, str | None]:
+    """Bóc marker tạm dừng khỏi tin gửi khách. Trả (reply_sạch, lý_do | None)."""
+    m = _PAUSE_RE.search(reply)
+    if not m:
+        return (reply, None)
+    reason = (m.group(1) or "").strip() or "Khách khó chịu (persona không ghi rõ lý do)"
+    return (_PAUSE_RE.sub("", reply).strip(), reason)
+
+
+def _pause_bot(psid: str, reason: str) -> None:
+    """Bot im với khách này _PAUSE_H giờ. Dùng chung cờ 'stopped' nên bảng điều khiển và
+    vòng follow-up (đều đã lọc theo cờ này) tự động bỏ qua khách, khỏi thêm nhánh mới."""
+    state = _noise_state(psid)
+    state.update(stopped=True, paused_until=time.time() + _PAUSE_H * 3600, reason=reason)
+    _save_noise_state(psid, state)
 
 
 def _extract_images(reply: str) -> tuple[str, list[str]]:
@@ -697,6 +734,8 @@ async def run_followups() -> None:
     for psid, last_user_at in brain.followup_candidates(config.FOLLOWUP_AFTER_H):
         if psid in config.ADMIN_UIDS:
             continue
+        if _noise_state(psid).get("stopped"):   # bot đã cố ý ngưng (nhiễu/sticker) -> đừng đào lại
+            continue
         await send_text(psid, _FOLLOWUP_TEXT)
         brain.mark_followed(psid, last_user_at)
         stats.log_event("followup", psid)
@@ -1126,10 +1165,16 @@ async def _process_inner(psid: str, text: str, user_at: str | None = None) -> No
         # Handoff cưỡng bức (tín hiệu tường minh): chặn trước AI, người thật vào ngay.
         forced = _forced_handoff_reason(text) if not images else None
         if forced:
-            stats.log_event("handoff", psid)
-            await send_text(psid, _HUMAN_HANDOFF_REPLY)
-            await notify_admins(f"🔔 CHUYỂN NGƯỜI THẬT: {await _label(psid)}\n"
-                                f"Lý do: {forced}\nTin khách: {text}")
+            kho_chiu = forced in _LY_DO_KHO_CHIU
+            stats.log_event("khach_kho_chiu" if kho_chiu else "handoff", psid)
+            # Khách đang gắt: câu mời để lại SĐT lúc này chỉ đổ thêm dầu -> xoa dịu rồi im.
+            await send_text(psid, _XOA_DIU_REPLY if kho_chiu else _HUMAN_HANDOFF_REPLY)
+            if kho_chiu:
+                _pause_bot(psid, forced)
+            await notify_admins(f"{'😠 KHÁCH KHÓ CHỊU - BOT ĐÃ NGƯNG NHẮN' if kho_chiu else '🔔 CHUYỂN NGƯỜI THẬT'}"
+                                f": {await _label(psid)}\nPSID: {psid}\nLý do: {forced}\nTin khách: {text}"
+                                + (f"\n➡️ Cần người thật gọi/nhắn cho khách. Bot tự im {_PAUSE_H:g} giờ."
+                                   if kho_chiu else ""))
             await _save_lead_to_crm(psid)
             return
         await send_action(psid, "typing_on")
@@ -1158,9 +1203,23 @@ async def _process_inner(psid: str, text: str, user_at: str | None = None) -> No
                                f"({config.MISSED_AFTER_MIN:g} phút); lỗi kéo dài thì cần người thật vào.")
             return
         reply, handoff_reason = _extract_handoff(reply)
+        reply, pause_reason = _extract_pause(reply)
         reply, img_tokens = _extract_images(reply)
         reply = _bo_marker_thua(reply, psid)
         imgs = await _warm_images(img_tokens)          # tải trước: nhánh nào cũng phải gửi được ảnh
+        if pause_reason:
+            # Khách khó chịu: gửi NỐT tin xoa dịu (im bặt giữa chừng còn khó chịu hơn), rồi im.
+            stats.log_event("khach_kho_chiu", psid)
+            _pause_bot(psid, pause_reason)
+            if reply:
+                await send_text(psid, reply)
+            await notify_admins(f"😠 KHÁCH KHÓ CHỊU - BOT ĐÃ NGƯNG NHẮN: {await _label(psid)}\n"
+                                f"PSID: {psid}\nLý do: {pause_reason}\n"
+                                f"Tin khách: {text}\n"
+                                f"Bot trả lời (tin cuối): {reply}\n"
+                                f"➡️ Cần người thật gọi/nhắn cho khách. Bot tự im {_PAUSE_H:g} giờ.")
+            await _save_lead_to_crm(psid)
+            return
         if handoff_reason:
             # Handoff: gửi câu trả lời + ẢNH cho KHÁCH trước, rồi báo admin (kèm lý do).
             # Ảnh phải gửi ở đây: bot vẫn giữ cuộc chat sau handoff, bỏ ảnh là khách hỏi mẫu

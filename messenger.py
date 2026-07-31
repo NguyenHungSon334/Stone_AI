@@ -25,6 +25,7 @@ from bot_tools import lark_crm, lark_image
 _MAX_IMAGES_PER_MSG = 4   # khớp brain._MAX_NEW_IMAGES
 _IMG_MAX_DIM = 1600       # cạnh dài tối đa gửi FB; ảnh gốc Lark hay 16MB PNG -> FB nghẹn
 _IMG_JPEG_Q = 85
+_IMG_RETRY_GAP_S = 1.0    # chờ trước khi gửi lại ảnh hỏng (dội lại ngay là hỏng tiếp)
 
 
 def _shrink_image(data: bytes, ctype: str) -> tuple[bytes, str]:
@@ -299,15 +300,29 @@ async def _names_from_conversations() -> None:
         print(f"[profile] đọc conversations lỗi: {type(e).__name__}: {e}", file=sys.stderr)
 
 
+_NAMES_LOADED_AT = 0.0            # lần crawl /me/conversations gần nhất
+_NAMES_COOLDOWN_S = 300.0         # crawl lại sớm nhất sau ngần này giây
+_NAMES_LOCK = asyncio.Lock()
+
+
 async def profile_name(psid: str) -> str:
-    """Tên đầy đủ của khách. Nguồn: /me/conversations (cache); miss thì nạp lại 1 lần."""
+    """Tên đầy đủ của khách. Nguồn: /me/conversations (cache); miss thì nạp lại 1 lần.
+
+    Crawl có COOLDOWN + khoá. /me/conversations chỉ trả 500 hội thoại gần nhất, nên khách cũ
+    KHÔNG BAO GIỜ có tên -> mỗi lần hỏi lại kích một crawl 5 trang mới. Trang admin hỏi 50 psid
+    một lượt là 50 crawl (tới 250 request, mỗi cái timeout 15s) -> treo cả trang. Cooldown ép
+    tối đa 1 crawl / 5 phút; trong lúc chờ, tên chưa biết trả rỗng."""
+    global _NAMES_LOADED_AT
     if not config.PAGE_TOKEN:
         return ""
-    if psid not in _NAME_CACHE:
-        await _names_from_conversations()
-    if psid not in _NAME_CACHE:
-        _cache_name(psid, "")                 # vẫn không có -> cache rỗng, khỏi gọi lặp
-    return _NAME_CACHE[psid]
+    if psid not in _NAME_CACHE and time.time() - _NAMES_LOADED_AT >= _NAMES_COOLDOWN_S:
+        async with _NAMES_LOCK:
+            # Kiểm lại trong khoá: 50 lời gọi cùng lúc thì chỉ đứa đầu crawl, phần còn lại
+            # dùng cache vừa nạp.
+            if time.time() - _NAMES_LOADED_AT >= _NAMES_COOLDOWN_S:
+                _NAMES_LOADED_AT = time.time()
+                await _names_from_conversations()
+    return _NAME_CACHE.get(psid, "")
 
 
 async def _label(psid: str) -> str:
@@ -637,28 +652,42 @@ async def _send_failed(tag: str, code: int, detail: str, psid: str) -> None:
         hint = "\n➡️ Ngoài cửa sổ 24h của FB - không nhắn chủ động được nữa."
     elif fb_code == 200:
         hint = "\n➡️ Thiếu quyền (pages_manage_engagement / pages_messaging) trên token page."
+    if fb_code == 100 and tag == "img upload":
+        hint = ("\n➡️ FB nghẹn file đính kèm (đã thử lại + ép JPEG vẫn hỏng). "
+                "Kiểm tra ảnh trong Lark Base có mở được không.")
     who = await _label(psid) if psid else "(không rõ)"
+    # Ảnh gửi SAU text (xem _process_inner) -> ảnh hỏng thì khách VẪN đọc được nội dung tư vấn,
+    # chỉ thiếu hình. Nói "không nhận được tin" ở ca này là báo động quá mức, admin sẽ quen tay
+    # bỏ qua rồi bỏ sót cả cảnh báo thật.
+    thiet_hai = ("khách nhận được chữ nhưng THIẾU ẢNH" if tag == "img upload"
+                 else "khách KHÔNG nhận được tin")
     await alert_admins(f"fb:{tag}:{code}",
-                       f"🔴 GỬI FB HỎNG ({tag}) - khách KHÔNG nhận được tin\n"
+                       f"🔴 GỬI FB HỎNG ({tag}) - {thiet_hai}\n"
                        f"Khách: {who}\nHTTP {code}: {detail}{hint}")
 
 
 async def _fb_post(url: str, *, payload=None, data=None, files=None,
-                   timeout: float = 20.0, tag: str = "send", psid: str = "") -> bool:
+                   timeout: float = 20.0, tag: str = "send", psid: str = "",
+                   im_lang: bool = False) -> bool:
     """POST tới FB Graph kèm access_token. <400 -> True. Lỗi/≥400 -> log [tag] + báo admin + False
-    (không ném). Gom mọi chỗ gọi Send API về 1 chỗ (timeout/log/cảnh báo đồng nhất)."""
+    (không ném). Gom mọi chỗ gọi Send API về 1 chỗ (timeout/log/cảnh báo đồng nhất).
+
+    im_lang=True: vẫn log ra stderr nhưng KHÔNG báo admin - dành cho lượt thử đầu của thứ có
+    retry (báo ngay lượt đầu = admin nhận cảnh báo cho ca tự khỏi ở lượt sau)."""
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=10.0)) as c:
             r = await c.post(url, params={"access_token": config.PAGE_TOKEN},
                              json=payload, data=data, files=files)
             if r.status_code >= 400:
                 print(f"[{tag}] {r.status_code}: {r.text[:300]}", file=sys.stderr)
-                await _send_failed(tag, r.status_code, r.text[:300], psid)
+                if not im_lang:
+                    await _send_failed(tag, r.status_code, r.text[:300], psid)
                 return False
             return True
     except Exception as e:
         print(f"[{tag}] {type(e).__name__}: {e}", file=sys.stderr)
-        await _send_failed(tag, 0, f"{type(e).__name__}: {e}", psid)
+        if not im_lang:
+            await _send_failed(tag, 0, f"{type(e).__name__}: {e}", psid)
         return False
 
 
@@ -673,20 +702,53 @@ async def send_text(psid: str, text: str) -> None:
             break                                      # 1 chunk lỗi -> dừng, khỏi gửi tiếp rối
 
 
+def _ep_jpeg(data: bytes) -> tuple[bytes, str] | None:
+    """Ép ảnh về JPEG baseline. None nếu không giải mã được (giữ nguyên bản gốc mà gửi lại)."""
+    try:
+        import io
+
+        from PIL import Image
+        im = Image.open(io.BytesIO(data))
+        if im.mode != "RGB":
+            im = im.convert("RGB")
+        buf = io.BytesIO()
+        im.save(buf, format="JPEG", quality=_IMG_JPEG_Q, optimize=True)
+        return (buf.getvalue(), "image/jpeg")
+    except Exception as e:
+        print(f"[img] ép JPEG lỗi: {type(e).__name__}: {e}", file=sys.stderr)
+        return None
+
+
 async def send_image_bytes(psid: str, data: bytes, ctype: str = "image/jpeg") -> None:
     """Gửi ảnh bằng CÁCH UPLOAD bytes thẳng (multipart). FB không phải tự fetch URL nữa
-    -> ảnh tới ngay sau text, không trickle. Bytes đã warm sẵn nên gửi luôn."""
+    -> ảnh tới ngay sau text, không trickle. Bytes đã warm sẵn nên gửi luôn.
+
+    THỬ LẠI 1 lần khi hỏng: FB hay trả '#100 Upload attachment failure' (subcode 2018047)
+    chập chờn dù file hợp lệ. Lượt 2 ép về JPEG baseline - loại nốt khả năng FB nghẹn PNG.
+    Lượt đầu im lặng (không báo admin) để cảnh báo chỉ nổ khi ĐÃ hết cách."""
     if not (config.PAGE_TOKEN and psid and data):
         return
     url = _SEND_API.format(ver=config.GRAPH_VER)
-    ext = "png" if "png" in (ctype or "") else "jpg"
-    form = {
-        "recipient": json.dumps({"id": psid}),
-        "messaging_type": "RESPONSE",
-        "message": json.dumps({"attachment": {"type": "image", "payload": {"is_reusable": True}}}),
-    }
-    files = {"filedata": (f"image.{ext}", data, ctype or "image/jpeg")}
-    await _fb_post(url, data=form, files=files, timeout=30.0, tag="img upload", psid=psid)
+
+    async def _thu(payload: bytes, ct: str, im_lang: bool) -> bool:
+        ext = "png" if "png" in (ct or "") else "jpg"
+        form = {
+            "recipient": json.dumps({"id": psid}),
+            "messaging_type": "RESPONSE",
+            "message": json.dumps({"attachment": {"type": "image",
+                                                  "payload": {"is_reusable": True}}}),
+        }
+        files = {"filedata": (f"image.{ext}", payload, ct or "image/jpeg")}
+        return await _fb_post(url, data=form, files=files, timeout=30.0,
+                              tag="img upload", psid=psid, im_lang=im_lang)
+
+    if await _thu(data, ctype, im_lang=True):
+        return
+    await asyncio.sleep(_IMG_RETRY_GAP_S)                 # để FB thở, đừng dội lại ngay
+    lai = _ep_jpeg(data) if "jpeg" not in (ctype or "") else None
+    payload, ct = lai if lai else (data, ctype)
+    if await _thu(payload, ct, im_lang=False):
+        print(f"[img upload] thử lại THÀNH CÔNG psid={psid}", file=sys.stderr)
 
 
 async def send_action(psid: str, action: str = "typing_on") -> None:
@@ -1049,6 +1111,15 @@ async def _warm_images(img_tokens: list[str]) -> list[tuple[bytes, str]]:
     return imgs
 
 
+async def _send_images(psid: str, imgs: list[tuple[bytes, str]]) -> None:
+    """Gửi loạt ảnh, CÓ GIÃN CÁCH. Dội 4 attachment liên tiếp là FB hay trả
+    '#100 Upload attachment failure' - text đã có giãn cách từ lâu, ảnh thì chưa."""
+    for i, (data, ctype) in enumerate(imgs):
+        if i:
+            await asyncio.sleep(_SEND_GAP_S)
+        await send_image_bytes(psid, data, ctype)
+
+
 async def handle_event(psid: str, text: str, user_at: str | None = None) -> None:
     """Nhận 1 tin: gom vào buffer khách + hẹn giờ chốt. Nhiều tin dồn -> gom, trả 1 lần.
 
@@ -1227,8 +1298,7 @@ async def _process_inner(psid: str, text: str, user_at: str | None = None) -> No
             stats.log_event("handoff", psid, duration_s=time.monotonic() - t0)
             if reply:
                 await send_text(psid, reply)
-            for data, ctype in imgs:
-                await send_image_bytes(psid, data, ctype)
+            await _send_images(psid, imgs)
             await notify_admins(f"🔔 KHÁCH CẦN CHUYÊN GIA: {await _label(psid)}\n"
                                 f"Lý do: {handoff_reason}\n\n{reply}")
             await _save_lead_to_crm(psid)
@@ -1240,8 +1310,7 @@ async def _process_inner(psid: str, text: str, user_at: str | None = None) -> No
                 if i:
                     await asyncio.sleep(_SEND_GAP_S)   # giãn giữa các tin -> FB không rớt/đảo (hết "nuốt chữ")
                 await send_text(psid, chunk)
-        for data, ctype in imgs:
-            await send_image_bytes(psid, data, ctype)
+        await _send_images(psid, imgs)
         # Thông báo admin SAU khi đã trả lời khách (không bắt khách chờ). Admin tự nhắn thì bỏ qua.
         if psid not in config.ADMIN_UIDS:
             if is_new:

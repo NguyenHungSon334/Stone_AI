@@ -12,6 +12,7 @@ Tải cao thì gom batch hoặc hàng đợi sau.
 """
 import sys
 import threading
+import time
 
 import alerts
 import config
@@ -98,18 +99,30 @@ def mirror_event(row: dict) -> None:
     _run(fn)
 
 
-def list_psids() -> list | None:
+_PSIDS_CACHE: tuple[float, list] | None = None
+_PSIDS_TTL_S = 60.0       # danh sách khách đổi chậm; dashboard tự làm mới mỗi vài giây
+
+
+def list_psids(force: bool = False) -> list | None:
     """Danh sách psid có trên Firebase (shallow - chỉ lấy key, không tải nội dung chat).
 
     None = Firebase tắt/lỗi. Dùng để dashboard thấy ĐỦ khách của cả hệ thống, không chỉ khách
     mà máy này tình cờ có cache.
+
+    Cache TTL 60s: dashboard làm mới nền liên tục, mỗi lần lại một vòng mạng tới Firebase
+    (~1s) chỉ để lấy đúng bộ key gần như không đổi.
     """
+    global _PSIDS_CACHE
+    if not force and _PSIDS_CACHE and time.time() - _PSIDS_CACHE[0] < _PSIDS_TTL_S:
+        return _PSIDS_CACHE[1]
     if not _init():
         return None
     try:
         from firebase_admin import db
         data = db.reference("conversations").get(shallow=True)
-        return sorted(data.keys()) if isinstance(data, dict) else []
+        out = sorted(data.keys()) if isinstance(data, dict) else []
+        _PSIDS_CACHE = (time.time(), out)
+        return out
     except Exception as e:
         print(f"[fb] list psids lỗi: {type(e).__name__}: {e}", file=sys.stderr)
         return None
@@ -237,10 +250,31 @@ def fetch_conversation(psid: str) -> list | None:
         return None
 
 
+def quen_cache_psids() -> None:
+    """Bỏ cache danh sách psid. Gọi sau khi xoá khách, không thì khách vừa xoá còn hiện 60s."""
+    global _PSIDS_CACHE
+    _PSIDS_CACHE = None
+
+
+def delete_conversation(psid: str) -> bool:
+    """Xoá lịch sử 1 khách trên Firebase. True = đã xoá. False = Firebase tắt/lỗi. Đồng bộ."""
+    quen_cache_psids()
+    if not _init():
+        return False
+    try:
+        from firebase_admin import db
+        db.reference(f"conversations/{_safe(psid)}").delete()
+        return True
+    except Exception as e:
+        print(f"[fb] xoá hội thoại {psid} lỗi: {type(e).__name__}: {e}", file=sys.stderr)
+        return False
+
+
 def clear_all() -> bool:
     """Xóa TOÀN BỘ conversations + stats trên Firebase (reset từ đầu). KHÔNG hồi được.
 
     True = đã xóa (Firebase bật + chạy xong). False = Firebase tắt/lỗi. Đồng bộ (gọi từ admin)."""
+    quen_cache_psids()
     if not _init():
         return False
     try:

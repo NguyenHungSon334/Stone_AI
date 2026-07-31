@@ -91,35 +91,53 @@ def _last_text(msgs: list) -> str:
 
 
 @router.get("/api/customers")
-async def customers(request: Request):
+async def customers(request: Request, limit: int = 50, offset: int = 0, q: str = ""):
     """Khách của CẢ HỆ THỐNG: gộp psid trên Firebase (nguồn chính) với cache local.
 
-    Chỉ đọc local thì dashboard mỗi máy hiện một mảnh - container dựng lại là trắng danh sách
-    dù cloud vẫn đủ. Nội dung chat vẫn đọc qua brain (cache local, miss thì kéo Firebase)."""
+    PHÂN TRANG. Bản cũ đọc nội dung chat của MỌI khách mỗi lần mở tab -> vài trăm khách là
+    treo cả giây và dựng cả nghìn dòng DOM. Giờ xếp thứ tự bằng mtime file (không mở file),
+    chỉ đọc nội dung đúng `limit` khách của trang đang xem."""
     _check_token(request)
-    psids: list[str] = []
+    limit = max(1, min(limit, 200))
+    offset = max(0, offset)
+
+    # (psid, mốc sắp xếp). mtime lấy từ metadata thư mục - không đụng nội dung file.
+    xep: list[tuple[str, float]] = []
+    co_local: set[str] = set()
     if _HIST_DIR.exists():
-        psids = [p.stem for p in _HIST_DIR.glob("*.json")
-                 if not p.name.endswith((".crm.json", ".sum.json"))]
+        for p in _HIST_DIR.glob("*.json"):
+            if p.name.endswith((".crm.json", ".sum.json")):
+                continue
+            co_local.add(p.stem)
+            xep.append((p.stem, p.stat().st_mtime))
     tren_cloud = fb.list_psids()
     if tren_cloud:
-        psids += [p for p in tren_cloud if p not in psids]
+        xep += [(p, 0.0) for p in tren_cloud if p not in co_local]   # chưa có cache -> xuống cuối
+    xep.sort(key=lambda r: r[1], reverse=True)
 
+    q = q.strip().lower()
+    if q:
+        loc = []
+        for psid, mt in xep:
+            if q in psid.lower() or q in (await _profile_name(psid)).lower():
+                loc.append((psid, mt))
+        xep = loc
+
+    total = len(xep)
     out = []
-    for psid in psids:
+    for psid, mtime in xep[offset:offset + limit]:
         try:
             msgs = brain.load_history(psid)         # local trước, miss -> Firebase
             if not msgs:
                 continue
-            p = _HIST_DIR / f"{util.safe_psid(psid)}.json"
-            last_at = (datetime.fromtimestamp(p.stat().st_mtime).isoformat(timespec="minutes")
-                       if p.exists() else (msgs[-1].get("at") or "")[:16])
+            last_at = (datetime.fromtimestamp(mtime).isoformat(timespec="minutes")
+                       if mtime else (msgs[-1].get("at") or "")[:16])
             out.append({"psid": psid, "name": await _profile_name(psid), "messages": len(msgs),
                         "last_at": last_at, "last_text": _last_text(msgs)[:120]})
         except Exception as e:
             print(f"[admin] đọc khách {psid} lỗi: {type(e).__name__}: {e}", file=sys.stderr)
-    out.sort(key=lambda r: r["last_at"], reverse=True)
-    return {"customers": out}
+    return {"customers": out, "total": total, "offset": offset, "limit": limit,
+            "has_more": offset + limit < total}
 
 
 @router.get("/api/customers/{psid}")
@@ -134,6 +152,26 @@ async def customer_detail(request: Request, psid: str):
     clean = [{"role": m.get("role"), "text": m["content"], "at": m.get("at", "")}
              for m in msgs if isinstance(m.get("content"), str)]
     return {"psid": psid, "name": await _profile_name(util.safe_psid(psid)), "messages": clean}
+
+
+@router.delete("/api/customers/{psid}")
+async def delete_customer(request: Request, psid: str):
+    """Xoá hội thoại của MỘT khách: log + sidecar local (.crm/.sum/.followup/.images...) và
+    node trên Firebase. KHÔNG hồi được. Stats chung giữ nguyên (số liệu tổng không méo)."""
+    _check_token(request)
+    stem = util.safe_psid(psid)
+    removed = 0
+    for p in _HIST_DIR.glob(f"{stem}.*"):
+        if p.is_file():
+            try:
+                p.unlink()
+                removed += 1
+            except Exception as e:
+                print(f"[admin] xoá {p.name} lỗi: {type(e).__name__}: {e}", file=sys.stderr)
+    fb_ok = fb.delete_conversation(stem)
+    print(f"[admin] xoá khách {psid}: {removed} file local, firebase={fb_ok}", file=sys.stderr)
+    return {"ok": True, "removed_files": removed, "firebase_deleted": fb_ok,
+            "message": f"đã xoá {removed} file local" + (" + Firebase" if fb_ok else " (Firebase tắt/lỗi)")}
 
 
 @router.get("/api/settings")

@@ -284,10 +284,19 @@ td .psid{color:var(--ink);font-weight:700}
       <h1>Khách hàng</h1>
     </div>
     <div id="customerList">
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap">
+        <input id="custSearch" placeholder="Tìm theo tên hoặc PSID..." spellcheck="false"
+               style="flex:1;min-width:220px;padding:10px 12px;border:1px solid var(--hairline);
+                      border-radius:8px;background:var(--surface-soft);color:inherit;font:inherit">
+        <span class="label" id="custCount" style="color:var(--muted)"></span>
+      </div>
       <table>
-        <thead><tr><th>Tên khách</th><th>PSID</th><th>Số tin</th><th>Lần cuối</th><th>Tin gần nhất</th></tr></thead>
+        <thead><tr><th>Tên khách</th><th>PSID</th><th>Số tin</th><th>Lần cuối</th><th>Tin gần nhất</th><th></th></tr></thead>
         <tbody id="customerRows"></tbody>
       </table>
+      <div style="margin-top:16px;text-align:center">
+        <button class="btn small hidden" id="custMore" onclick="loadMoreCustomers()">Tải thêm</button>
+      </div>
     </div>
     <div id="customerDetail" class="hidden">
       <button class="btn small" onclick="showCustomerList()">&larr; Danh sách</button>
@@ -414,9 +423,9 @@ let _pending = 0;
 function loadStart() { _pending++; document.getElementById("loadbar").classList.add("on"); }
 function loadEnd() { if (--_pending <= 0) { _pending = 0; document.getElementById("loadbar").classList.remove("on"); } }
 
-const api = (path, silent = false) => {
+const api = (path, silent = false, opts = {}) => {
   if (!silent) loadStart();                       // refresh nền (silent) không nhấp nháy thanh loading
-  return fetch(path + (path.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(TOKEN))
+  return fetch(path + (path.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(TOKEN), opts)
     .then(r => { if (!r.ok) throw new Error("HTTP " + r.status); markConn(true); return r.json(); })
     .catch(e => { markConn(false); throw e; })     // backend chết/fetch lỗi -> đánh dấu MẤT KẾT NỐI
     .finally(() => { if (!silent) loadEnd(); });
@@ -510,21 +519,61 @@ async function loadOverview(silent = false) {
   } catch (e) { if (!silent) toast("Tải thống kê lỗi: " + e.message, false); }
 }
 
-/* ===== Khách hàng ===== */
-async function loadCustomers(silent = false) {
+/* ===== Khách hàng =====
+   Phân trang: chỉ kéo 50 khách/lần. Kéo hết một lượt là backend đọc mọi file chat và
+   trình duyệt dựng cả nghìn dòng -> tab đơ mỗi lần mở. */
+const CUST_PAGE = 50;
+let _custLoaded = 0, _custQ = "";
+
+function custRow(c) {
+  return `<tr class="row" onclick="openCustomer('${c.psid}')">
+    <td><span class="psid">${escapeHtml(c.name) || "(không rõ tên)"}</span></td>
+    <td style="color:var(--muted)">${c.psid}</td><td>${c.messages}</td>
+    <td>${c.last_at.replace("T", " ")}</td><td>${escapeHtml(c.last_text)}</td>
+    <td style="text-align:right"><button class="btn small" title="Xoá hội thoại này"
+        onclick="event.stopPropagation();deleteCustomer('${c.psid}', this)">Xoá</button></td></tr>`;
+}
+
+async function loadCustomers(silent = false, more = false) {
   const rows = document.getElementById("customerRows");
-  if (!silent && !rows.children.length)
+  if (!silent && !more && !rows.children.length)
     rows.innerHTML = Array(4).fill(0).map(() =>
-      `<tr><td colspan="5" class="skel" style="height:20px"></td></tr>`).join("");
+      `<tr><td colspan="6" class="skel" style="height:20px"></td></tr>`).join("");
+  // Không "more" = nạp lại đúng số dòng đang hiện (live refresh không được thu nhỏ danh sách).
+  const offset = more ? _custLoaded : 0;
+  const limit = more ? CUST_PAGE : Math.min(200, Math.max(CUST_PAGE, _custLoaded));
   try {
-    const d = await api("/admin/api/customers", silent);
-    document.getElementById("customerRows").innerHTML = d.customers.length
-      ? d.customers.map(c => `<tr class="row" onclick="openCustomer('${c.psid}')">
-          <td><span class="psid">${escapeHtml(c.name) || "(không rõ tên)"}</span></td>
-          <td style="color:var(--muted)">${c.psid}</td><td>${c.messages}</td>
-          <td>${c.last_at.replace("T", " ")}</td><td>${escapeHtml(c.last_text)}</td></tr>`).join("")
-      : `<tr><td colspan="5" style="color:var(--muted)">Chưa có hội thoại nào.</td></tr>`;
+    const d = await api(`/admin/api/customers?offset=${offset}&limit=${limit}`
+                        + (_custQ ? "&q=" + encodeURIComponent(_custQ) : ""), silent);
+    const html = d.customers.map(custRow).join("");
+    if (more) { rows.insertAdjacentHTML("beforeend", html); _custLoaded += d.customers.length; }
+    else { rows.innerHTML = html || `<tr><td colspan="6" style="color:var(--muted)">Chưa có hội thoại nào.</td></tr>`;
+           _custLoaded = d.customers.length; }
+    document.getElementById("custCount").textContent = `${_custLoaded}/${d.total} khách`;
+    document.getElementById("custMore").classList.toggle("hidden", _custLoaded >= d.total);
   } catch (e) { if (!silent) toast("Tải khách lỗi: " + e.message, false); }
+}
+
+function loadMoreCustomers() { loadCustomers(false, true); }
+
+let _custTimer = null;
+document.getElementById("custSearch").oninput = e => {
+  clearTimeout(_custTimer);
+  const v = e.target.value;
+  _custTimer = setTimeout(() => { _custQ = v; _custLoaded = 0; loadCustomers(); }, 300);
+};
+
+async function deleteCustomer(psid, btn) {
+  if (!confirm("Xoá toàn bộ hội thoại của khách " + psid + "?\nKhông khôi phục được."))
+    return;
+  btn.disabled = true;
+  try {
+    const d = await api("/admin/api/customers/" + encodeURIComponent(psid), false, {method: "DELETE"});
+    toast(d.message);
+    btn.closest("tr").remove();
+    _custLoaded = Math.max(0, _custLoaded - 1);
+    if (_curPsid === psid) showCustomerList();
+  } catch (e) { btn.disabled = false; toast("Xoá lỗi: " + e.message, false); }
 }
 
 function showCustomerList() {

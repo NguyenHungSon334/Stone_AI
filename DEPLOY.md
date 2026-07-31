@@ -16,6 +16,11 @@ State (lịch sử khách, stats, CRM meta, persona, .env) nằm trên VPS ở `
 | Meta App | `2073944916564638` |
 | Page | `Hồn Đá - Lăng Mộ Đá Gia Tộc` (`122094807350018300`) |
 
+> **Máy dev dùng App KHÁC:** `1674782393625789` (tên "Test"), page `604876159375634`. Hai môi
+> trường bắn cảnh báo vào **cùng group Lark**, nên một tin "🔴 token chết" chưa chắc là của
+> production - soi `debug_token` rồi xem `application` trả về tên gì (lệnh ở mục Chẩn đoán).
+> Chi tiết bảng đối chiếu + bảng mã lỗi token: `README.md` mục **Token Facebook**.
+
 VPS chạy **2 dự án** cùng lúc, mỗi cái compose riêng:
 
 | Container | Thư mục | Trần RAM | Đỉnh đã chạm |
@@ -202,7 +207,7 @@ gcloud compute ssh hon-da-vps $Z --command="docker logs chatbot-mess-bot-1 --sin
 # khách cũ quay lại
 gcloud compute ssh hon-da-vps $Z --command="docker logs chatbot-mess-bot-1 --since 30m 2>&1 | grep quaylai || echo '(khong co)'"
 
-# hạn token + scope
+# hạn token + scope (production). Đọc: is_valid, expires_at, scopes, application
 gcloud compute ssh hon-da-vps $Z --command="cd /home/admin/chatbot-mess; T=\$(sudo grep -m1 '^MSGR_PAGE_TOKEN=' .env | cut -d= -f2-); S=\$(sudo grep -m1 '^MSGR_APP_SECRET=' .env | cut -d= -f2-); curl -s \"https://graph.facebook.com/v21.0/debug_token?input_token=\$T&access_token=2073944916564638%7C\$S\" | python3 -m json.tool"
 
 # RAM từng container + đỉnh đã chạm
@@ -211,3 +216,15 @@ gcloud compute ssh hon-da-vps $Z --command="docker stats --no-stream"
 
 `grep` không khớp trả exit code 1, gcloud dịch thành "SSH failed" - thêm `|| echo` để phân biệt
 lỗi thật với "không có dòng nào".
+
+Cảnh báo "token chết" đến từ đâu? Soi token của MÁY DEV bằng app id của nó rồi so:
+
+```bash
+# chạy ở repo trên máy dev - application phải ra "Test", KHÔNG phải app production
+T=$(grep -m1 '^MSGR_PAGE_TOKEN=' .env | cut -d= -f2-)
+S=$(grep -m1 '^MSGR_APP_SECRET=' .env | cut -d= -f2-)
+curl -s "https://graph.facebook.com/v21.0/debug_token?input_token=$T&access_token=1674782393625789|$S" | python3 -m json.tool
+```
+
+Ra `"application": "Test"` = cảnh báo của máy dev, production không liên quan. Tắt bot local
+(hoặc để trống `LARK_WEBHOOK_URL` trong `.env` dev) là hết nhiễu.

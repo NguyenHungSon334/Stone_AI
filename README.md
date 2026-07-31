@@ -39,19 +39,77 @@ Meta Developers > App > Messenger > Webhooks:
 
 ## Token Facebook
 
-**Hiện trạng (27/07/2026):** Page token vĩnh viễn (`expires_at: 0`), sinh từ **user token dài
-hạn**. App `2073944916564638`, Page `Hồn Đá - Lăng Mộ Đá Gia Tộc` (`122094807350018300`).
+### HAI môi trường, HAI App khác nhau - nhìn nhầm là chẩn đoán sai (31/07/2026)
+
+| | **PRODUCTION** (VPS) | **DEV** (máy lập trình) |
+|---|---|---|
+| Meta App | `2073944916564638` | `1674782393625789` (tên hiển thị: **"Test"**) |
+| Page | `Hồn Đá - Lăng Mộ Đá Gia Tộc` (`122094807350018300`) | `604876159375634` |
+| `.env` | `/home/admin/chatbot-mess/.env` trên VPS | `.env` trong repo |
+| Khách thật | CÓ | không |
+
+**App Secret và Page Token phải cùng một App** - nên hai môi trường KHÔNG dùng chung `.env`
+được. `.env` trong repo là bản DEV: token của app "Test", trỏ page test.
+
+**Cả hai đều bắn cảnh báo vào CÙNG một group Lark** (`LARK_WEBHOOK_URL` giống nhau). Chạy bot
+local trong lúc VPS đang chạy = group nhận cảnh báo trùng, và cảnh báo "token chết" của máy dev
+trông y hệt cảnh báo của production. **Trước khi hoảng vì một cảnh báo, xác định nó của môi
+trường nào**: soi token trong `.env` tương ứng (lệnh ở mục dưới), `application` trả về `"Test"`
+tức là máy dev, không phải Page thật.
+
+Muốn chạy local mà không làm nhiễu group: để trống `LARK_WEBHOOK_URL` trong `.env` dev.
+
+### Trạng thái token production (27/07/2026)
+
+Page token vĩnh viễn (`expires_at: 0`), sinh từ **user token dài hạn**.
 
 Scope đang có (8): `pages_messaging`, `pages_manage_engagement`, `pages_manage_metadata`,
 `pages_read_engagement`, `pages_read_user_content`, `pages_show_list`, `business_management`,
 `public_profile`.
 
-### Hai cái bẫy đã dính thật, đọc trước khi đụng token
+### Soi token bất kỳ (đọc được lý do chết, không phải đoán)
 
-**1. KHÔNG đổi token/secret qua dashboard.** `admin.py` `_ENV_EDITABLE` chỉ cho ghi 4 key:
-`BOT_MODEL`, `BOT_ADMIN_UIDS`, `BOT_PER_PSID_RATE_S`, `BOT_MAX_CONCURRENT`. Ô nhập cho
-`MSGR_PAGE_TOKEN` / `MSGR_APP_SECRET` / `GEMINI_API_KEY` vẫn hiện trên giao diện nhưng
-backend **vứt im lặng** và trả `{"ok": true}` - tưởng đã lưu mà không có gì đổi. Sửa tay:
+```bash
+# chạy tại thư mục chứa .env cần soi
+T=$(grep -m1 '^MSGR_PAGE_TOKEN=' .env | cut -d= -f2-)
+S=$(grep -m1 '^MSGR_APP_SECRET=' .env | cut -d= -f2-)
+A=<app-id-cua-.env-do>       # prod 2073944916564638 | dev 1674782393625789
+curl -s "https://graph.facebook.com/v21.0/debug_token?input_token=$T&access_token=$A|$S" \
+  | python3 -m json.tool
+```
+
+Đọc kết quả:
+
+| Dấu hiệu | Nghĩa | Xử lý |
+|---|---|---|
+| `is_valid: true`, `expires_at: 0` | Khoẻ, vĩnh viễn | không làm gì |
+| `application` ra tên app **lạ** | Đang soi nhầm `.env` / nhầm môi trường | soi lại đúng file |
+| `#190` subcode **458** + `scopes: []` | Tài khoản cấp token **đã gỡ quyền cho app**, hoặc mất vai trò trong app đang ở Development mode | cấp lại quyền rồi sinh token mới |
+| `#190` subcode **463** / **466** | Token **hết hạn** (bản ngắn hạn 60 ngày) | sinh lại từ user token DÀI HẠN |
+| `#190` subcode **460** | Chủ tài khoản **đổi mật khẩu** | sinh token mới |
+| `#190` không có `data` | Soi bằng App Secret của app KHÁC | dùng đúng cặp app id + secret |
+
+Đã dính subcode **458** ngày 31/07/2026 trên `.env` dev: token app "Test" còn nguyên chuỗi,
+`expires_at: 0`, `data_access_expires_at` tới 29/10/2026, nhưng `scopes` rỗng - quyền bị rút,
+token thành giấy lộn. **`expires_at: 0` KHÔNG có nghĩa là token sống.**
+
+### Một cái bẫy đã dính thật, đọc trước khi đụng token
+
+**Token và App Secret phải CÙNG một App.** Lấy token ở app A mà `.env` giữ secret của app B
+thì `verify_signature` (`messenger.py`) fail-closed, mọi webhook trả **403** và bot câm - trong
+khi lưới tin rơi vẫn trả lời bù qua Graph API nên nhìn như "lúc được lúc không".
+
+### Đổi token: qua dashboard hoặc sửa tay
+
+Dashboard **ghi được** secret: tab Cài đặt > ô `Page Access Token` > Lưu > Restart. Đường này
+đi qua `admin.py` `_CONFIG_FIELDS` / `POST /api/config`, có validate và **để trống = giữ giá trị
+cũ** (không thể vô tình xoá token bằng cách bỏ trống ô).
+
+> Đừng nhầm với `_ENV_EDITABLE` cũng trong `admin.py`: đó là đường `POST /api/settings` đời
+> đầu, chỉ nhận 4 key thường (`BOT_MODEL`, `BOT_ADMIN_UIDS`, `BOT_PER_PSID_RATE_S`,
+> `BOT_MAX_CONCURRENT`) và KHÔNG đụng tới secret.
+
+Sửa tay trên VPS khi không vào được dashboard:
 
 ```bash
 gcloud compute ssh hon-da-vps --zone=us-central1-a
@@ -59,14 +117,15 @@ cd ~/chatbot-mess && sudo nano .env      # file thuộc user admin -> phải sud
 docker compose restart bot
 ```
 
-**2. Token và App Secret phải CÙNG một App.** Lấy token ở app A mà `.env` giữ secret của app B
-thì `verify_signature` (`messenger.py:207`) fail-closed, mọi webhook trả **403** và bot câm -
-trong khi lưới tin rơi vẫn trả lời bù qua Graph API nên nhìn như "lúc được lúc không".
-
 ### Lấy lại token vĩnh viễn (khi token chết)
 
 Page token chỉ vĩnh viễn khi sinh từ **user token dài hạn**. Đổi thẳng từ page token ngắn hạn
 chỉ ra 60 ngày.
+
+> Dính subcode **458** (quyền bị rút) thì làm **bước 0** trước, không thì Explorer sinh ra
+> token cũng chết y như cũ: developers.facebook.com > App > **App Roles** - tài khoản sinh token
+> phải còn vai trò Admin/Developer/Tester (bắt buộc khi app ở **Development mode**). Rồi
+> facebook.com/settings?tab=business_tools > gỡ app > cấp lại từ đầu để xoá sạch `declined`.
 
 1. Graph API Explorer, chọn đúng App, để **User Token**, tick `pages_show_list`,
    `pages_messaging`, `pages_read_engagement`, `pages_manage_metadata`,
@@ -157,6 +216,21 @@ tải bytes từ Lark rồi **upload thẳng lên FB (multipart)** - không qua 
 Cần `.env`: `LARK_APP_ID`, `LARK_APP_SECRET` (app đã được chia sẻ Base), quyền `bitable:read`
 + `drive:read`. `LARK_BASE_APP_TOKEN` / `LARK_TABLE_ID` có mặc định hardcode trong `config.py`
 - dùng Base khác thì phải override trong `.env`.
+
+### Khi FB nuốt không trôi ảnh (`#100` subcode `2018047`)
+
+Thứ tự gửi là **text trước, ảnh sau** (`messenger.py` `_process_inner`). Nên ảnh hỏng thì khách
+**vẫn đọc được nội dung tư vấn, chỉ thiếu hình** - cảnh báo Lark cho tag `img upload` nói đúng
+như vậy, đừng đọc thành "khách không nhận được gì".
+
+`Upload attachment failure` hay nổ chập chờn dù file hoàn toàn hợp lệ. Hai lớp đỡ:
+
+- `_send_images()` **giãn `_SEND_GAP_S` giữa các ảnh** - dội 4 attachment liên tiếp là FB nghẹn.
+- `send_image_bytes()` **thử lại 1 lần**, lượt 2 ép về JPEG baseline. Lượt đầu hỏng chỉ ghi
+  stderr, **không báo Lark** - báo ngay lượt đầu thì admin toàn nhận cảnh báo cho ca tự khỏi.
+
+Còn cảnh báo sau cả hai lớp này = ảnh đó có vấn đề thật, mở thử record trong Lark Base.
+Test: `tests/test_img_send.py`.
 
 ## Khách cũ quay lại (`returning.py`)
 

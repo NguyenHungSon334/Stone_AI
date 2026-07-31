@@ -99,9 +99,11 @@ def get_image_tokens(product_id: str) -> list[str]:
 
 
 def download_media(file_token: str) -> tuple[bytes, str]:
-    """Tải bytes 1 ảnh Lark (dùng cho endpoint proxy /img). Trả (bytes, content_type).
+    """Tải bytes 1 ảnh Lark. Trả (bytes, content_type).
 
-    Có cache RAM (TTL 1h): messenger warm trước khi gửi tin -> lần FB fetch là trúng cache.
+    Ảnh đi thẳng lên FB dạng multipart (messenger.send_image_bytes) - KHÔNG còn endpoint
+    proxy /img nào, FB không tự fetch URL nữa.
+    Có cache RAM (TTL 1h): messenger warm trước khi gửi tin -> gửi lại/thử lại là trúng cache.
     Ảnh trong Bitable BẮT BUỘC param extra=bitablePerm, không có sẽ 400.
     """
     now = time.time()

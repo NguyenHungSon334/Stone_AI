@@ -203,6 +203,24 @@ def _wants_image(reply: str) -> bool:
     return bool(_WANT_IMG_RE.search(reply or ""))
 
 
+# Khách nói THẲNG là muốn xem ảnh. Đây là LƯỚI ĐỠ cho <<ANH>>: marker do AI tự chèn, mà ca thật
+# khách gõ "cho tôi xem ảnh long đình" thì AI quên chèn -> mã đã nhắc hôm trước bị coi là "cũ",
+# bot trả chữ trơn đúng lúc khách đang đòi hình. Regex chỉ bắt ca hiển nhiên; ca nói vòng vẫn
+# để AI lo bằng <<ANH>>.
+# CỐ Ý không nhận "anh" không dấu: đó là ĐẠI TỪ dùng liên tục ("cho anh xin giá", "gửi anh
+# bảng giá") - nhận vào là mỗi lượt đều gửi lại ảnh, thành spam. Chịu sót ca gõ không dấu,
+# đổi lấy việc không bao giờ bắt nhầm; ca đó vẫn còn <<ANH>> của AI đỡ.
+_DOI_ANH_RE = re.compile(
+    r"(xem|gửi|gui|cho|có|co|kèm|kem|thêm|them|xin)\s+(\S+\s+){0,2}(ảnh|hình|hinh)\b"
+    r"|\b(ảnh|hình|hinh)\s+(đi|ạ|nhé|nhe|thật|that|thực tế|mẫu|thi công|công trình)",
+    re.IGNORECASE)
+
+
+def _khach_doi_anh(user_text: str) -> bool:
+    """Khách đòi ảnh bằng lời lẽ tường minh -> gửi lại ảnh kể cả mã đã nhắc trước đó."""
+    return bool(_DOI_ANH_RE.search(user_text or ""))
+
+
 def _bo_marker_anh(reply: str) -> str:
     """Bóc <<ANH>> khỏi câu trả lời - marker nội bộ, KHÔNG cho khách thấy, KHÔNG lưu lịch sử."""
     return _WANT_IMG_RE.sub("", reply or "").strip()
@@ -231,12 +249,12 @@ def _image_markers(history: list, reply: str, user_text: str, psid: str = "") ->
     """Marker ảnh (1 mã = 1 ảnh, tối đa _MAX_NEW_IMAGES/tin, mã không ảnh bỏ im lặng).
 
     2 trường hợp gửi ảnh:
-    - AI đánh dấu <<ANH>> (nó hiểu khách đang đòi ảnh) -> gửi mọi mã nhắc trong câu
-      (reply + tin khách), KỂ CẢ đã gửi trước đó.
+    - AI đánh dấu <<ANH>>, HOẶC khách đòi ảnh bằng lời lẽ tường minh (_khach_doi_anh) -> gửi
+      mọi mã nhắc trong câu (reply + tin khách), KỂ CẢ đã gửi trước đó.
     - Không đánh dấu -> chỉ mã nhắc LẦN ĐẦU trong hội thoại (chưa từng xuất hiện ở lượt trước).
     """
-    if _wants_image(reply):
-        codes = _codes_in(reply) | _codes_in(user_text)     # AI đòi gửi -> bỏ qua 'đã seen'
+    if _wants_image(reply) or _khach_doi_anh(user_text):
+        codes = _codes_in(reply) | _codes_in(user_text)     # đòi gửi -> bỏ qua 'đã seen'
     else:
         seen: set[str] = set()
         for m in history:
@@ -272,11 +290,26 @@ def _image_markers(history: list, reply: str, user_text: str, psid: str = "") ->
     return " ".join(markers)
 
 
-def _run_tool(name: str, inp: dict) -> str:
+def _da_dua(ngan_sach: dict | None, results) -> list:
+    """Cắt kết quả theo ngân sách mẫu CÒN LẠI của lượt này, rồi trừ vào ngân sách.
+
+    Trần 2 mẫu áp cho MỖI LẦN gọi tool là chưa đủ: AI gọi tool nhiều vòng trong cùng một lượt
+    (cho phép tới _MAX_TOOL_LOOPS) rồi gộp kết quả - ca thật khách hỏi "các mẫu Long đình" nhận
+    đúng 3 mẫu vì AI gọi 2 lần. Ngân sách đếm theo LƯỢT nên gọi mấy vòng cũng vẫn 2 mẫu."""
+    if ngan_sach is None:
+        return results
+    con = max(0, int(ngan_sach.get("con", _MAX_GOI_Y)))
+    ngan_sach["con"] = con - len(results[:con])
+    return results[:con]
+
+
+def _run_tool(name: str, inp: dict, ngan_sach: dict | None = None) -> str:
     if name != "suggest_products":
         return f"Tool {name} không tồn tại."
     ids = inp.get("product_ids")
     if ids:
+        # Mã do KHÁCH hỏi đích danh -> trả đủ, không trừ ngân sách: trần 2 chỉ áp cho mẫu bot
+        # tự đề xuất, không được cắt thứ khách chỉ tên.
         results = rows_by_ids(ids if isinstance(ids, list) else [ids], inp.get("stone"))
     else:
         kind, q = inp.get("kind"), inp.get("q")
@@ -293,6 +326,12 @@ def _run_tool(name: str, inp: dict) -> str:
                          # với exclude_ids.
                          min(int(inp.get("limit") or _MAX_GOI_Y), _MAX_GOI_Y), kind, q,
                          inp.get("exclude_ids"))
+        results = _da_dua(ngan_sach, results)
+        if not results and ngan_sach is not None and int(ngan_sach.get("con", 1)) <= 0:
+            # Hết ngân sách chứ KHÔNG phải hết hàng - nói rõ để AI đừng đi tìm bộ lọc khác rồi
+            # nhồi thêm mẫu, cũng đừng bịa "bên em hết mẫu".
+            return (f"Đã đưa đủ {_MAX_GOI_Y} mẫu cho lượt này - ĐỦ RỒI, không tra thêm. Viết tin "
+                    "với đúng các mẫu đã có; khách muốn xem thêm thì lượt sau gọi lại tool.")
     if not results:
         # Nói RÕ thiếu ở đâu + gợi ý bộ lọc hợp lệ: bot trượt 1 lần thì thử lại được, thay vì
         # bỏ cuộc trả lời chay không mẫu nào (lỗi cũ hay gặp nhất).
@@ -798,6 +837,7 @@ def _answer_sync(psid: str, text: str, images: list[tuple[bytes, str]] | None = 
 
         handle = _cached_handle(client, model_id)     # None -> nhồi thẳng (fallback)
         tok_in = tok_out = 0
+        ngan_sach = {"con": _MAX_GOI_Y}      # trần mẫu cho CẢ lượt, dùng chung mọi vòng gọi tool
         for _ in range(_MAX_TOOL_LOOPS):
             resp, handle = _gen_answer(client, model_id, contents, handle)
             u = resp.usage_metadata
@@ -814,7 +854,8 @@ def _answer_sync(psid: str, text: str, images: list[tuple[bytes, str]] | None = 
                 contents.append(cand.content)
                 contents.append(types.Content(role="user", parts=[
                     types.Part.from_function_response(
-                        name=fc.name, response={"result": _run_tool(fc.name, dict(fc.args or {}))})
+                        name=fc.name,
+                        response={"result": _run_tool(fc.name, dict(fc.args or {}), ngan_sach)})
                     for fc in fcalls]))
                 continue
             reply = "".join(p.text for p in parts if p.text).strip()

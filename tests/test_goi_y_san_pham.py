@@ -46,6 +46,45 @@ def test_uu_tien_ban_chay_va_co_anh():
         assert _cell(r, i_anh).strip().upper() != "FALSE", f"mẫu {r[0]} không có ảnh"
 
 
+def test_goi_tool_nhieu_vong_trong_1_luot_van_chi_duoc_2_mau():
+    """Ca thật đã lọt lên prod: AI gọi tool 2 vòng trong CÙNG một lượt rồi gộp -> khách hỏi
+    'các mẫu Long đình' nhận 3 mẫu. Ngân sách đếm theo LƯỢT, không theo từng lần gọi."""
+    ngan_sach = {"con": brain._MAX_GOI_Y}
+    vong1 = brain._run_tool("suggest_products", {"kind": "Long đình"}, ngan_sach)
+    vong2 = brain._run_tool("suggest_products", {"q": "long đình"}, ngan_sach)
+
+    assert _so_ma(vong1) == 2
+    assert _so_ma(vong2) == 0, "vòng 2 cùng lượt không được thêm mẫu nào"
+    assert "ĐỦ RỒI" in vong2, "phải nói rõ là hết ngân sách, không phải hết hàng"
+
+
+def test_luot_moi_thi_ngan_sach_reset():
+    """Khách nói 'xem thêm' ở lượt sau -> lại được 2 mẫu, không bị khoá vĩnh viễn."""
+    assert _so_ma(brain._run_tool("suggest_products", {"kind": "Mộ"}, {"con": 2})) == 2
+    assert _so_ma(brain._run_tool("suggest_products", {"kind": "Mộ"}, {"con": 2})) == 2
+
+
+def test_ma_khach_hoi_dich_danh_khong_bi_tru_ngan_sach():
+    """product_ids = mã khách chỉ tên -> trả đủ, và không ăn vào ngân sách mẫu tự đề xuất."""
+    ngan_sach = {"con": brain._MAX_GOI_Y}
+    got = brain._run_tool("suggest_products", {"product_ids": ["M01", "M04", "LD03"]}, ngan_sach)
+
+    assert _so_ma(got) == 3
+    assert ngan_sach["con"] == brain._MAX_GOI_Y
+
+
+def test_khach_doi_anh_thi_gui_lai_du_ma_da_nhac_truoc_do():
+    """Ca thật: khách gõ 'cho tôi xem ảnh long đình', AI quên chèn <<ANH>>, mã LD01/LD05 đã
+    nhắc hôm trước -> bot trả chữ trơn. Nay luật cứng bắt câu đòi ảnh, gửi lại kể cả mã cũ."""
+    for cau in ("cho tôi xem ảnh long đình", "gửi hình đi em", "có ảnh thật không",
+                "cho xin thêm ảnh mẫu", "cho xem hình công trình", "gửi em ít ảnh với"):
+        assert brain._khach_doi_anh(cau), cau
+    # "anh" KHÔNG DẤU là đại từ, dùng liên tục - bắt nhầm là mỗi lượt đều gửi lại ảnh (spam).
+    for cau in ("cho anh xin giá mộ đôi", "gửi anh bảng giá", "cho anh hỏi",
+                "thêm anh vào zalo", "long đình giá bao nhiêu", "anh cần mộ đôi"):
+        assert not brain._khach_doi_anh(cau), cau
+
+
 def test_dong_thieu_ma_bi_loai_khoi_bang_hang():
     """Dòng dán thiếu mã làm lệch mọi cột -> 'Đơn vị' rơi vào Thể Loại, sinh kind ma 'ngôi'
     mà AI tưởng hợp lệ. Phải bỏ dòng ngay ở cửa đọc file."""

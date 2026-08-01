@@ -203,6 +203,34 @@ def _wants_image(reply: str) -> bool:
     return bool(_WANT_IMG_RE.search(reply or ""))
 
 
+# Messenger KHÔNG render Markdown -> khách đọc thấy nguyên "**MÃ SẢN PHẨM**", "*   Mẫu mộ...".
+# Persona đã cấm, nhưng cấm bằng LỜI DẶN thì model tuân ~92% rồi trượt ở phần còn lại (đo trên
+# log thật: 78/951 tin dính). Luật nào kiểm được bằng code thì chặn bằng code.
+_MD_DAM = re.compile(r"\*{1,3}(?=\S)(.+?)(?<=\S)\*{1,3}", re.S)     # **đậm**, *nghiêng*
+_MD_CODE = re.compile(r"`{1,3}([^`]*)`{1,3}", re.S)
+_MD_BULLET = re.compile(r"^[ \t]*(?:[*\-+•]|\d+[.)])[ \t]+", re.M)  # đầu dòng: * - + • 1. 1)
+_MD_HEADING = re.compile(r"^[ \t]*#{1,6}[ \t]*", re.M)
+_MD_SOT = re.compile(r"[*_`#]{1,}")          # ký hiệu lẻ còn sót (vd '**' không có cặp)
+
+
+def _sach_markdown(reply: str) -> str:
+    """Bóc Markdown khỏi tin gửi khách, GIỮ NGUYÊN chữ và số.
+
+    Bullet đầu dòng thành câu thường - xoá trơn dấu là 2 ý dính liền nhau, đọc thành một câu."""
+    if not reply:
+        return reply
+    s = _MD_CODE.sub(r"\1", reply)
+    s = _MD_DAM.sub(r"\1", s)
+    s = _MD_HEADING.sub("", s)
+    s = _MD_BULLET.sub("", s)
+    s = _MD_SOT.sub("", s)
+    # Bullet bỏ đi để lại loạt dòng cụt; gộp khoảng trắng thừa nhưng GIỮ xuống dòng (persona
+    # yêu cầu mỗi ý một dòng).
+    s = re.sub(r"[ \t]{2,}", " ", s)
+    s = re.sub(r"\n{3,}", "\n\n", s)
+    return "\n".join(d.strip() for d in s.splitlines()).strip()
+
+
 # Khách nói THẲNG là muốn xem ảnh. Đây là LƯỚI ĐỠ cho <<ANH>>: marker do AI tự chèn, mà ca thật
 # khách gõ "cho tôi xem ảnh long đình" thì AI quên chèn -> mã đã nhắc hôm trước bị coi là "cũ",
 # bot trả chữ trơn đúng lúc khách đang đòi hình. Regex chỉ bắt ca hiển nhiên; ca nói vòng vẫn
@@ -245,22 +273,32 @@ def _next_image_token(psid: str, code: str, tokens: list[str]) -> str:
     return token
 
 
+# Khoảng cách tối thiểu (tính bằng TIN trong log) giữa 2 lần gửi ảnh của CÙNG một mã.
+# 4 tin = 2 lượt. Chặn ca khách hỏi dồn về một mẫu rồi nhận 3 tin ảnh liên tiếp; xa hơn ngần
+# này thì gửi lại - và _next_image_token xoay vòng nên là ảnh GÓC KHÁC, không phải ảnh cũ.
+_GIAN_CACH_ANH_TIN = 4
+
+
 def _image_markers(history: list, reply: str, user_text: str, psid: str = "") -> str:
     """Marker ảnh (1 mã = 1 ảnh, tối đa _MAX_NEW_IMAGES/tin, mã không ảnh bỏ im lặng).
 
-    2 trường hợp gửi ảnh:
-    - AI đánh dấu <<ANH>>, HOẶC khách đòi ảnh bằng lời lẽ tường minh (_khach_doi_anh) -> gửi
-      mọi mã nhắc trong câu (reply + tin khách), KỂ CẢ đã gửi trước đó.
-    - Không đánh dấu -> chỉ mã nhắc LẦN ĐẦU trong hội thoại (chưa từng xuất hiện ở lượt trước).
+    Giới thiệu mẫu là PHẢI có ảnh - đó là thứ chốt đơn. Luật cũ chỉ gửi cho mã nhắc LẦN ĐẦU
+    trong cả hội thoại: ca thật khách quay lại hỏi "long đình" hôm sau chỉ nhận chữ trơn, rồi
+    kêu "đâu có thấy mẫu nào đâu". Nay mỗi lần nhắc mã đều gửi, chỉ chặn lặp trong
+    _GIAN_CACH_ANH_TIN tin gần nhất. Khách đòi ảnh tường minh (<<ANH>> hoặc _khach_doi_anh)
+    thì bỏ qua cả khoảng cách đó.
     """
-    if _wants_image(reply) or _khach_doi_anh(user_text):
-        codes = _codes_in(reply) | _codes_in(user_text)     # đòi gửi -> bỏ qua 'đã seen'
-    else:
-        seen: set[str] = set()
-        for m in history:
-            if isinstance(m.get("content"), str):
-                seen |= _codes_in(m["content"])
-        codes = _codes_in(reply) - seen
+    doi_anh = _wants_image(reply) or _khach_doi_anh(user_text)
+    codes = _codes_in(reply) | (_codes_in(user_text) if doi_anh else set())
+    if not doi_anh:
+        # Mã vừa gửi ảnh ở 1-2 lượt ngay trước -> bỏ, khỏi dội trùng khi khách hỏi dồn.
+        # CHỈ xét tin của BOT: mã do KHÁCH gõ ("LD01 giá bao nhiêu") là mã khách đang muốn xem,
+        # tính vào đây là lần đầu hỏi cũng bị nuốt ảnh.
+        vua_gui: set[str] = set()
+        for m in history[-_GIAN_CACH_ANH_TIN:]:
+            if m.get("role") == "assistant" and isinstance(m.get("content"), str):
+                vua_gui |= _codes_in(m["content"])
+        codes -= vua_gui
     markers: list[str] = []
     thieu: list[str] = []
     for code in sorted(codes):
@@ -866,6 +904,9 @@ def _answer_sync(psid: str, text: str, images: list[tuple[bytes, str]] | None = 
             markers = _image_markers(full, reply, text, psid)
             hua_anh_khong_co = _wants_image(reply) and not markers
             reply = _bo_marker_anh(reply)
+            # Lọc Markdown TRƯỚC khi gửi và trước khi lưu log: lưu bản còn '**' thì lượt sau
+            # model đọc lại chính nó và học tiếp thói quen đó.
+            reply = _sach_markdown(reply)
             if hua_anh_khong_co:
                 # Khách hỏi ảnh mà Base chưa có: nói thật + xin liên hệ, thay vì để khách chờ hụt.
                 reply = (reply + " Mẫu này bên em làm thiết kế riêng theo khuôn viên từng nhà "

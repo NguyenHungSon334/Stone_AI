@@ -72,8 +72,27 @@ def _tenant_token() -> str:
         return _TOKEN["val"]
 
 
+# Đuôi file ẢNH gửi được cho khách. Cột Ảnh của Base là ô đính kèm TỰ DO nên nhân viên dán cả
+# video vào: ca thật LD12 có IMG_5789.MOV 45MB -> tải về rồi Pillow không mở nổi, khách mất ảnh.
+_DUOI_ANH = (".jpg", ".jpeg", ".png", ".webp", ".gif", ".heic", ".heif", ".bmp", ".tif", ".tiff")
+
+
+def _la_anh(att: dict) -> bool:
+    """Đính kèm này có phải ẢNH không. Xét cả `type` lẫn ĐUÔI TÊN FILE: Lark trả type RỖNG cho
+    file .HEIC (ảnh iPhone), lọc mỗi theo type là loại nhầm ảnh thật."""
+    kieu = str(att.get("type") or "").lower()
+    if kieu.startswith("image/"):
+        return True
+    if kieu:                                   # có type mà không phải image/ -> video, pdf...
+        return False
+    return str(att.get("name") or "").lower().endswith(_DUOI_ANH)
+
+
 def get_image_tokens(product_id: str) -> list[str]:
-    """file_token các ảnh của 1 mã (đã cắt biến thể). Rỗng nếu không thấy record/ảnh."""
+    """file_token các ẢNH của 1 mã (đã cắt biến thể). Rỗng nếu không thấy record/ảnh.
+
+    File không phải ảnh (video, pdf) bị loại ngay tại đây - lọc ở đầu nguồn thì mọi lớp sau
+    (chọn ảnh xoay vòng, nén, gửi) khỏi phải biết tới chúng."""
     code = base_code(product_id)
     tok = _tenant_token()
     url = (f"{config.LARK_DOMAIN}/open-apis/bitable/v1/apps/{config.LARK_BASE_APP_TOKEN}"
@@ -89,12 +108,20 @@ def get_image_tokens(product_id: str) -> list[str]:
     if d.get("code") != 0:
         raise RuntimeError(f"Lark search lỗi: {d.get('code')} {d.get('msg')}")
     out: list[str] = []
+    bo: list[str] = []
     for item in (d.get("data", {}).get("items") or []):
         cell = (item.get("fields") or {}).get(config.LARK_IMAGE_FIELD)
         for att in (cell or []):
             ft = att.get("file_token")
-            if ft:
+            if not ft:
+                continue
+            if _la_anh(att):
                 out.append(ft)
+            else:
+                bo.append(str(att.get("name") or "?"))
+    if bo:
+        print(f"[lark] mã {code}: bỏ {len(bo)} tệp không phải ảnh trong cột Ảnh: "
+              + ", ".join(bo[:5]), file=sys.stderr)
     return out
 
 

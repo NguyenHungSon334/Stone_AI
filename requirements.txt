@@ -5,3 +5,5 @@ python-dotenv==1.0.1
 google-genai>=2.11.0
 firebase-admin>=6.5.0
 Pillow>=10.0.0
+# Ảnh .HEIC (iPhone) trong Lark Base: Pillow thuần KHÔNG mở được -> khách mất ảnh mẫu đó.
+pillow-heif>=0.16.0

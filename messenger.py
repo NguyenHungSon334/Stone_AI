@@ -32,6 +32,21 @@ _IMG_RETRY_GAP_S = 1.0    # chờ trước khi gửi lại ảnh hỏng (dội l
 _IMG_CANH_BAO_MB = 2.0    # trên ngưỡng này FB hay trả '#100 Upload attachment failure'
 
 
+def _bat_heic() -> None:
+    """Dạy Pillow đọc .HEIC (ảnh chụp iPhone dán thẳng vào Lark Base).
+
+    Thiếu gói này thì Pillow ném UnidentifiedImageError -> ảnh đi nguyên bản và FB từ chối.
+    Best-effort: không cài được thì bot vẫn chạy, chỉ mất ảnh HEIC (đã có cảnh báo riêng)."""
+    try:
+        import pillow_heif
+        pillow_heif.register_heif_opener()
+    except Exception as e:
+        print(f"[img] không bật được HEIC: {type(e).__name__}: {e}", file=sys.stderr)
+
+
+_bat_heic()
+
+
 def _shrink_image(data: bytes, ctype: str) -> tuple[bytes, str]:
     """Downscale + nén JPEG để FB nuốt được (ảnh gốc Lark tới ~20MB PNG -> upload treo/timeout).
     Pillow lỗi hoặc ảnh đã nhỏ -> trả nguyên gốc (fallback an toàn)."""
@@ -62,12 +77,16 @@ def _shrink_image(data: bytes, ctype: str) -> tuple[bytes, str]:
         return (out, "image/jpeg")
     except Exception as e:
         print(f"[img] nén lỗi, gửi gốc {goc_mb:.1f}MB: {type(e).__name__}: {e}", file=sys.stderr)
-        # Thiếu Pillow trên VPS -> mọi ảnh đi nguyên bản PNG ~20MB -> FB từ chối SẠCH.
-        # Đây là ca hỏng âm thầm nhất: bot vẫn chạy, khách chỉ không bao giờ thấy ảnh.
+        # Hai nguyên nhân KHÁC HẲN nhau, gợi ý sai là admin đi soi nhầm chỗ (đã dính: báo
+        # "kiểm tra Pillow" trong khi Pillow vẫn tốt, thủ phạm là file .HEIC/.MOV trong Base).
+        if type(e).__name__ == "UnidentifiedImageError":
+            goi_y = ("➡️ Tệp trong cột Ảnh KHÔNG phải ảnh đọc được (hay gặp: .HEIC của iPhone, "
+                     "hoặc video .MOV dán nhầm). Mở record trong Lark Base, thay bằng JPG/PNG.")
+        else:
+            goi_y = "➡️ Kiểm tra Pillow trên server: python -c \"import PIL\""
         alerts.alert(f"img:nen:{type(e).__name__}",
                      f"🔴 KHÔNG NÉN ĐƯỢC ẢNH ({goc_mb:.1f}MB, gửi nguyên bản) - FB nhiều khả năng "
-                     f"từ chối, khách KHÔNG nhận được ảnh.\n{type(e).__name__}: {e}\n"
-                     f"➡️ Kiểm tra Pillow đã cài trên server chưa: python -c \"import PIL\"")
+                     f"từ chối, khách KHÔNG nhận được ảnh.\n{type(e).__name__}: {e}\n{goi_y}")
         return (data, ctype)
 
 _SEND_API = "https://graph.facebook.com/{ver}/me/messages"

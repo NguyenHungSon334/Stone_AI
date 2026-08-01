@@ -84,15 +84,15 @@ def test_canh_bao_anh_noi_dung_khach_van_nhan_duoc_chu(monkeypatch):
 
 
 def test_khong_nen_duoc_anh_thi_phai_bao_admin(monkeypatch):
-    """Thiếu Pillow trên server = mọi ảnh đi nguyên bản ~20MB, FB từ chối sạch mà bot vẫn
-    'chạy bình thường'. Ca hỏng âm thầm này bắt buộc phải báo, không được nuốt."""
+    """Ảnh không nén được = đi nguyên bản ~20MB, FB từ chối sạch mà bot vẫn 'chạy bình thường'.
+    Ca hỏng âm thầm này bắt buộc phải báo, không được nuốt."""
     keu = []
     monkeypatch.setattr(messenger.alerts, "alert", lambda key, msg: keu.append((key, msg)))
 
     data, ctype = messenger._shrink_image(b"khong-phai-anh" * 100_000, "image/png")
 
     assert (data, ctype) == (b"khong-phai-anh" * 100_000, "image/png"), "hỏng thì gửi nguyên gốc"
-    assert keu and "Pillow" in keu[0][1], "phải chỉ đúng nguyên nhân cần kiểm tra"
+    assert keu and "KHÔNG NÉN ĐƯỢC ẢNH" in keu[0][1]
 
 
 def test_anh_nen_xong_van_qua_nang_thi_canh_bao(monkeypatch):
@@ -116,3 +116,30 @@ def test_anh_nho_thi_gui_nguyen_khong_canh_bao(monkeypatch):
 
 async def _tra(v):
     return v
+
+
+def test_loai_tep_khong_phai_anh_khoi_cot_anh():
+    """Ca thật LD12: cột Ảnh có IMG_5789.MOV 45MB -> tải về Pillow không mở nổi, khách mất
+    ảnh. Lọc ngay ở đầu nguồn. Lark trả type RỖNG cho .HEIC nên phải xét cả đuôi tên file."""
+    from bot_tools.lark_image import _la_anh
+
+    assert _la_anh({"name": "a.png", "type": "image/png"})
+    assert _la_anh({"name": "IMG_5808.HEIC", "type": ""}), "HEIC type rỗng vẫn là ảnh"
+    assert _la_anh({"name": "IMG_5808 (2).heic", "type": None})
+    assert not _la_anh({"name": "IMG_5789.MOV", "type": "video/quicktime"})
+    assert not _la_anh({"name": "bao-gia.pdf", "type": "application/pdf"})
+    assert not _la_anh({"name": "khong-duoi", "type": ""})
+
+
+def test_heic_doc_duoc_sau_khi_bat_pillow_heif():
+    """Thiếu pillow-heif thì .HEIC ném UnidentifiedImageError -> anh di nguyen ban, FB tu choi."""
+    from PIL import Image
+    assert "HEIF" in Image.OPEN or "HEIC" in Image.OPEN, "chưa bật được HEIC opener"
+
+
+def test_canh_bao_chi_dung_thu_pham_khi_file_khong_phai_anh(monkeypatch):
+    """Bao 'kiem tra Pillow' trong khi Pillow van tot = admin di soi nham cho."""
+    keu = []
+    monkeypatch.setattr(messenger.alerts, "alert", lambda key, msg: keu.append(msg))
+    messenger._shrink_image(b"day-khong-phai-anh" * 100_000, "image/png")
+    assert keu and "HEIC" in keu[0] and "Lark Base" in keu[0]

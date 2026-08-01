@@ -15,7 +15,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import config
 from bot_tools.find_by_price import CSV
-from bot_tools.lark_image import _tenant_token, base_code, request_retry
+from bot_tools.lark_image import _la_anh, _tenant_token, base_code, request_retry
 
 FLAG_COL = "Có ảnh"
 
@@ -43,7 +43,9 @@ def codes_with_image() -> set[str]:
             # Field text của Bitable có thể là str hoặc list[{text:...}].
             code = raw if isinstance(raw, str) else "".join(
                 seg.get("text", "") for seg in (raw or []) if isinstance(seg, dict))
-            if code and (f.get(config.LARK_IMAGE_FIELD) or []):
+            # Chỉ tính ẢNH thật: record chỉ có video .MOV đính kèm mà đánh "Có ảnh" là bot
+            # giới thiệu mẫu đó rồi khách không nhận được hình nào.
+            if code and any(_la_anh(a) for a in (f.get(config.LARK_IMAGE_FIELD) or [])):
                 out.add(base_code(code))
         page = data.get("page_token") or ""
         if not data.get("has_more") or not page:

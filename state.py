@@ -156,6 +156,10 @@ def cam_nhan_chu_dong(psid: str) -> tuple[bool, str]:
     st = get(psid)
     if st.get("no_contact"):
         return (True, str(st.get("ly_do") or "khách yêu cầu ngưng"))
+    if st.get("stopped"):
+        # Bot đã CỐ Ý ngưng trả lời (nhiễu/sticker liên tiếp). Vòng follow-up tự lọc cờ này rồi,
+        # nhưng phải chặn ở CỬA GỬI nữa: luồng nhắn chủ động thêm sau này sẽ không nhớ tự lọc.
+        return (True, str(st.get("reason") or "bot đã ngưng trả lời (tin nhiễu liên tiếp)"))
     if str(st.get("y_dinh") or "").strip().lower() in ("tu choi", "hoan lai"):
         return (True, f"ý định khách: {st.get('y_dinh')}")
     return (False, "")

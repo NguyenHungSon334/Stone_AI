@@ -92,6 +92,25 @@ def test_khach_tu_choi_van_duoc_tra_loi_nhung_khong_bi_nhan_chu_dong(monkeypatch
     assert len(da_gui) == 1, "khách hỏi thì phải trả lời"
 
 
+def test_bot_da_ngung_vi_tin_nhieu_thi_cua_gui_cung_chan(monkeypatch, tmp_path):
+    """Ca thật: khách chỉ thả 2 emoji -> bot ngưng trả lời. Vòng follow-up đã tự lọc cờ này,
+    nhưng CỬA GỬI phải chặn nữa - luồng nhắn chủ động thêm sau sẽ không nhớ tự lọc."""
+    monkeypatch.setattr(brain, "_HIST_DIR", tmp_path)
+    da_gui = _bat_tin_gui(monkeypatch)
+
+    messenger._noise_decision("emoji", "🦖")
+    messenger._noise_decision("emoji", "🐦")          # -> stopped
+    assert state.get("emoji")["stopped"] is True
+
+    asyncio.run(messenger.send_text("emoji", messenger._FOLLOWUP_TEXT, chu_dong=True))
+    assert da_gui == [], "bot đã cố ý ngưng mà vẫn tự nhắn"
+
+    # Khách gửi tin có nghĩa -> mở lại, bot trả lời bình thường.
+    assert messenger._noise_decision("emoji", "giá mộ đôi bao nhiêu")[0] == "allow"
+    asyncio.run(messenger.send_text("emoji", "Dạ mộ đôi khoảng 18 triệu ạ."))
+    assert len(da_gui) == 1
+
+
 def test_khach_doi_ngung_nhan_bi_bat_bang_luat_cung():
     """Không chờ AI chấm ý định: câu đòi ngừng phải bị code bắt ngay."""
     for cau in ("đừng nhắn nữa nhé", "sao nhắn hoài vậy", "phiền quá đi mất", "bỏ theo dõi trang"):

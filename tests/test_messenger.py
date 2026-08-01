@@ -242,9 +242,18 @@ def test_ai_quyet_gui_anh():
         assert brain._bo_marker_anh("Dạ mẫu LD12 ạ " + lech) == "Dạ mẫu LD12 ạ", \
             f"phải bóc sạch, không để khách đọc được: {lech!r}"
 
-    lich_su = [{"role": "assistant", "content": "Mẫu M01 giá 33.9 triệu", "at": "10:00"}]
-    assert brain._image_markers(lich_su, "Mẫu M01 ạ <<ANH>>", "kèm ảnh"), "có <<ANH>> -> gửi lại mã cũ"
-    assert not brain._image_markers(lich_su, "Mẫu M01 ạ", "xin giá"), "không marker -> mã cũ thôi gửi"
+    # NHẮC MÃ LÀ GỬI ẢNH, kể cả mã đã giới thiệu ở lượt trước: luật cũ ("chỉ mã lần đầu") làm
+    # khách hỏi lại cùng hạng mục chỉ nhận chữ trơn. Xem tests/test_dinh_dang_va_anh.py.
+    goc = brain.lark_image.get_image_tokens
+    brain.lark_image.get_image_tokens = lambda code: [f"tok-{code}"]
+    try:
+        lich_su = [{"role": "assistant", "content": "Mẫu M01 giá 33.9 triệu", "at": "10:00"}]
+        assert brain._image_markers(lich_su, "Mẫu M01 ạ <<ANH>>", "kèm ảnh"), "có <<ANH>> -> gửi"
+        assert brain._image_markers(lich_su, "Mẫu M01 ạ", "xin giá"), "nhắc lại mã cũng phải gửi"
+        assert not brain._image_markers(lich_su, "Dạ Bác cho em xin SĐT ạ", "ok"), \
+            "tin không nhắc mã nào thì không gửi ảnh"
+    finally:
+        brain.lark_image.get_image_tokens = goc
 
 
 def test_bo_marker_thua():

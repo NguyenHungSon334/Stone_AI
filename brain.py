@@ -273,32 +273,20 @@ def _next_image_token(psid: str, code: str, tokens: list[str]) -> str:
     return token
 
 
-# Khoảng cách tối thiểu (tính bằng TIN trong log) giữa 2 lần gửi ảnh của CÙNG một mã.
-# 4 tin = 2 lượt. Chặn ca khách hỏi dồn về một mẫu rồi nhận 3 tin ảnh liên tiếp; xa hơn ngần
-# này thì gửi lại - và _next_image_token xoay vòng nên là ảnh GÓC KHÁC, không phải ảnh cũ.
-_GIAN_CACH_ANH_TIN = 4
-
-
 def _image_markers(history: list, reply: str, user_text: str, psid: str = "") -> str:
-    """Marker ảnh (1 mã = 1 ảnh, tối đa _MAX_NEW_IMAGES/tin, mã không ảnh bỏ im lặng).
+    """Marker ảnh: NHẮC MÃ LÀ GỬI ẢNH. 1 mã = 1 ảnh, tối đa _MAX_NEW_IMAGES/tin.
 
-    Giới thiệu mẫu là PHẢI có ảnh - đó là thứ chốt đơn. Luật cũ chỉ gửi cho mã nhắc LẦN ĐẦU
-    trong cả hội thoại: ca thật khách quay lại hỏi "long đình" hôm sau chỉ nhận chữ trơn, rồi
-    kêu "đâu có thấy mẫu nào đâu". Nay mỗi lần nhắc mã đều gửi, chỉ chặn lặp trong
-    _GIAN_CACH_ANH_TIN tin gần nhất. Khách đòi ảnh tường minh (<<ANH>> hoặc _khach_doi_anh)
-    thì bỏ qua cả khoảng cách đó.
+    Luật cũ chỉ gửi cho mã nhắc LẦN ĐẦU trong cả hội thoại -> khách hỏi lại "long đình" ở lượt
+    sau chỉ nhận chữ trơn rồi kêu "đâu có thấy mẫu nào đâu". Bản chặn-trùng-2-lượt cũng vẫn
+    nuốt đúng ca đó (khách hỏi hai lượt liền). Giới thiệu mẫu mà không có ảnh là mất đơn, nên
+    nay gửi MỌI lần nhắc mã.
+
+    Không sợ dội ảnh trùng vì 2 lớp: trần _MAX_GOI_Y=2 mẫu/lượt, và _next_image_token xoay
+    vòng -> nhắc lại cùng mã ra ẢNH GÓC KHÁC (LD01 có 6 ảnh), khách xem lại thấy thêm chi tiết.
     """
-    doi_anh = _wants_image(reply) or _khach_doi_anh(user_text)
-    codes = _codes_in(reply) | (_codes_in(user_text) if doi_anh else set())
-    if not doi_anh:
-        # Mã vừa gửi ảnh ở 1-2 lượt ngay trước -> bỏ, khỏi dội trùng khi khách hỏi dồn.
-        # CHỈ xét tin của BOT: mã do KHÁCH gõ ("LD01 giá bao nhiêu") là mã khách đang muốn xem,
-        # tính vào đây là lần đầu hỏi cũng bị nuốt ảnh.
-        vua_gui: set[str] = set()
-        for m in history[-_GIAN_CACH_ANH_TIN:]:
-            if m.get("role") == "assistant" and isinstance(m.get("content"), str):
-                vua_gui |= _codes_in(m["content"])
-        codes -= vua_gui
+    codes = _codes_in(reply)
+    if _wants_image(reply) or _khach_doi_anh(user_text):
+        codes |= _codes_in(user_text)       # khách đòi ảnh + tự gõ mã -> gửi cả mã đó
     markers: list[str] = []
     thieu: list[str] = []
     for code in sorted(codes):

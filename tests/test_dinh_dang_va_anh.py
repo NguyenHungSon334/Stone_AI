@@ -58,17 +58,21 @@ def test_nhac_lai_ma_o_luot_sau_van_gui_anh(monkeypatch):
     assert "tok-LD01" in markers and "tok-LD05" in markers
 
 
-def test_khach_hoi_don_thi_khong_doi_anh_trung(monkeypatch):
-    """Bot vừa gửi ảnh LD01 lượt ngay trước -> khách hỏi tiếp về LD01 thì đừng dội ảnh lần nữa."""
-    monkeypatch.setattr(brain.lark_image, "get_image_tokens", lambda code: [f"tok-{code}"])
+def test_hoi_don_ve_mot_mau_van_co_anh_nhung_la_anh_khac(monkeypatch):
+    """Nhắc lại cùng mã -> vẫn gửi, và _next_image_token xoay vòng nên là ẢNH GÓC KHÁC."""
+    monkeypatch.setattr(brain.lark_image, "get_image_tokens",
+                        lambda code: [f"{code}-a1", f"{code}-a2", f"{code}-a3"])
     hist = _hist(("user", "long đình"), ("assistant", "LD01 giá khoảng 77 triệu ạ"),
                  ("user", "nặng bao nhiêu tấn"))
 
-    assert brain._image_markers(hist, "LD01 nặng 5.4 tấn ạ", "nặng bao nhiêu tấn") == ""
+    lan1 = brain._image_markers(hist, "LD01 nặng 5.4 tấn ạ", "nặng bao nhiêu tấn", "p-xoay")
+    lan2 = brain._image_markers(hist, "LD01 cao 2.75m ạ", "cao bao nhiêu", "p-xoay")
+
+    assert "LD01-a1" in lan1 and "LD01-a2" in lan2, "phải xoay sang ảnh khác, không lặp ảnh cũ"
 
 
 def test_khach_doi_anh_thi_gui_ke_ca_vua_gui(monkeypatch):
-    """Khách nói thẳng 'cho xem ảnh' thì bỏ qua khoảng cách chống trùng."""
+    """Khách gõ thẳng mã kèm đòi ảnh -> gửi cả mã trong tin của khách."""
     monkeypatch.setattr(brain.lark_image, "get_image_tokens", lambda code: [f"tok-{code}"])
     hist = _hist(("user", "long đình"), ("assistant", "LD01 giá khoảng 77 triệu ạ"),
                  ("user", "cho xem ảnh LD01"))
@@ -77,7 +81,7 @@ def test_khach_doi_anh_thi_gui_ke_ca_vua_gui(monkeypatch):
 
 
 def test_ma_khach_go_lan_dau_van_duoc_gui_anh(monkeypatch):
-    """Mã do KHÁCH gõ không được tính là 'bot vừa gửi' - tính vào là lần đầu hỏi cũng mất ảnh."""
+    """Bot nhắc lại mã khách hỏi -> vẫn kèm ảnh ngay lượt đầu."""
     monkeypatch.setattr(brain.lark_image, "get_image_tokens", lambda code: [f"tok-{code}"])
     hist = _hist(("user", "cho hỏi mẫu LD07"))
 

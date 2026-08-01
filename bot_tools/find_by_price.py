@@ -49,12 +49,30 @@ def fmt_money(v: float) -> str:
     return f"{v / 1e6:.1f}tr".replace(".0tr", "tr")
 
 
+_MA_HOP_LE = re.compile(r"^[A-Za-z]{1,4}\d{1,3}(\.\d+)?$")   # M01, LD03, TP02, M01.2
+
+
+def _ma_hong(row) -> bool:
+    """Dòng thiếu MÃ ở cột đầu -> mọi cột lệch một ô.
+
+    Ca thật: 2 dòng bị dán thiếu mã nên cột 0 thành TÊN sản phẩm, 'Đơn vị' (ngôi) rơi vào cột
+    Thể Loại -> kinds_available() sinh thêm thể loại ma tên 'ngôi' và AI coi đó là kind hợp lệ.
+    Chặn ngay ở cửa đọc file: mã sai định dạng thì bỏ dòng, còn hơn để lệch ngầm."""
+    return bool(row and row[0].strip()) and not _MA_HOP_LE.match(row[0].strip())
+
+
 def load_rows():
     with open(CSV, encoding="utf-8-sig") as f:
         rows = list(csv.reader(f))
     header = rows[0]
     stone_cols = [i for i, h in enumerate(header) if h.strip().lower().startswith("đá")]
-    return header, stone_cols, rows[1:]
+    data, hong = [], []
+    for r in rows[1:]:
+        (hong if _ma_hong(r) else data).append(r)
+    if hong:
+        print(f"[bảng hàng] BỎ {len(hong)} dòng thiếu/sai MÃ sản phẩm: "
+              + "; ".join(r[0].strip()[:40] for r in hong), file=sys.stderr)
+    return header, stone_cols, data
 
 
 def _stone_cols(header, stone_cols, stone: str | None):
@@ -94,12 +112,32 @@ def kinds_available() -> list[str]:
     return sorted(seen)
 
 
+def _co_anh(header, r) -> bool:
+    """Mã này có ảnh trong Lark Base? Cột 'Có ảnh' do bot_tools/sync_anh_flag.py ghi.
+    Thiếu cột (bảng hàng cũ) -> coi như CÓ, để không tự dìm cả bảng xuống đáy."""
+    i = _col(header, "Có ảnh")
+    return True if i < 0 else _cell(r, i).strip().upper() != "FALSE"
+
+
+def _uu_tien(header, r) -> tuple[int, int]:
+    """Khoá sắp xếp ĐỨNG TRƯỚC giá: (bán chạy?, có ảnh?). 0 = lên trước.
+
+    Mẫu bán chạy dễ chốt hơn; mẫu có ảnh thì khách xem được hình ngay trong tin - nói chay
+    không ảnh là khách phải tự tưởng tượng, tỉ lệ rơi cao hơn hẳn."""
+    i_bc = _col(header, "Bán chạy")
+    return (0 if (i_bc >= 0 and _cell(r, i_bc)) else 1, 0 if _co_anh(header, r) else 1)
+
+
 def search(max_price, min_price=0.0, stone=None, category=None, limit=15, kind=None, q=None,
            exclude_ids=None):
     """Lọc bảng hàng. max_price=None -> không giới hạn trần (dùng khi chỉ lọc kind/q).
 
-    exclude_ids: bỏ các mã ĐÃ giới thiệu. Kết quả sort giá tăng dần rồi cắt [:limit] nên cùng bộ
-    lọc luôn ra đúng ngần ấy mã; khách đòi 'mẫu khác' mà không loại mã cũ là bot đưa lại y hệt."""
+    THỨ TỰ: bán chạy trước, có ảnh trước, rồi giá tăng dần (xem _uu_tien). Tool chỉ trả 3 mẫu
+    cho bot nên sort thuần theo giá là mẫu bán chạy/có ảnh rơi khỏi top - khách nhận mẫu rẻ
+    nhất thay vì mẫu dễ chốt và xem được hình.
+
+    exclude_ids: bỏ các mã ĐÃ giới thiệu. Kết quả sort rồi cắt [:limit] nên cùng bộ lọc luôn ra
+    đúng ngần ấy mã; khách đòi 'mẫu khác' mà không loại mã cũ là bot đưa lại y hệt."""
     header, stone_cols, data = load_rows()
     skip = {str(i).strip().upper() for i in (exclude_ids or [])}
     if max_price is None:
@@ -136,7 +174,7 @@ def search(max_price, min_price=0.0, stone=None, category=None, limit=15, kind=N
                 best = (v, header[i].strip())
         if best:
             out.append((best[0], best[1], r, bool(stone)) if stone else (best[0], best[1], r))
-    out.sort(key=lambda x: x[0])
+    out.sort(key=lambda x: _uu_tien(header, x[2]) + (x[0],))
     return out[:limit]
 
 
@@ -231,7 +269,7 @@ def render(results) -> str:
     header, stone_cols, _ = load_rows()
     i_ten, i_dm, i_bc, i_gc = (_col(header, n) for n in
                                ("Tên sản phẩm", "Danh mục", "Bán chạy", "Ghi chú"))
-    lines = [f"Tìm thấy {len(results)} sản phẩm (giá tăng dần):"]
+    lines = [f"Tìm thấy {len(results)} sản phẩm (ưu tiên bán chạy + có ảnh, rồi giá tăng dần):"]
     for item in results:
         price, stone_name, r = item[:3]
         only_stone = stone_name if len(item) > 3 and item[3] else None
@@ -260,7 +298,17 @@ def _selftest():
     res = search(max_price=1e8)  # <=100tr
     assert all(p <= 1e8 for p, _, _ in res), "lọc max sai"
     assert all(p > 0 for p, _, _ in res), "mã chưa có giá (0) lọt vào kết quả tầm giá"
-    assert res == sorted(res, key=lambda x: x[0]), "chưa sort tăng dần"
+    # Thứ tự: bán chạy trước, có ảnh trước, rồi mới tới giá.
+    _hdr0, _, _ = load_rows()
+    _khoa = [_uu_tien(_hdr0, r) + (p,) for p, _, r in res]
+    assert _khoa == sorted(_khoa), "sai thứ tự ưu tiên (bán chạy > có ảnh > giá)"
+    _bc = [i for i, (p, _, r) in enumerate(res) if _cell(r, _col(_hdr0, "Bán chạy"))]
+    _thuong = [i for i, (p, _, r) in enumerate(res) if not _cell(r, _col(_hdr0, "Bán chạy"))]
+    if _bc and _thuong:
+        assert max(_bc) < min(_thuong), "mẫu bán chạy phải đứng trước mẫu thường"
+    # Giá vẫn phải tăng dần TRONG cùng một nhóm ưu tiên.
+    _gia_bc = [p for p, _, r in res if _cell(r, _col(_hdr0, "Bán chạy"))]
+    assert _gia_bc == sorted(_gia_bc), "trong nhóm bán chạy phải còn sort theo giá"
     # Mã chưa có giá: hỏi đích danh vẫn trả về, nhưng KHÔNG được hiện thành "0tr"
     _hdr, _cols, _data = load_rows()
     _zero = [r for r in _data if r and r[0].strip() and parse_money(r[_cols[0]]) <= 0]

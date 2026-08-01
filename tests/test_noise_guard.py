@@ -5,6 +5,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import brain
 import messenger
+import state
 
 
 def test_noise_guard_stops_then_reopens_for_meaningful_text(monkeypatch, tmp_path):
@@ -86,9 +87,7 @@ def test_khach_kho_chiu_thi_bot_im_du_khach_nhan_tin_co_nghia(monkeypatch, tmp_p
     assert messenger._noise_decision("pk", "the gia bao nhieu")[0] == "blocked"
 
     # hết hạn -> khách quay lại được phục vụ bình thường
-    state = messenger._noise_state("pk")
-    state["paused_until"] = time.time() - 1
-    messenger._save_noise_state("pk", state)
+    state.patch("pk", paused_until=time.time() - 1)
     assert messenger._noise_decision("pk", "the gia bao nhieu")[0] == "allow"
     assert not messenger._noise_state("pk").get("stopped")
 

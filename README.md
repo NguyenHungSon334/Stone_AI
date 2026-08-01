@@ -204,6 +204,12 @@ lấy đúng mã (`product_ids`). Hàm python chạy trong process, KHÔNG mở 
 Lịch sử mỗi khách (psid) lưu ở `conversations/`, **mirror lên Firebase RTDB làm nguồn chính** -
 mất cache local thì tự kéo lại từ Firebase. Hội thoại dài được tóm tắt nền để khỏi phình prompt.
 
+**Cờ trạng thái khách (`state.py` → node Firebase `khach_state/<psid>`)**: khoá nhắn, ý định
+(quan tâm / hoãn lại / từ chối), hồ sơ khách, số lần đã nhắc, đã chốt CRM, mốc tin rơi / khách
+quay lại, ảnh đã gửi tới đâu. Trước đây mỗi cờ là 1 file rời không lên cloud - dựng lại
+container là mất sạch, khách đã gắt bị nhắn lại từ đầu. File `<psid>.state.json` giờ chỉ là
+cache; đọc miss thì kéo Firebase, vẫn miss thì tự dựng lại từ sidecar đời cũ (migrate 1 lần).
+
 Khách gửi ảnh: bot đọc được (vision), ảnh nhét vào lượt hỏi.
 
 ## Gửi ảnh sản phẩm (Lark Base)
@@ -229,8 +235,20 @@ như vậy, đừng đọc thành "khách không nhận được gì".
 - `send_image_bytes()` **thử lại 1 lần**, lượt 2 ép về JPEG baseline. Lượt đầu hỏng chỉ ghi
   stderr, **không báo Lark** - báo ngay lượt đầu thì admin toàn nhận cảnh báo cho ca tự khỏi.
 
-Còn cảnh báo sau cả hai lớp này = ảnh đó có vấn đề thật, mở thử record trong Lark Base.
+- `_shrink_image()` **nén trước khi gửi**: ảnh gốc trong Base là PNG ~20MB, FB nghẹn. Nén
+  xuống ~0.4MB JPEG (log `[img] nén 21.7MB image/png -> 0.4MB jpeg`). **Thiếu Pillow trên
+  server là hỏng sạch mà bot vẫn chạy** - nay có cảnh báo Lark riêng cho ca đó, và cho ca nén
+  xong vẫn > 2MB (`_IMG_CANH_BAO_MB`).
+
+Còn cảnh báo sau các lớp này = ảnh đó có vấn đề thật, mở thử record trong Lark Base.
 Test: `tests/test_img_send.py`.
+
+**Ưu tiên mẫu có ảnh + bán chạy**: `search()` xếp theo `(bán chạy, có ảnh, giá tăng dần)` -
+tool chỉ trả `brain._MAX_GOI_Y = 2` mẫu/lượt (khách đòi thêm thì gọi lại với `exclude_ids`;
+hỏi đích danh bằng `product_ids` thì KHÔNG bị cắt), nên sort thuần theo giá là mẫu dễ chốt rơi
+khỏi top. Cột `Có ảnh` trong CSV
+do `bot_tools/sync_anh_flag.py` ghi (chạy lại mỗi khi bổ sung ảnh vào Base); bảng hàng hiện đã
+`--prune` nên **126/126 mã đều có ảnh**.
 
 ## Khách cũ quay lại (`returning.py`)
 
@@ -242,7 +260,7 @@ bot tiếp như người lạ và hỏi lại những thứ khách đã nói. M�
    (`brain.seed_history`, CHỈ ghi khi log đang trống - bản dựng từ FB thiếu ảnh và marker nội
    bộ, đè lên log thật là mất dữ liệu).
 2. Im >= 24h rồi nhắn lại -> báo Lark kèm mã lead + SĐT đọc từ `conversations/<psid>.crm.json`.
-   File mốc `.quaylai` chặn báo lặp khi khách nhắn liền nhiều tin.
+   Mốc `returning_at` trong `khach_state` chặn báo lặp khi khách nhắn liền nhiều tin.
 
 Chạy TRƯỚC `is_new_customer` - nạp được log thì khách này là khách CŨ. Cần scope
 `pages_read_user_content`. Mọi lỗi đều nuốt: Graph hỏng thì bot vẫn trả lời, chỉ thiếu ngữ
@@ -271,6 +289,23 @@ tiếp nối cam kết đó. Thấy lệch thì hạ `_MAX_TIN` (mặc định 3
 | Canh tunnel: ping `PUBLIC_URL` từ ngoài, đứt → báo Lark | `BOT_TUNNEL_WATCH` / `_CHECK_MIN` / `BOT_TUNNEL_FAILS` | bật khi có `PUBLIC_URL`, 3p, 2 lần fail |
 
 Giữ `BOT_FOLLOWUP_AFTER_H` dưới 24 cho hợp cửa sổ nhắn tin của FB.
+
+### Chống đeo bám khách
+
+Cửa gửi tin (`send_text` / `send_image_bytes`) **luôn đọc cờ trong database trước khi gửi** -
+mọi luồng nhắn, kể cả luồng thêm sau này, đều đi qua đúng chỗ đó. Hai mức:
+
+| Mức | Đặt khi nào | Chặn cái gì |
+|---|---|---|
+| **Im hoàn toàn** (`paused_until`, 24h) | persona chèn `<<TAMDUNG>>` · khách chửi/khiếu nại · viết HOA cả câu · đòi ngừng nhắn | MỌI tin, kể cả tin trả lời |
+| **Cấm nhắn chủ động** (`no_contact`, vĩnh viễn) | vừa hết hạn im · khách từ chối / hoãn lại | follow-up, trả lời bù, tin quay lại. Khách hỏi thì VẪN trả lời |
+
+Hết 24h chỉ mở lại quyền trả lời, **không xoá `no_contact`** - khách đã gắt một lần thì bot
+không bao giờ tự đi nhắc nữa. Admin mở hẳn bằng nút **Mở khoá** ở tab Khách hàng.
+
+Thêm 2 lớp không phụ thuộc AI: trần **1 lần nhắc/khách cả đời** (`brain._MAX_FOLLOWUPS`) và
+regex bắt câu đòi ngừng / từ chối ngay trong `messenger.py` - `y_dinh` do AI chấm có thể lỗi,
+luật cứng thì không. Test: `tests/test_khong_deo_bam.py`.
 
 Ba vòng đầu dùng CHUNG một loop, mỗi vòng `try` riêng - một cái lỗi không nuốt cái còn lại.
 Loop quét ngay khi khởi động (chờ 30s cho ổn định) chứ không ngủ trọn chu kỳ trước, để restart

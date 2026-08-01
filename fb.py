@@ -91,6 +91,50 @@ def append_conversation(psid: str, start_index: int, new_msgs: list) -> None:
     _run(fn)
 
 
+def merge_state(psid: str, patch: dict) -> None:
+    """Ghi ĐÈ TỪNG TRƯỜNG cờ trạng thái khách vào khach_state/<psid> (update, không set cả node).
+
+    update() thay vì set(): mỗi luồng chỉ đụng trường của mình (khoá nhắn, follow-up, ảnh...)
+    nên hai luồng ghi cùng lúc không xoá cờ của nhau."""
+    if not patch:
+        return
+
+    def fn() -> None:
+        from firebase_admin import db
+        db.reference(f"khach_state/{_safe(psid)}").update(patch)
+    _run(fn)
+
+
+def fetch_state(psid: str) -> dict | None:
+    """Cờ trạng thái 1 khách từ Firebase. None = Firebase tắt / chưa có / lỗi. Đồng bộ (chỉ lúc miss)."""
+    if not _init():
+        return None
+    try:
+        from firebase_admin import db
+        data = db.reference(f"khach_state/{_safe(psid)}").get()
+        return data if isinstance(data, dict) else None
+    except Exception as e:
+        print(f"[fb] fetch state lỗi psid={psid}: {type(e).__name__}: {e}", file=sys.stderr)
+        # Mất cờ = bot nhắn lại khách đã yêu cầu ngưng. Phải báo, đừng nuốt.
+        alerts.alert(f"fb:state:{type(e).__name__}",
+                     f"⚠️ ĐỌC CỜ TRẠNG THÁI KHÁCH LỖI - bot có thể nhắn nhầm khách đã khoá.\n"
+                     f"{type(e).__name__}: {e}")
+        return None
+
+
+def delete_state(psid: str) -> bool:
+    """Xoá cờ trạng thái 1 khách (đi kèm xoá hội thoại). False = Firebase tắt/lỗi."""
+    if not _init():
+        return False
+    try:
+        from firebase_admin import db
+        db.reference(f"khach_state/{_safe(psid)}").delete()
+        return True
+    except Exception as e:
+        print(f"[fb] xoá state {psid} lỗi: {type(e).__name__}: {e}", file=sys.stderr)
+        return False
+
+
 def mirror_event(row: dict) -> None:
     """Append 1 sự kiện stats vào stats/events (push -> key tự sinh)."""
     def fn() -> None:
@@ -264,6 +308,7 @@ def delete_conversation(psid: str) -> bool:
     try:
         from firebase_admin import db
         db.reference(f"conversations/{_safe(psid)}").delete()
+        db.reference(f"khach_state/{_safe(psid)}").delete()   # cờ đi cùng hội thoại
         return True
     except Exception as e:
         print(f"[fb] xoá hội thoại {psid} lỗi: {type(e).__name__}: {e}", file=sys.stderr)
@@ -280,6 +325,7 @@ def clear_all() -> bool:
     try:
         from firebase_admin import db
         db.reference("conversations").delete()
+        db.reference("khach_state").delete()
         db.reference("stats").delete()
         return True
     except Exception as e:

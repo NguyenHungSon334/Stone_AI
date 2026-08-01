@@ -24,6 +24,7 @@ from google.genai import types
 import alerts
 import config
 import fb
+import state
 import stats
 import util
 from bot_tools import lark_image
@@ -34,6 +35,9 @@ from bot_tools.find_by_price import (catalog_index, kinds_available, parse_money
 # token/lượt bị chặn, KHÔNG phình theo độ dài chat. Tóm tắt = sidecar <psid>.sum.json (local,
 # tự dựng lại được nên không cần mirror Firebase).
 _HIST_DIR = config.ROOT / "conversations"
+# File PHỤ trong conversations/ - không phải log khách. Mọi chỗ quét glob("*.json") phải loại
+# hết, thiếu 1 đuôi là sinh "khách ma" (đã xảy ra với .profile.json: đếm thành khách riêng).
+SIDECAR_SUFFIXES = (".crm.json", ".sum.json", ".profile.json", ".images.json", ".state.json")
 _MAX_TURNS = 12          # số lượt gần nhất GỬI cho API nguyên văn (chặn token)
 _KEEP_VERBATIM = _MAX_TURNS * 2   # số TIN cuối luôn gửi nguyên văn (~12 lượt)
 _SUMMARY_TRIGGER = 20    # phần chưa-tóm vượt _KEEP_VERBATIM + ngần này -> cập nhật tóm tắt
@@ -71,6 +75,10 @@ _FALLBACK_MODEL = "gemini-2.5-flash-lite"
 _NO_THINK = types.ThinkingConfig(thinking_budget=0)
 
 _MAX_NEW_IMAGES = 4      # trần ảnh gửi kèm 1 tin (mỗi sản phẩm nhắc lần đầu = 1 ảnh)
+# Trần MẪU tool trả về mỗi lượt gọi (1 lượt = 1 hạng mục). 3 mẫu là khách phải cân nhắc 3 giá,
+# 3 kích thước cùng lúc rồi không chọn cái nào; 2 mẫu thì so sánh được ngay.
+# Khách đòi thêm -> gọi lại tool với exclude_ids, không phải nâng số này.
+_MAX_GOI_Y = 2
 
 _TOOLS = [types.Tool(function_declarations=[types.FunctionDeclaration(
     name="suggest_products",
@@ -96,7 +104,8 @@ _TOOLS = [types.Tool(function_declarations=[types.FunctionDeclaration(
             "min": {"type": "string", "description": "Giá tối thiểu, mặc định 0"},
             "stone": {"type": "string", "description": "Loại đá: xanh đen, xanh rêu, xám BĐ, GRN, xanh Bình Định, trắng Yên Bái"},
             "category": {"type": "string", "description": "Danh mục, vd 'Trường Tồn'"},
-            "limit": {"type": "integer", "description": "Số kết quả tối đa (mặc định 3, trần 3)"},
+            "limit": {"type": "integer",
+                      "description": f"Số kết quả tối đa (mặc định {_MAX_GOI_Y}, trần {_MAX_GOI_Y})"},
             "product_ids": {"type": "array", "items": {"type": "string"},
                             "description": "Danh sách mã cụ thể (vd ['M01','LD03']) - dùng thay cho các bộ lọc trên"},
             "exclude_ids": {"type": "array", "items": {"type": "string"},
@@ -200,28 +209,21 @@ def _bo_marker_anh(reply: str) -> str:
 
 
 
-def _image_state_path(psid: str) -> Path:
-    return _HIST_DIR / (_psid_path(psid).stem + ".images.json")
-
-
 def _next_image_token(psid: str, code: str, tokens: list[str]) -> str:
-    """Return the next image for one customer/product, wrapping after the last image."""
+    """Ảnh kế tiếp của 1 mã cho 1 khách (hết ảnh thì quay vòng). Vị trí lưu trong database."""
     if not tokens:
         return ""
     if not psid:
         return tokens[0]
-    state = util.read_json(_image_state_path(psid), {})
-    state = state if isinstance(state, dict) else {}
+    idx_all = state.get(psid).get("img_index") or {}
+    idx_all = dict(idx_all) if isinstance(idx_all, dict) else {}
     try:
-        index = max(0, int(state.get(code, 0)))
+        index = max(0, int(idx_all.get(code, 0)))
     except (TypeError, ValueError):
         index = 0
     token = tokens[index % len(tokens)]
-    state[code] = (index + 1) % len(tokens)
-    try:
-        util.write_json_atomic(_image_state_path(psid), state)
-    except Exception as e:
-        print(f"[img] state write failed psid={psid}: {type(e).__name__}: {e}", file=sys.stderr)
+    idx_all[code] = (index + 1) % len(tokens)
+    state.patch(psid, img_index=idx_all)
     return token
 
 
@@ -286,9 +288,10 @@ def _run_tool(name: str, inp: dict) -> str:
             return "Cần ít nhất một điều kiện: 'kind', 'q', 'max' hoặc 'product_ids'."
         mn = parse_money(inp.get("min", "0"))
         results = search(mx, mn if mn > 0 else 0.0, inp.get("stone"), inp.get("category"),
-                         # Chốt trần 3 mẫu: khách hỏi "cho xem long đình" mà dội cả bảng thì
-                         # tin nhắn dài, khách không chọn nổi. Muốn nhiều hơn thì gọi tool lại.
-                         min(int(inp.get("limit") or 3), 3), kind, q,
+                         # Chốt trần _MAX_GOI_Y mẫu/lượt: khách hỏi "cho xem long đình" mà dội
+                         # cả bảng thì tin dài, khách không chọn nổi. Muốn thêm thì gọi tool lại
+                         # với exclude_ids.
+                         min(int(inp.get("limit") or _MAX_GOI_Y), _MAX_GOI_Y), kind, q,
                          inp.get("exclude_ids"))
     if not results:
         # Nói RÕ thiếu ở đâu + gợi ý bộ lọc hợp lệ: bot trượt 1 lần thì thử lại được, thay vì
@@ -327,33 +330,31 @@ def is_new_customer(psid: str) -> bool:
     return fb.fetch_conversation(psid) is None
 
 
-def _followup_mark(psid: str) -> Path:
-    return _HIST_DIR / (_psid_path(psid).stem + ".followup")
-
-
 # Ý định do lượt trích hồ sơ (chạy sẵn ở nền mỗi lượt) chấm - không tốn thêm lượt gọi AI.
 _KHONG_NHAC = ("tu choi", "hoan lai")
+# Trần số lần nhắc/khách CẢ ĐỜI. Mark cũ tính theo mốc tin khách cuối nên khách đáp cụt mỗi
+# ngày là bị nhắc mỗi ngày, vô hạn - đó chính là lỗi "đeo bám".
+_MAX_FOLLOWUPS = 1
 
 
 def y_dinh(psid: str) -> str:
     """Thái độ mua gần nhất của khách: 'quan tam' | 'hoan lai' | 'tu choi' | '' (chưa rõ)."""
-    return str(util.read_json(_profile_path(psid), {}).get("y_dinh") or "").strip().lower()
+    return str(state.get(psid).get("y_dinh") or "").strip().lower()
 
 
 def followup_candidates(after_h: float, max_h: float = 23.75) -> list[tuple[str, str]]:
     """Khách cần nhắc: bot đã trả lời cuối, khách im trong [after_h, max_h) giờ, CHƯA chốt.
 
     max_h < 24 để còn trong cửa sổ 24h của FB (gửi RESPONSE hợp lệ). Trả [(psid, last_user_at)].
-    Đã nhắc lượt này (mark == last_user_at) hoặc đã chốt (có .crm.json) -> bỏ.
+    Bỏ khách: đã nhắc lượt này · đã nhắc đủ _MAX_FOLLOWUPS lần · đã chốt · đã đánh dấu khoá
+    (khó chịu/đòi ngừng) · ý định từ chối hay hoãn lại.
     """
     out: list[tuple[str, str]] = []
     if not _HIST_DIR.exists():
         return out
     now = datetime.now()
     for p in _HIST_DIR.glob("*.json"):
-        if p.name.endswith((".crm.json", ".sum.json")):   # bỏ sidecar CRM / tóm tắt
-            continue
-        if p.name.endswith(".profile.json"):
+        if p.name.endswith(SIDECAR_SUFFIXES):             # bỏ file phụ, chỉ lấy log khách
             continue
         psid = p.stem
         try:
@@ -374,12 +375,18 @@ def followup_candidates(after_h: float, max_h: float = 23.75) -> list[tuple[str,
             continue
         if not (after_h <= age_h < max_h):
             continue
-        if (_HIST_DIR / f"{psid}.crm.json").exists():          # đã chốt phiếu -> thôi
+        if is_closed(psid):                                    # đã chốt phiếu -> thôi
+            continue
+        st = state.get(psid)
+        # Cờ khoá đọc từ database: khách đã tỏ khó chịu / đòi ngừng thì KHÔNG BAO GIỜ nhắc lại,
+        # kể cả sau khi hết hạn im 24h.
+        if st.get("no_contact") or st.get("stopped"):
             continue
         if y_dinh(psid) in _KHONG_NHAC:                        # khách đã từ chối/hoãn -> đừng nhắc
             continue
-        mark = _followup_mark(psid)
-        if mark.exists() and mark.read_text(encoding="utf-8").strip() == last_user_at:
+        if int(st.get("followup_count") or 0) >= _MAX_FOLLOWUPS:   # đã nhắc đủ, thôi đeo bám
+            continue
+        if str(st.get("followed_at") or "").strip() == last_user_at:
             continue                                           # đã nhắc đúng lượt này
         out.append((psid, last_user_at))
     return out
@@ -416,41 +423,31 @@ async def seed_history_async(psid: str, msgs: list) -> bool:
 
 def is_closed(psid: str) -> bool:
     """Khách đã chốt phiếu CRM (handoff xong / người thật tiếp quản) -> khỏi báo tin rơi."""
+    if state.get(psid).get("crm_done"):
+        return True
     return (_HIST_DIR / f"{_psid_path(psid).stem}.crm.json").exists()
+
+
+def mark_closed(psid: str) -> None:
+    """Ghi cờ ĐÃ CHỐT vào database (trước đây chỉ có file .crm.json local, mất khi dựng lại VPS)."""
+    state.patch(psid, crm_done=True, crm_luc=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
 
 def missed_already_reported(psid: str, at: str) -> bool:
     """Đã báo đúng tin này rồi? -> vòng quét sau không lải nhải cùng 1 khách."""
-    mark = _missed_mark(psid)
-    try:
-        return mark.exists() and mark.read_text(encoding="utf-8").strip() == at
-    except Exception:
-        return False
+    return str(state.get(psid).get("missed_at") or "").strip() == at
 
 
 def mark_missed_reported(psid: str, last_user_at: str) -> None:
     """Đánh dấu ĐÃ BÁO tin rơi này -> vòng quét sau không báo lại cùng 1 tin."""
-    try:
-        _HIST_DIR.mkdir(parents=True, exist_ok=True)
-        _missed_mark(psid).write_text(last_user_at, encoding="utf-8")
-    except Exception as e:
-        print(f"[missed] mark lỗi psid={psid}: {type(e).__name__}: {e}", file=sys.stderr)
-        alerts.alert(f"missed:mark:{type(e).__name__}",
-                     f"⚠️ KHÔNG ĐÁNH DẤU ĐƯỢC TIN RƠI - admin sẽ bị báo lặp cùng 1 khách.\n"
-                     f"{type(e).__name__}: {e}")
+    state.patch(psid, missed_at=last_user_at)
 
 
 def mark_followed(psid: str, last_user_at: str) -> None:
-    """Đánh dấu đã nhắc khách ở lượt này (theo mốc tin khách cuối) -> không nhắc lặp."""
-    try:
-        _HIST_DIR.mkdir(parents=True, exist_ok=True)
-        _followup_mark(psid).write_text(last_user_at, encoding="utf-8")
-    except Exception as e:
-        print(f"[followup] mark lỗi psid={psid}: {type(e).__name__}: {e}", file=sys.stderr)
-        # KHÔNG đánh dấu được = vòng quét sau lại nhắc khách lần nữa, mỗi 15 phút -> SPAM KHÁCH.
-        alerts.alert(f"followup:mark:{type(e).__name__}",
-                     f"🔴 KHÔNG ĐÁNH DẤU ĐƯỢC FOLLOW-UP - khách sẽ bị nhắc LẶP mỗi vòng quét.\n"
-                     f"{type(e).__name__}: {e}\n➡️ Tắt tạm BOT_FOLLOWUP_ENABLED=0 nếu khách kêu spam.")
+    """Đánh dấu đã nhắc khách ở lượt này + CỘNG SỐ LẦN đã nhắc (trần ở followup_candidates)."""
+    st = state.get(psid)
+    state.patch(psid, followed_at=last_user_at,
+                followup_count=int(st.get("followup_count") or 0) + 1)
 
 
 def _load_hist(psid: str) -> list:
@@ -861,8 +858,14 @@ _PROFILE_UPDATING: set[str] = set()
 _PROFILE_UPDATING_LOCK = threading.Lock()
 
 
-def _profile_path(psid: str) -> Path:
-    return _HIST_DIR / (_psid_path(psid).stem + ".profile.json")
+def _doc_profile(psid: str) -> dict:
+    """Hồ sơ khách từ database (state). Trước đây là file .profile.json local - mất khi dựng
+    lại VPS, kéo theo mất luôn ý định 'từ chối/hoãn lại' -> khách bị nhắc lại từ đầu."""
+    return _clean_profile(state.get(psid).get("profile"))
+
+
+def _ghi_profile(psid: str, profile: dict) -> None:
+    state.patch(psid, profile=profile, y_dinh=str(profile.get("y_dinh") or "").strip().lower())
 
 
 def _clean_profile(raw: object) -> dict:
@@ -894,7 +897,7 @@ def _profile_prompt(profile: dict) -> str:
 
 
 def _profile_from_history_sync(psid: str, hist: list) -> dict:
-    current = _clean_profile(util.read_json(_profile_path(psid), {}))
+    current = _doc_profile(psid)
     if current["upto"] >= len(hist):
         return current
     user_lines = [f"Khách: {msg['content']}" for msg in hist
@@ -934,10 +937,7 @@ def _profile_from_history_sync(psid: str, hist: list) -> dict:
     if phone:
         profile["sdt"] = phone
     if profile != current:
-        try:
-            util.write_json_atomic(_profile_path(psid), profile)
-        except Exception as e:
-            print(f"[profile] ghi lỗi psid={psid}: {type(e).__name__}: {e}", file=sys.stderr)
+        _ghi_profile(psid, profile)
     return profile
 
 

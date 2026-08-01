@@ -21,14 +21,13 @@ import httpx
 
 import brain
 import config
-import util
+import state
 from bot_tools import lark_crm
 
 _MAX_TIN = 30                 # số tin cũ kéo về/khách. Đủ ngữ cảnh, chặn phình token Gemini.
 NGUONG_QUAY_LAI_H = 24.0      # im lâu hơn ngần này rồi nhắn lại = "quan tâm lại", báo admin
 _TIMEOUT_S = 15.0             # Graph chậm KHÔNG được giữ khách chờ -> cắt sớm, bỏ qua nạp
 
-_HIST_DIR = config.ROOT / "conversations"
 _page_id_cache: str = ""
 
 
@@ -117,25 +116,14 @@ async def _keo_lich_su_cu(psid: str, fb_time_to_local) -> list:
     return []
 
 
-def _mark_path(psid: str):
-    return _HIST_DIR / f"{util.safe_psid(psid)}.quaylai"
-
-
 def _da_bao(psid: str, moc: str) -> bool:
     """Đã báo admin đúng lần quay lại này chưa? Chặn báo lặp khi khách nhắn liền mấy tin."""
-    p = _mark_path(psid)
-    try:
-        return p.exists() and p.read_text(encoding="utf-8").strip() == moc
-    except Exception:
-        return False
+    return str(state.get(psid).get("returning_at") or "").strip() == moc
 
 
 def _ghi_mark(psid: str, moc: str) -> None:
-    try:
-        _mark_path(psid).write_text(moc, encoding="utf-8")
-    except Exception as e:
-        # Không ghi được -> lượt sau báo lại lần nữa. Phiền admin, không hỏng bot.
-        print(f"[quaylai] ghi mark {psid} lỗi: {type(e).__name__}: {e}", file=sys.stderr)
+    """Mốc lần quay lại đã báo - lưu database, không còn file .quaylai local."""
+    state.patch(psid, returning_at=moc)
 
 
 def gio_im_lang(msgs: list, bay_gio: datetime | None = None) -> float:

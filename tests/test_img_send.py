@@ -83,5 +83,36 @@ def test_canh_bao_anh_noi_dung_khach_van_nhan_duoc_chu(monkeypatch):
     assert "KHÔNG nhận được tin" in tins[0], "lỗi gửi CHỮ vẫn phải báo nặng như cũ"
 
 
+def test_khong_nen_duoc_anh_thi_phai_bao_admin(monkeypatch):
+    """Thiếu Pillow trên server = mọi ảnh đi nguyên bản ~20MB, FB từ chối sạch mà bot vẫn
+    'chạy bình thường'. Ca hỏng âm thầm này bắt buộc phải báo, không được nuốt."""
+    keu = []
+    monkeypatch.setattr(messenger.alerts, "alert", lambda key, msg: keu.append((key, msg)))
+
+    data, ctype = messenger._shrink_image(b"khong-phai-anh" * 100_000, "image/png")
+
+    assert (data, ctype) == (b"khong-phai-anh" * 100_000, "image/png"), "hỏng thì gửi nguyên gốc"
+    assert keu and "Pillow" in keu[0][1], "phải chỉ đúng nguyên nhân cần kiểm tra"
+
+
+def test_anh_nen_xong_van_qua_nang_thi_canh_bao(monkeypatch):
+    """Nén rồi vẫn > ngưỡng -> FB dễ trả #100. Báo trước, khỏi đoán mò quanh token."""
+    keu = []
+    monkeypatch.setattr(messenger.alerts, "alert", lambda key, msg: keu.append((key, msg)))
+    monkeypatch.setattr(messenger, "_IMG_CANH_BAO_MB", 0.000_001)   # ép mọi ảnh thành "nặng"
+
+    messenger._shrink_image(_png((2000, 2000)), "image/png")
+
+    assert keu and keu[0][0] == "img:qua-nang"
+
+
+def test_anh_nho_thi_gui_nguyen_khong_canh_bao(monkeypatch):
+    keu = []
+    monkeypatch.setattr(messenger.alerts, "alert", lambda key, msg: keu.append(key))
+    goc = _png((40, 40))
+    assert messenger._shrink_image(goc, "image/png") == (goc, "image/png")
+    assert keu == []
+
+
 async def _tra(v):
     return v

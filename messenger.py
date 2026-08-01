@@ -18,6 +18,7 @@ import alerts
 import brain
 import config
 import returning
+import state
 import stats
 import util
 from bot_tools import lark_crm, lark_image
@@ -28,9 +29,13 @@ _IMG_JPEG_Q = 85
 _IMG_RETRY_GAP_S = 1.0    # chờ trước khi gửi lại ảnh hỏng (dội lại ngay là hỏng tiếp)
 
 
+_IMG_CANH_BAO_MB = 2.0    # trên ngưỡng này FB hay trả '#100 Upload attachment failure'
+
+
 def _shrink_image(data: bytes, ctype: str) -> tuple[bytes, str]:
-    """Downscale + nén JPEG để FB nuốt được (ảnh gốc Lark tới ~16MB PNG -> upload treo/timeout).
+    """Downscale + nén JPEG để FB nuốt được (ảnh gốc Lark tới ~20MB PNG -> upload treo/timeout).
     Pillow lỗi hoặc ảnh đã nhỏ -> trả nguyên gốc (fallback an toàn)."""
+    goc_mb = len(data) / 1e6
     try:
         import io
 
@@ -45,9 +50,24 @@ def _shrink_image(data: bytes, ctype: str) -> tuple[bytes, str]:
             im = im.convert("RGB")
         buf = io.BytesIO()
         im.save(buf, format="JPEG", quality=_IMG_JPEG_Q, optimize=True)
-        return (buf.getvalue(), "image/jpeg")
+        out = buf.getvalue()
+        print(f"[img] nén {goc_mb:.1f}MB {ctype} -> {len(out) / 1e6:.1f}MB jpeg", file=sys.stderr)
+        if len(out) > _IMG_CANH_BAO_MB * 1e6:
+            # Nén rồi vẫn nặng = FB nhiều khả năng từ chối. Báo để biết ĐÂY mới là nguyên nhân,
+            # thay vì đoán mò quanh token/quyền mỗi lần thấy #100.
+            alerts.alert("img:qua-nang",
+                         f"⚠️ ẢNH VẪN NẶNG SAU KHI NÉN ({len(out) / 1e6:.1f}MB) - FB dễ từ chối "
+                         f"'#100 Upload attachment failure', khách nhận chữ mà thiếu ảnh.\n"
+                         f"➡️ Giảm _IMG_MAX_DIM/_IMG_JPEG_Q, hoặc thay ảnh gốc nhẹ hơn trong Lark Base.")
+        return (out, "image/jpeg")
     except Exception as e:
-        print(f"[img] nén lỗi, gửi gốc: {type(e).__name__}: {e}", file=sys.stderr)
+        print(f"[img] nén lỗi, gửi gốc {goc_mb:.1f}MB: {type(e).__name__}: {e}", file=sys.stderr)
+        # Thiếu Pillow trên VPS -> mọi ảnh đi nguyên bản PNG ~20MB -> FB từ chối SẠCH.
+        # Đây là ca hỏng âm thầm nhất: bot vẫn chạy, khách chỉ không bao giờ thấy ảnh.
+        alerts.alert(f"img:nen:{type(e).__name__}",
+                     f"🔴 KHÔNG NÉN ĐƯỢC ẢNH ({goc_mb:.1f}MB, gửi nguyên bản) - FB nhiều khả năng "
+                     f"từ chối, khách KHÔNG nhận được ảnh.\n{type(e).__name__}: {e}\n"
+                     f"➡️ Kiểm tra Pillow đã cài trên server chưa: python -c \"import PIL\"")
         return (data, ctype)
 
 _SEND_API = "https://graph.facebook.com/{ver}/me/messages"
@@ -75,17 +95,44 @@ _HUMAN_HANDOFF_REPLY = ("Dạ nội dung này em nhờ chuyên gia bên em trao 
 # Khách đang gắt: KHÔNG xin số, KHÔNG hỏi thêm, KHÔNG chào mời - chỉ nhận lỗi rồi nhường người thật.
 _XOA_DIU_REPLY = ("Dạ em xin ghi nhận phản ánh của Bác ạ. Em rất tiếc vì đã làm Bác không hài lòng. "
                   "Em báo ngay quản lý bên em liên hệ trực tiếp với Bác để xử lý ạ.")
+# Khách đòi ngừng: KHÔNG hứa "quản lý sẽ liên hệ" - đang bảo đừng làm phiền mà còn hẹn gọi
+# tiếp là phản tác dụng. Nhận lỗi, dừng, để cửa mở cho khách chủ động.
+_NGUNG_REPLY = ("Dạ em xin lỗi vì đã làm phiền Bác ạ. Em dừng nhắn tin cho Bác từ đây. "
+                "Khi nào Bác cần đến đá mỹ nghệ thì nhắn em bất cứ lúc nào ạ.")
 
 
 _LY_DO_KHIEU_NAI = "Khách bức xúc/khiếu nại (từ ngữ tiêu cực mạnh)"
 _LY_DO_VIET_HOA = "Khách viết HOA toàn bộ câu (dấu hiệu bức xúc)"
-# Hai lý do này là khách ĐANG KHÓ CHỊU (khác với chỉ xin gặp người thật) -> bot phải im luôn.
-_LY_DO_KHO_CHIU = (_LY_DO_KHIEU_NAI, _LY_DO_VIET_HOA)
+_LY_DO_DOI_NGUNG = "Khách yêu cầu ngừng nhắn"
+# Ba lý do này là khách ĐANG KHÓ CHỊU (khác với chỉ xin gặp người thật) -> bot phải im luôn.
+_LY_DO_KHO_CHIU = (_LY_DO_KHIEU_NAI, _LY_DO_VIET_HOA, _LY_DO_DOI_NGUNG)
+
+# Khách đòi NGỪNG NHẮN. Bắt bằng code, KHÔNG chờ AI chấm ý định: đây là câu mà đoán sai một
+# lần là khách chặn Fanpage. Ghép cụm đủ dài để không dính câu bình thường ("phiền Bác cho em
+# xin kích thước" không được khớp "làm phiền").
+_NGUNG_KEYWORDS = ("đừng nhắn", "dừng nhắn", "ngừng nhắn", "không nhắn nữa", "đừng làm phiền",
+                   "làm phiền quá", "phiền quá", "nhắn hoài", "nhắn mãi", "hỏi hoài", "hỏi mãi",
+                   "spam", "đừng gửi nữa", "block", "chặn trang", "bỏ theo dõi")
+# Khách TỪ CHỐI (không phải gắt): vẫn trả lời tử tế, chỉ CẤM nhắc lại về sau.
+_TU_CHOI_KEYWORDS = ("không có nhu cầu", "ko có nhu cầu", "k có nhu cầu", "không nhu cầu",
+                     "nhắn nhầm", "nhắn lộn", "không mua", "ko mua", "không cần nữa",
+                     "không quan tâm", "ko quan tâm")
+
+
+def _y_dinh_tu_khoa(text: str) -> str:
+    """Ý định đọc bằng LUẬT CỨNG từ chính lời khách: 'tu choi' | '' (để AI chấm tiếp).
+
+    Có lớp này vì y_dinh do AI chấm có thể lỗi/chấm nhầm -> khách đã nói thẳng 'không có nhu
+    cầu' mà vẫn bị follow-up nhắc. Luật cứng không phụ thuộc AI."""
+    t = (text or "").lower()
+    return "tu choi" if any(k in t for k in _TU_CHOI_KEYWORDS) else ""
 
 
 def _forced_handoff_reason(text: str) -> str | None:
     """Tín hiệu tường minh cần người thật NGAY (chặn trước AI). None = để AI xử bình thường."""
     t = (text or "").lower()
+    if any(k in t for k in _NGUNG_KEYWORDS):      # khách đòi ngừng: xử TRƯỚC mọi nhánh khác
+        return _LY_DO_DOI_NGUNG
     if any(k in t for k in _HUMAN_KEYWORDS):
         return "Khách chủ động xin gặp người thật"
     if any(k in t for k in _COMPLAINT_KEYWORDS):
@@ -128,70 +175,49 @@ def _is_meaningful_text(text: str) -> bool:
     return bool(set(plain.split()) & _NOISE_TERMS)
 
 
-def _noise_path(psid: str):
-    return brain._HIST_DIR / (util.safe_psid(psid) + ".noise.state")
-
-
 def _noise_state(psid: str) -> dict:
-    data = util.read_json(_noise_path(psid), {})
-    return data if isinstance(data, dict) else {}
+    """Cờ nhiễu/khoá của khách. Nay nằm trong state (Firebase + cache local), không còn file rời."""
+    return state.get(psid)
 
 
-def _save_noise_state(psid: str, state: dict) -> None:
-    try:
-        util.write_json_atomic(_noise_path(psid), state)
-    except Exception as e:
-        print(f"[noise] state write failed psid={psid}: {type(e).__name__}: {e}", file=sys.stderr)
+def _reset_noise(psid: str) -> None:
+    """Khách nhắn tin có nghĩa -> xoá bộ đếm nhiễu. KHÔNG đụng cờ khoá nhắn (no_contact):
+    khách gắt xong nhắn tiếp câu tử tế cũng không được tự mở khoá."""
+    st = state.get(psid)
+    if st.get("count") or st.get("recent") or (st.get("stopped") and not st.get("no_contact")):
+        state.patch(psid, count=0, recent=[], stopped=bool(st.get("no_contact")))
 
 
 def _noise_decision(psid: str, text: str) -> tuple[str, dict]:
-    state = _noise_state(psid)
-    # Tạm dừng vì khách khó chịu KHÔNG được tin có nghĩa mở lại: khách gắt tiếp vẫn là tin
+    st = state.get(psid)
+    # Khoá vì khách khó chịu KHÔNG được tin có nghĩa mở lại: khách gắt tiếp vẫn là tin
     # có nghĩa, mở ra thì bot lại nhảy vào đúng lúc không nên. Chỉ hết hạn giờ mới mở.
-    het_han = float(state.get("paused_until") or 0)
-    if het_han:
-        if time.time() < het_han:
-            return "blocked", state
-        state = {}                                   # hết hạn tạm dừng -> khách quay lại bình thường
-        _save_noise_state(psid, state)
+    khoa, _ = state.bi_khoa(psid)
+    if khoa:
+        return "blocked", st
     if _is_meaningful_text(text):
-        if state:
-            _save_noise_state(psid, {})
-        return "allow", state
-    recent = list(state.get("recent") or [])[-2:]
+        _reset_noise(psid)
+        return "allow", st
+    recent = list(st.get("recent") or [])[-2:]
     recent.append((text or "").strip()[:80])
-    state["recent"] = recent
-    if state.get("stopped"):
-        _save_noise_state(psid, state)
-        return "blocked", state
-    count = int(state.get("count") or 0) + 1
-    state["count"] = count
+    if st.get("stopped"):
+        return "blocked", state.patch(psid, recent=recent)
+    count = int(st.get("count") or 0) + 1
     if count == 1:
-        _save_noise_state(psid, state)
-        return "clarify", state
-    state["stopped"] = True
-    _save_noise_state(psid, state)
-    return "stop", state
-
-
+        return "clarify", state.patch(psid, recent=recent, count=count)
+    return "stop", state.patch(psid, recent=recent, count=count, stopped=True)
 
 
 def _sticker_decision(psid: str) -> tuple[str, dict]:
-    state = _noise_state(psid)
-    if state.get("stopped"):
-        return "blocked", state
-    recent = list(state.get("recent") or [])[-2:]
+    st = state.get(psid)
+    if st.get("stopped"):
+        return "blocked", st
+    recent = list(st.get("recent") or [])[-2:]
     recent.append("[sticker]")
-    state["recent"] = recent
-    count = int(state.get("count") or 0) + 1
-    state["count"] = count
+    count = int(st.get("count") or 0) + 1
     if count == 1:
-        _save_noise_state(psid, state)
-        return "welcome", state
-    state["stopped"] = True
-    state["reason"] = "sticker"
-    _save_noise_state(psid, state)
-    return "stop", state
+        return "welcome", state.patch(psid, recent=recent, count=count)
+    return "stop", state.patch(psid, recent=recent, count=count, stopped=True, reason="sticker")
 
 def _extract_handoff(reply: str) -> tuple[str, str | None]:
     """Bóc marker handoff khỏi tin gửi khách. Trả (reply_sạch, lý_do | None)."""
@@ -212,11 +238,11 @@ def _extract_pause(reply: str) -> tuple[str, str | None]:
 
 
 def _pause_bot(psid: str, reason: str) -> None:
-    """Bot im với khách này _PAUSE_H giờ. Dùng chung cờ 'stopped' nên bảng điều khiển và
-    vòng follow-up (đều đã lọc theo cờ này) tự động bỏ qua khách, khỏi thêm nhánh mới."""
-    state = _noise_state(psid)
-    state.update(stopped=True, paused_until=time.time() + _PAUSE_H * 3600, reason=reason)
-    _save_noise_state(psid, state)
+    """Khách khó chịu -> ĐÁNH DẤU KHOÁ NHẮN vào database (Firebase), bot im _PAUSE_H giờ.
+
+    Cờ nằm ở khach_state/<psid> nên sống sót redeploy, và mọi đường gửi ra đều check nó
+    (xem _bo_qua_vi_khoa) - không phải nhớ vá từng luồng nhắn chủ động."""
+    state.khoa_nhan(psid, ly_do=reason, nguon="TAMDUNG", gio=_PAUSE_H)
 
 
 def _extract_images(reply: str) -> tuple[str, list[str]]:
@@ -691,8 +717,26 @@ async def _fb_post(url: str, *, payload=None, data=None, files=None,
         return False
 
 
-async def send_text(psid: str, text: str) -> None:
+def _bo_qua_vi_khoa(psid: str, tag: str, force: bool, chu_dong: bool) -> bool:
+    """CHỐT CHẶN DUY NHẤT trước khi gửi bất cứ thứ gì cho khách. Cờ đọc từ database.
+
+    - Khách khó chịu (đang trong hạn im): chặn MỌI tin, kể cả tin trả lời.
+    - Khách đòi ngừng / từ chối / hoãn lại: chỉ chặn tin bot TỰ nhắn (chu_dong=True) -
+      follow-up, trả lời bù, tin khách quay lại. Khách hỏi thì vẫn trả lời tử tế.
+
+    force=True dành cho tin xoa dịu cuối cùng (tin đặt ra cái khoá) và tin admin gửi tay."""
+    if force or not psid:
+        return False
+    chan, ly_do = state.cam_nhan_chu_dong(psid) if chu_dong else state.bi_khoa(psid)
+    if chan:
+        print(f"[khoa] bỏ gửi {tag} cho psid={psid}: {ly_do}", file=sys.stderr)
+    return chan
+
+
+async def send_text(psid: str, text: str, force: bool = False, chu_dong: bool = False) -> None:
     if not (config.PAGE_TOKEN and psid and text):
+        return
+    if _bo_qua_vi_khoa(psid, "text", force, chu_dong):
         return
     url = _SEND_API.format(ver=config.GRAPH_VER)
     for chunk in _split_text(text):
@@ -719,7 +763,8 @@ def _ep_jpeg(data: bytes) -> tuple[bytes, str] | None:
         return None
 
 
-async def send_image_bytes(psid: str, data: bytes, ctype: str = "image/jpeg") -> None:
+async def send_image_bytes(psid: str, data: bytes, ctype: str = "image/jpeg",
+                           force: bool = False) -> None:
     """Gửi ảnh bằng CÁCH UPLOAD bytes thẳng (multipart). FB không phải tự fetch URL nữa
     -> ảnh tới ngay sau text, không trickle. Bytes đã warm sẵn nên gửi luôn.
 
@@ -727,6 +772,8 @@ async def send_image_bytes(psid: str, data: bytes, ctype: str = "image/jpeg") ->
     chập chờn dù file hợp lệ. Lượt 2 ép về JPEG baseline - loại nốt khả năng FB nghẹn PNG.
     Lượt đầu im lặng (không báo admin) để cảnh báo chỉ nổ khi ĐÃ hết cách."""
     if not (config.PAGE_TOKEN and psid and data):
+        return
+    if _bo_qua_vi_khoa(psid, "img", force, chu_dong=False):
         return
     url = _SEND_API.format(ver=config.GRAPH_VER)
 
@@ -798,7 +845,7 @@ async def run_followups() -> None:
             continue
         if _noise_state(psid).get("stopped"):   # bot đã cố ý ngưng (nhiễu/sticker) -> đừng đào lại
             continue
-        await send_text(psid, _FOLLOWUP_TEXT)
+        await send_text(psid, _FOLLOWUP_TEXT, chu_dong=True)
         brain.mark_followed(psid, last_user_at)
         stats.log_event("followup", psid)
 
@@ -1080,6 +1127,7 @@ async def _save_lead_to_crm(psid: str) -> None:
     result = await asyncio.to_thread(lark_crm.upsert_lead, psid, lead)
     tag = {"created": "✅ Đã tạo lead CRM", "updated": "♻️ Đã cập nhật lead CRM"}.get(result)
     if tag:
+        brain.mark_closed(psid)                       # cờ ĐÃ CHỐT lên database, hết đeo bám
         code = lark_crm.lead_code(psid)               # mã Lead/Chance vừa lưu
         head = f"{tag}: {lead.get('ten') or '?'} - {lead.get('sdt') or '?'}"
         if code:
@@ -1234,12 +1282,19 @@ async def _process_inner(psid: str, text: str, user_at: str | None = None) -> No
             stats.log_event("noise_blocked", psid)
             return
         # Handoff cưỡng bức (tín hiệu tường minh): chặn trước AI, người thật vào ngay.
+        # Khách nói thẳng là không có nhu cầu -> ghi ý định vào database NGAY, không chờ AI chấm.
+        y_dinh_cung = _y_dinh_tu_khoa(text) if not images else ""
+        if y_dinh_cung:
+            state.patch(psid, y_dinh=y_dinh_cung)
         forced = _forced_handoff_reason(text) if not images else None
         if forced:
+            doi_ngung = forced == _LY_DO_DOI_NGUNG
             kho_chiu = forced in _LY_DO_KHO_CHIU
             stats.log_event("khach_kho_chiu" if kho_chiu else "handoff", psid)
             # Khách đang gắt: câu mời để lại SĐT lúc này chỉ đổ thêm dầu -> xoa dịu rồi im.
-            await send_text(psid, _XOA_DIU_REPLY if kho_chiu else _HUMAN_HANDOFF_REPLY)
+            # force: tin xoa dịu là tin ĐẶT RA cái khoá, không được tự chặn chính nó.
+            chot = _NGUNG_REPLY if doi_ngung else (_XOA_DIU_REPLY if kho_chiu else _HUMAN_HANDOFF_REPLY)
+            await send_text(psid, chot, force=True)
             if kho_chiu:
                 _pause_bot(psid, forced)
             await notify_admins(f"{'😠 KHÁCH KHÓ CHỊU - BOT ĐÃ NGƯNG NHẮN' if kho_chiu else '🔔 CHUYỂN NGƯỜI THẬT'}"
@@ -1283,7 +1338,7 @@ async def _process_inner(psid: str, text: str, user_at: str | None = None) -> No
             stats.log_event("khach_kho_chiu", psid)
             _pause_bot(psid, pause_reason)
             if reply:
-                await send_text(psid, reply)
+                await send_text(psid, reply, force=True)   # tin cuối, gửi trước khi khoá có hiệu lực
             await notify_admins(f"😠 KHÁCH KHÓ CHỊU - BOT ĐÃ NGƯNG NHẮN: {await _label(psid)}\n"
                                 f"PSID: {psid}\nLý do: {pause_reason}\n"
                                 f"Tin khách: {text}\n"

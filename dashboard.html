@@ -291,7 +291,7 @@ td .psid{color:var(--ink);font-weight:700}
         <span class="label" id="custCount" style="color:var(--muted)"></span>
       </div>
       <table>
-        <thead><tr><th>Tên khách</th><th>PSID</th><th>Số tin</th><th>Lần cuối</th><th>Tin gần nhất</th><th></th></tr></thead>
+        <thead><tr><th>Tên khách</th><th>PSID</th><th>Số tin</th><th>Lần cuối</th><th>Tin gần nhất</th><th>Trạng thái</th><th></th></tr></thead>
         <tbody id="customerRows"></tbody>
       </table>
       <div style="margin-top:16px;text-align:center">
@@ -525,20 +525,42 @@ async function loadOverview(silent = false) {
 const CUST_PAGE = 50;
 let _custLoaded = 0, _custQ = "";
 
+/* Nhãn trạng thái: bot có được nhắn khách này không. Đọc từ database (khach_state). */
+function custTrangThai(c) {
+  if (c.khoa_nhan) return `<span title="${escapeHtml(c.ly_do_khoa)}" style="color:#c0392b">🔒 Đã khoá</span>`;
+  if (c.da_chot) return `<span style="color:var(--muted)">✅ Đã chốt</span>`;
+  if (c.cam_nhan_chu_dong)
+    return `<span title="${escapeHtml(c.ly_do_khoa)}" style="color:#b8860b">🔕 Không nhắc</span>`;
+  return "";
+}
+
 function custRow(c) {
+  const moKhoa = (c.khoa_nhan || c.cam_nhan_chu_dong)
+    ? `<button class="btn small" title="Cho bot nhắn lại khách này"
+         onclick="event.stopPropagation();moKhoaKhach('${c.psid}', this)">Mở khoá</button> ` : "";
   return `<tr class="row" onclick="openCustomer('${c.psid}')">
     <td><span class="psid">${escapeHtml(c.name) || "(không rõ tên)"}</span></td>
     <td style="color:var(--muted)">${c.psid}</td><td>${c.messages}</td>
     <td>${c.last_at.replace("T", " ")}</td><td>${escapeHtml(c.last_text)}</td>
-    <td style="text-align:right"><button class="btn small" title="Xoá hội thoại này"
+    <td>${custTrangThai(c)}</td>
+    <td style="text-align:right">${moKhoa}<button class="btn small" title="Xoá hội thoại này"
         onclick="event.stopPropagation();deleteCustomer('${c.psid}', this)">Xoá</button></td></tr>`;
+}
+
+async function moKhoaKhach(psid, btn) {
+  btn.disabled = true;
+  try {
+    await api("/admin/api/customers/" + encodeURIComponent(psid) + "/mo-khoa", false, {method: "POST"});
+    toast("Đã mở khoá - bot được nhắn khách này lại");
+    loadCustomers(true);
+  } catch (e) { btn.disabled = false; toast("Mở khoá lỗi: " + e.message, false); }
 }
 
 async function loadCustomers(silent = false, more = false) {
   const rows = document.getElementById("customerRows");
   if (!silent && !more && !rows.children.length)
     rows.innerHTML = Array(4).fill(0).map(() =>
-      `<tr><td colspan="6" class="skel" style="height:20px"></td></tr>`).join("");
+      `<tr><td colspan="7" class="skel" style="height:20px"></td></tr>`).join("");
   // Không "more" = nạp lại đúng số dòng đang hiện (live refresh không được thu nhỏ danh sách).
   const offset = more ? _custLoaded : 0;
   const limit = more ? CUST_PAGE : Math.min(200, Math.max(CUST_PAGE, _custLoaded));
@@ -547,7 +569,7 @@ async function loadCustomers(silent = false, more = false) {
                         + (_custQ ? "&q=" + encodeURIComponent(_custQ) : ""), silent);
     const html = d.customers.map(custRow).join("");
     if (more) { rows.insertAdjacentHTML("beforeend", html); _custLoaded += d.customers.length; }
-    else { rows.innerHTML = html || `<tr><td colspan="6" style="color:var(--muted)">Chưa có hội thoại nào.</td></tr>`;
+    else { rows.innerHTML = html || `<tr><td colspan="7" style="color:var(--muted)">Chưa có hội thoại nào.</td></tr>`;
            _custLoaded = d.customers.length; }
     document.getElementById("custCount").textContent = `${_custLoaded}/${d.total} khách`;
     document.getElementById("custMore").classList.toggle("hidden", _custLoaded >= d.total);

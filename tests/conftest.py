@@ -15,6 +15,16 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import alerts
 import fb
+import state
+
+
+@pytest.fixture(autouse=True)
+def _state_rieng(monkeypatch, tmp_path):
+    """Cờ trạng thái khách ghi vào tmp, KHÔNG đụng conversations/ thật của máy dev.
+
+    Trỏ vào chính tmp_path (nơi các test đặt brain._HIST_DIR) để test dựng sẵn sidecar đời cũ
+    vẫn chạy qua đúng đường migrate."""
+    monkeypatch.setattr(state, "_DIR", tmp_path)
 
 
 @pytest.fixture(autouse=True)

@@ -22,6 +22,7 @@ import config
 import control
 import fb
 import messenger
+import state
 import stats
 import util
 
@@ -58,14 +59,14 @@ async def dashboard_page(request: Request):
 def _dem_khach() -> int:
     """Số khách của cả hệ thống. Firebase là nguồn chính; tắt thì đếm cache local.
 
-    glob("*.json") thô sẽ đếm cả sidecar .crm.json/.sum.json thành khách -> phồng số."""
+    glob("*.json") thô sẽ đếm cả file phụ (.crm/.sum/.profile/.state...) thành khách -> phồng số."""
     tren_cloud = fb.list_psids()
     if tren_cloud is not None:
         return len(tren_cloud)
     if not _HIST_DIR.exists():
         return 0
     return len([p for p in _HIST_DIR.glob("*.json")
-                if not p.name.endswith((".crm.json", ".sum.json"))])
+                if not p.name.endswith(brain.SIDECAR_SUFFIXES)])
 
 
 @router.get("/api/overview")
@@ -90,6 +91,26 @@ def _last_text(msgs: list) -> str:
     return ""
 
 
+def _trang_thai(psid: str) -> dict:
+    """Cờ trạng thái khách cho dashboard: có đang bị khoá nhắn không, vì sao, đã chốt chưa."""
+    st = state.get(psid)
+    khoa, ly_do = state.bi_khoa(psid)
+    cam_chu_dong, ly_do_cd = state.cam_nhan_chu_dong(psid)
+    return {"khoa_nhan": khoa, "cam_nhan_chu_dong": cam_chu_dong,
+            "ly_do_khoa": ly_do or ly_do_cd, "y_dinh": st.get("y_dinh") or "",
+            "da_chot": bool(st.get("crm_done")), "so_lan_nhac": int(st.get("followup_count") or 0)}
+
+
+@router.post("/api/customers/{psid}/mo-khoa")
+async def mo_khoa_khach(request: Request, psid: str):
+    """Mở khoá cho bot nhắn lại khách này (admin đã xử lý xong với khách khó chịu)."""
+    _check_token(request)
+    stem = util.safe_psid(psid)
+    state.mo_khoa(stem, boi="admin")
+    print(f"[admin] mở khoá khách {psid}", file=sys.stderr)
+    return {"ok": True, **_trang_thai(stem)}
+
+
 @router.get("/api/customers")
 async def customers(request: Request, limit: int = 50, offset: int = 0, q: str = ""):
     """Khách của CẢ HỆ THỐNG: gộp psid trên Firebase (nguồn chính) với cache local.
@@ -106,7 +127,7 @@ async def customers(request: Request, limit: int = 50, offset: int = 0, q: str =
     co_local: set[str] = set()
     if _HIST_DIR.exists():
         for p in _HIST_DIR.glob("*.json"):
-            if p.name.endswith((".crm.json", ".sum.json")):
+            if p.name.endswith(brain.SIDECAR_SUFFIXES):
                 continue
             co_local.add(p.stem)
             xep.append((p.stem, p.stat().st_mtime))
@@ -133,7 +154,8 @@ async def customers(request: Request, limit: int = 50, offset: int = 0, q: str =
             last_at = (datetime.fromtimestamp(mtime).isoformat(timespec="minutes")
                        if mtime else (msgs[-1].get("at") or "")[:16])
             out.append({"psid": psid, "name": await _profile_name(psid), "messages": len(msgs),
-                        "last_at": last_at, "last_text": _last_text(msgs)[:120]})
+                        "last_at": last_at, "last_text": _last_text(msgs)[:120],
+                        **_trang_thai(psid)})
         except Exception as e:
             print(f"[admin] đọc khách {psid} lỗi: {type(e).__name__}: {e}", file=sys.stderr)
     return {"customers": out, "total": total, "offset": offset, "limit": limit,
@@ -151,7 +173,8 @@ async def customer_detail(request: Request, psid: str):
     # Chỉ trả turn text (log sạch của brain.py đã là text, phòng hờ lọc block).
     clean = [{"role": m.get("role"), "text": m["content"], "at": m.get("at", "")}
              for m in msgs if isinstance(m.get("content"), str)]
-    return {"psid": psid, "name": await _profile_name(util.safe_psid(psid)), "messages": clean}
+    return {"psid": psid, "name": await _profile_name(util.safe_psid(psid)), "messages": clean,
+            **_trang_thai(util.safe_psid(psid))}
 
 
 @router.delete("/api/customers/{psid}")

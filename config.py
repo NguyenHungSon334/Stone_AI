@@ -50,7 +50,7 @@ LARK_TABLE_ID = os.getenv("LARK_TABLE_ID", "tbl1grmn4hpj4Pih").strip()
 LARK_CRM_APP_TOKEN = os.getenv("LARK_CRM_APP_TOKEN", "GtRhbgyWaaKeicstUkIlWKuegqg").strip()
 LARK_CRM_TABLE_ID = os.getenv("LARK_CRM_TABLE_ID", "tblkwMvDQkG4NB3m").strip()
 LARK_PRODUCT_FIELD = os.getenv("LARK_PRODUCT_FIELD", "Mã Sản Phẩm").strip()
-LARK_IMAGE_FIELD = os.getenv("LARK_IMAGE_FIELD", "Ảnh").strip()
+LARK_IMAGE_FIELD = os.getenv("LARK_IMAGE_FIELD", "Ảnh báo giá(1 ảnh rõ sản phẩm)").strip()
 PORT = int(os.getenv("PORT", "7900"))
 
 # Rate-limit + đồng thời (giữ mặc định an toàn, chỉnh sau nếu cần).

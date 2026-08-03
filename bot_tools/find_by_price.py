@@ -237,13 +237,22 @@ def _cell(r, i) -> str:
 
 def _spec(header, r) -> str:
     """Kích thước + trọng lượng, bỏ ô trống. Bảng SP KHÔNG còn nằm trong prompt (chỉ còn
-    index mã|tên|danh mục) nên đây là đường DUY NHẤT bot biết thông số - thiếu là bot bịa."""
+    index mã|tên|danh mục) nên đây là đường DUY NHẤT bot biết thông số - thiếu là bot bịa.
+
+    Nhiều mã bỏ trống 3 cột dài/rộng/cao nhưng cột 'Kích thước' (chữ tự do, nhân viên gõ tay:
+    'KT: 1970x970mm', 'ĐK 1470mm') vẫn có -> lấy nguyên văn ô đó thay vì im lặng. Bỏ thông số
+    là bot phải tự bịa hoặc nói trống không, khách hỏi kích thước không có câu trả lời."""
     d, rg, c = (_cell(r, _col(header, n)) for n in ("Chieu_Dai", "Chieu_Rong", "Chieu_Cao"))
     hop, tan = _cell(r, _col(header, "Hop_Tho")), _cell(r, _col(header, "Trọng lượng"))
     parts = []
-    kt = " x ".join(x for x in (d, rg, c) if x)
-    if kt:
-        parts.append(f"KT(DxRxC) {kt}mm")
+    if d and rg and c:
+        parts.append(f"KT(DxRxC) {d} x {rg} x {c}mm")
+    elif _cell(r, _col(header, "Kích thước")):
+        # Thiếu chiều -> KHÔNG ghép nửa vời: "KT(DxRxC) 1470 x 1270mm" của mộ tròn là đường
+        # kính x cao, đọc thành dài x rộng là sai hẳn. Ô chữ tự do ghi đúng ("DK1470xC1270").
+        parts.append(_cell(r, _col(header, "Kích thước")))
+    elif d or rg or c:
+        parts.append("KT " + " x ".join(x for x in (d, rg, c) if x) + "mm")
     if hop:
         parts.append(f"hộp thờ {hop}mm")
     if tan:
@@ -321,14 +330,25 @@ def _selftest():
             assert "CHƯA CÓ GIÁ" in out, f"mã không có giá nào mà không báo: {out}"
 
     # Bỏ CSV khỏi prompt -> tool là đường DUY NHẤT lấy thông số. Thiếu = bot bịa với khách.
-    _i_dai, _i_tan = _col(_hdr, "Chieu_Dai"), _col(_hdr, "Trọng lượng")
-    _spec_row = next((r for r in _data
-                      if r and r[0].strip() and _cell(r, _i_dai) and _cell(r, _i_tan)), None)
+    _i_dai, _i_rong, _i_cao = (_col(_hdr, n) for n in ("Chieu_Dai", "Chieu_Rong", "Chieu_Cao"))
+    _i_tan, _i_kt = _col(_hdr, "Trọng lượng"), _col(_hdr, "Kích thước")
+    assert _i_kt >= 0 and _i_kt != _i_dai, "CSV thiếu cột 'Kích thước' (chữ tự do)"
+    _spec_row = next((r for r in _data if r and r[0].strip() and _cell(r, _i_tan)
+                      and all(_cell(r, i) for i in (_i_dai, _i_rong, _i_cao))), None)
     if _spec_row:
         out = render(rows_by_ids([_spec_row[0].strip()]))
         assert "KT(DxRxC)" in out, f"render mất kích thước: {out}"
         assert "tấn" in out, f"render mất trọng lượng: {out}"
         assert out.count("giá:") == 1 and "Đá" in out, f"render mất giá theo loại đá: {out}"
+
+    # Thiếu cột dài/rộng/cao (30 mã) -> phải lấy ô 'Kích thước' chữ tự do, KHÔNG được im lặng:
+    # tool là đường duy nhất bot biết thông số, trống là bot bịa hoặc trả lời trống không.
+    _kt_row = next((r for r in _data if r and r[0].strip() and _cell(r, _i_kt)
+                    and not all(_cell(r, i) for i in (_i_dai, _i_rong, _i_cao))), None)
+    if _kt_row:
+        out = render(rows_by_ids([_kt_row[0].strip()]))
+        assert _cell(_kt_row, _i_kt) in out, f"mã thiếu chiều mà render mất kích thước: {out}"
+        assert "KT(DxRxC)" not in out, f"ghép DxRxC từ số chiều thiếu -> sai nghĩa: {out}"
 
     # Cột tra theo TÊN header, không theo số thứ tự (chèn cột vào CSV không được làm lệch).
     assert _col(_hdr, "Danh mục") != _col(_hdr, "Thể Loại") >= 0, "không tìm ra cột Thể Loại"

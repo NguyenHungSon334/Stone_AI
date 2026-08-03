@@ -30,6 +30,12 @@ _profile_name = messenger.profile_name   # dùng chung cache tên với thông b
 
 router = APIRouter(prefix="/admin")
 
+# Route ở đây khai báo `def` (KHÔNG phải `async def`) là CỐ Ý: chúng đọc Firebase/đĩa ĐỒNG BỘ,
+# FastAPI thấy `def` thì tự đẩy sang threadpool nên event loop vẫn rảnh nhận webhook. Bản cũ
+# để `async def` -> mở dashboard là khoá cả bot: sự cố 30/07/2026, /admin treo 173s trong khi
+# 3 webhook FB bị reset, khách mất tin. Chỉ đổi sang `async def` khi hàm thật sự có `await`,
+# và khi đó phần chạm Firebase/đĩa phải bọc asyncio.to_thread.
+
 _HIST_DIR = config.ROOT / "conversations"
 _DASHBOARD_HTML = config.ROOT / "dashboard.html"
 
@@ -70,7 +76,7 @@ def _dem_khach() -> int:
 
 
 @router.get("/api/overview")
-async def overview(request: Request, days: int = 7):
+def overview(request: Request, days: int = 7):
     _check_token(request)
     days = max(1, min(days, 90))
     total_customers = _dem_khach()
@@ -102,7 +108,7 @@ def _trang_thai(psid: str) -> dict:
 
 
 @router.post("/api/customers/{psid}/mo-khoa")
-async def mo_khoa_khach(request: Request, psid: str):
+def mo_khoa_khach(request: Request, psid: str):
     """Mở khoá cho bot nhắn lại khách này (admin đã xử lý xong với khách khó chịu)."""
     _check_token(request)
     stem = util.safe_psid(psid)
@@ -122,19 +128,35 @@ async def customers(request: Request, limit: int = 50, offset: int = 0, q: str =
     limit = max(1, min(limit, 200))
     offset = max(0, offset)
 
-    # (psid, mốc sắp xếp). mtime lấy từ metadata thư mục - không đụng nội dung file.
-    xep: list[tuple[str, float]] = []
-    co_local: set[str] = set()
-    if _HIST_DIR.exists():
-        for p in _HIST_DIR.glob("*.json"):
-            if p.name.endswith(brain.SIDECAR_SUFFIXES):
-                continue
-            co_local.add(p.stem)
-            xep.append((p.stem, p.stat().st_mtime))
-    tren_cloud = fb.list_psids()
-    if tren_cloud:
-        xep += [(p, 0.0) for p in tren_cloud if p not in co_local]   # chưa có cache -> xuống cuối
-    xep.sort(key=lambda r: r[1], reverse=True)
+    # Hàm này PHẢI async (_profile_name gọi Graph API) nên phần chạm đĩa/Firebase đẩy hết
+    # sang thread - xem chú thích ở đầu file.
+    def _liet_ke() -> list[tuple[str, float]]:
+        # (psid, mốc sắp xếp). mtime lấy từ metadata thư mục - không đụng nội dung file.
+        xep: list[tuple[str, float]] = []
+        co_local: set[str] = set()
+        if _HIST_DIR.exists():
+            for p in _HIST_DIR.glob("*.json"):
+                if p.name.endswith(brain.SIDECAR_SUFFIXES):
+                    continue
+                co_local.add(p.stem)
+                xep.append((p.stem, p.stat().st_mtime))
+        tren_cloud = fb.list_psids()
+        if tren_cloud:
+            xep += [(p, 0.0) for p in tren_cloud if p not in co_local]  # chưa cache -> xuống cuối
+        xep.sort(key=lambda r: r[1], reverse=True)
+        return xep
+
+    def _dong(psid: str, mtime: float) -> dict | None:
+        """1 dòng khách (chưa có tên - tên lấy sau vì cần await)."""
+        msgs = brain.load_history(psid)             # local trước, miss -> Firebase
+        if not msgs:
+            return None
+        last_at = (datetime.fromtimestamp(mtime).isoformat(timespec="minutes")
+                   if mtime else (msgs[-1].get("at") or "")[:16])
+        return {"psid": psid, "messages": len(msgs), "last_at": last_at,
+                "last_text": _last_text(msgs)[:120], **_trang_thai(psid)}
+
+    xep = await asyncio.to_thread(_liet_ke)
 
     q = q.strip().lower()
     if q:
@@ -148,14 +170,11 @@ async def customers(request: Request, limit: int = 50, offset: int = 0, q: str =
     out = []
     for psid, mtime in xep[offset:offset + limit]:
         try:
-            msgs = brain.load_history(psid)         # local trước, miss -> Firebase
-            if not msgs:
+            row = await asyncio.to_thread(_dong, psid, mtime)
+            if row is None:
                 continue
-            last_at = (datetime.fromtimestamp(mtime).isoformat(timespec="minutes")
-                       if mtime else (msgs[-1].get("at") or "")[:16])
-            out.append({"psid": psid, "name": await _profile_name(psid), "messages": len(msgs),
-                        "last_at": last_at, "last_text": _last_text(msgs)[:120],
-                        **_trang_thai(psid)})
+            row["name"] = await _profile_name(psid)
+            out.append(row)
         except Exception as e:
             print(f"[admin] đọc khách {psid} lỗi: {type(e).__name__}: {e}", file=sys.stderr)
     return {"customers": out, "total": total, "offset": offset, "limit": limit,
@@ -167,18 +186,26 @@ async def customer_detail(request: Request, psid: str):
     _check_token(request)
     # Qua brain: cache local trước, miss thì kéo Firebase -> xem được cả khách mà máy này
     # chưa từng phục vụ (trước đây 404 dù cloud có đủ lịch sử).
-    msgs = brain.load_history(util.safe_psid(psid))
-    if not msgs:
+    stem = util.safe_psid(psid)
+
+    def _doc() -> tuple[list, dict] | None:
+        msgs = brain.load_history(stem)
+        if not msgs:
+            return None
+        # Chỉ trả turn text (log sạch của brain.py đã là text, phòng hờ lọc block).
+        clean = [{"role": m.get("role"), "text": m["content"], "at": m.get("at", "")}
+                 for m in msgs if isinstance(m.get("content"), str)]
+        return clean, _trang_thai(stem)
+
+    got = await asyncio.to_thread(_doc)
+    if got is None:
         raise HTTPException(404, "không có khách này")
-    # Chỉ trả turn text (log sạch của brain.py đã là text, phòng hờ lọc block).
-    clean = [{"role": m.get("role"), "text": m["content"], "at": m.get("at", "")}
-             for m in msgs if isinstance(m.get("content"), str)]
-    return {"psid": psid, "name": await _profile_name(util.safe_psid(psid)), "messages": clean,
-            **_trang_thai(util.safe_psid(psid))}
+    clean, trang_thai = got
+    return {"psid": psid, "name": await _profile_name(stem), "messages": clean, **trang_thai}
 
 
 @router.delete("/api/customers/{psid}")
-async def delete_customer(request: Request, psid: str):
+def delete_customer(request: Request, psid: str):
     """Xoá hội thoại của MỘT khách: log + sidecar local (.crm/.sum/.followup/.images...) và
     node trên Firebase. KHÔNG hồi được. Stats chung giữ nguyên (số liệu tổng không méo)."""
     _check_token(request)
@@ -198,7 +225,7 @@ async def delete_customer(request: Request, psid: str):
 
 
 @router.get("/api/settings")
-async def get_settings(request: Request):
+def get_settings(request: Request):
     _check_token(request)
     persona_path = config.DOCS_DIR / "Personal.md"
     return {
@@ -374,7 +401,7 @@ def _che(v: str) -> str:
 
 
 @router.get("/api/config")
-async def get_config(request: Request):
+def get_config(request: Request):
     """Schema + giá trị hiện tại để giao diện tự dựng ô nhập."""
     _check_token(request)
     env = _read_env_file()
@@ -452,7 +479,7 @@ async def get_control(request: Request, days: int = 30, force: int = 0):
 
 
 @router.post("/api/clean-data")
-async def clean_data(request: Request):
+def clean_data(request: Request):
     """Xóa TOÀN BỘ data khách: conversations + stats ở local VÀ Firebase. KHÔNG hồi được.
 
     GIỮ nguyên: bảng sản phẩm + persona (data/docs) + CRM lead trên Lark.

@@ -7,12 +7,14 @@ Bot là writer DUY NHẤT nên cache local không stale. Thiếu cấu hình
 (FIREBASE_CRED/FIREBASE_DB_URL) -> no-op, bot chạy thuần local như cũ.
 Lỗi Firebase KHÔNG BAO GIỜ được kéo bot chết -> bọc try + thread nền cho write.
 
-ponytail: 1 thread daemon / lần ghi; fetch đồng bộ chỉ khi cache miss (hiếm).
-Tải cao thì gom batch hoặc hàng đợi sau.
+MỌI hàm ở đây là ĐỒNG BỘ và chạm mạng -> caller async PHẢI gọi qua asyncio.to_thread.
+Gọi thẳng trong coroutine là khoá event loop: sự cố 30/07/2026 - dashboard kéo stats,
+bot đứng >170s, 3 webhook FB bị reset, khách mất tin, phải restart mới sống lại.
 """
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as _FutureTimeout
 
 import alerts
 import config
@@ -56,6 +58,30 @@ def _init() -> bool:
 _safe = util.safe_psid   # psid -> key hợp lệ RTDB (cấm . $ # [ ] /)
 
 
+# Pool CỐ ĐỊNH cho write nền. Trước đây mỗi lần ghi đẻ 1 thread mới, không trần: một lượt
+# đông khách là hàng trăm thread tranh GIL, event loop đói theo. 4 worker đủ cho nhịp ghi
+# thật (vài lượt/giây) và ép hàng đợi thay vì đẻ thêm.
+_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="fb-write")
+
+# Pool RIÊNG cho đọc đồng bộ + trần chờ. firebase_admin không cho đặt timeout cho bước
+# refresh OAuth token (httpTimeout chỉ áp cho request DB) nên một lần refresh treo là treo
+# vĩnh viễn. Chặn ở đây: quá hạn thì bỏ, caller rơi về cache local. Thread kẹt vẫn kẹt
+# nhưng KHÔNG kéo theo ai - hết pool thì lần đọc sau hỏng ngay thay vì chờ mãi.
+_READ_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="fb-read")
+_READ_TIMEOUT_S = 20.0
+
+
+def _doc(fn, mo_ta: str, default=None):
+    """Chạy 1 hàm đọc Firebase với trần chờ. Quá hạn/lỗi -> trả `default` (caller dùng local)."""
+    try:
+        return _READ_POOL.submit(fn).result(timeout=_READ_TIMEOUT_S)
+    except _FutureTimeout:
+        print(f"[fb] {mo_ta} quá {_READ_TIMEOUT_S:g}s -> bỏ, dùng cache local", file=sys.stderr)
+        alerts.alert("fb:timeout", f"⚠️ FIREBASE TREO khi {mo_ta} - bot rơi về dữ liệu local.\n"
+                                   f"➡️ Kiểm tra mạng VPS / hạn mức Firebase.")
+        return default
+
+
 def _run(fn) -> None:
     def wrap() -> None:
         try:
@@ -66,7 +92,7 @@ def _run(fn) -> None:
             alerts.alert(f"fb:mirror:{type(e).__name__}",
                          f"⚠️ GHI FIREBASE LỖI - hội thoại/stats lượt này KHÔNG lên cloud "
                          f"(local vẫn còn).\n{type(e).__name__}: {e}")
-    threading.Thread(target=wrap, daemon=True).start()
+    _POOL.submit(wrap)
 
 
 def mirror_conversation(psid: str, msgs: list) -> None:
@@ -106,13 +132,15 @@ def merge_state(psid: str, patch: dict) -> None:
 
 
 def fetch_state(psid: str) -> dict | None:
-    """Cờ trạng thái 1 khách từ Firebase. None = Firebase tắt / chưa có / lỗi. Đồng bộ (chỉ lúc miss)."""
-    if not _init():
-        return None
-    try:
+    """Cờ trạng thái 1 khách từ Firebase. None = Firebase tắt / chưa có / lỗi / treo quá hạn."""
+    def fn():
+        if not _init():
+            return None
         from firebase_admin import db
         data = db.reference(f"khach_state/{_safe(psid)}").get()
         return data if isinstance(data, dict) else None
+    try:
+        return _doc(fn, f"đọc cờ khách {psid}")
     except Exception as e:
         print(f"[fb] fetch state lỗi psid={psid}: {type(e).__name__}: {e}", file=sys.stderr)
         # Mất cờ = bot nhắn lại khách đã yêu cầu ngưng. Phải báo, đừng nuốt.
@@ -159,13 +187,17 @@ def list_psids(force: bool = False) -> list | None:
     global _PSIDS_CACHE
     if not force and _PSIDS_CACHE and time.time() - _PSIDS_CACHE[0] < _PSIDS_TTL_S:
         return _PSIDS_CACHE[1]
-    if not _init():
-        return None
-    try:
+
+    def fn():
+        if not _init():
+            return None
         from firebase_admin import db
         data = db.reference("conversations").get(shallow=True)
-        out = sorted(data.keys()) if isinstance(data, dict) else []
-        _PSIDS_CACHE = (time.time(), out)
+        return sorted(data.keys()) if isinstance(data, dict) else []
+    try:
+        out = _doc(fn, "đọc danh sách khách")
+        if out is not None:
+            _PSIDS_CACHE = (time.time(), out)
         return out
     except Exception as e:
         print(f"[fb] list psids lỗi: {type(e).__name__}: {e}", file=sys.stderr)
@@ -178,28 +210,30 @@ def fetch_events(since_ts: float) -> list | None:
     None = Firebase tắt/lỗi -> caller tự rơi về file local. Lọc theo ts ngay trên server
     (cần .indexOn ts trong database.rules.json) để không tải cả kho về mỗi lần mở dashboard.
     """
-    if not _init():
-        return None
-    from firebase_admin import db
-    ref = db.reference("stats/events")
-    try:
-        data = ref.order_by_child("ts").start_at(since_ts).get()
-    except Exception as e:
-        if "Index not defined" not in str(e):
-            print(f"[fb] fetch events lỗi: {type(e).__name__}: {e}", file=sys.stderr)
+    def fn():
+        if not _init():
             return None
-        # Rules chưa deploy .indexOn ts -> RTDB từ chối lọc trên server. Tải hết rồi lọc ở
-        # client: chậm hơn nhưng CHẠY ĐƯỢC ngay, khỏi bắt user vào Console mới xem được số.
-        print("[fb] chưa có .indexOn ts -> tải hết rồi lọc ở client (deploy "
-              "database.rules.json để nhanh hơn)", file=sys.stderr)
+        from firebase_admin import db
+        ref = db.reference("stats/events")
         try:
-            data = ref.get()
-        except Exception as e2:
-            print(f"[fb] fetch events lỗi: {type(e2).__name__}: {e2}", file=sys.stderr)
-            return None
-    rows = (list(data.values()) if isinstance(data, dict)
-            else data if isinstance(data, list) else [])
-    return [r for r in rows if isinstance(r, dict) and (r.get("ts") or 0) >= since_ts]
+            data = ref.order_by_child("ts").start_at(since_ts).get()
+        except Exception as e:
+            if "Index not defined" not in str(e):
+                print(f"[fb] fetch events lỗi: {type(e).__name__}: {e}", file=sys.stderr)
+                return None
+            # Rules chưa deploy .indexOn ts -> RTDB từ chối lọc trên server. Tải hết rồi lọc ở
+            # client: chậm hơn nhưng CHẠY ĐƯỢC ngay, khỏi bắt user vào Console mới xem được số.
+            print("[fb] chưa có .indexOn ts -> tải hết rồi lọc ở client (deploy "
+                  "database.rules.json để nhanh hơn)", file=sys.stderr)
+            try:
+                data = ref.get()
+            except Exception as e2:
+                print(f"[fb] fetch events lỗi: {type(e2).__name__}: {e2}", file=sys.stderr)
+                return None
+        rows = (list(data.values()) if isinstance(data, dict)
+                else data if isinstance(data, list) else [])
+        return [r for r in rows if isinstance(r, dict) and (r.get("ts") or 0) >= since_ts]
+    return _doc(fn, "đọc thống kê")
 
 
 def save_daily(gop: dict) -> bool:
@@ -217,12 +251,14 @@ def save_daily(gop: dict) -> bool:
 
 def fetch_daily() -> dict | None:
     """Bản ghi tổng theo ngày. None = Firebase tắt/lỗi -> caller rơi về file local."""
-    if not _init():
-        return None
-    try:
+    def fn():
+        if not _init():
+            return None
         from firebase_admin import db
         d = db.reference("stats/daily").get()
         return d if isinstance(d, dict) else {}
+    try:
+        return _doc(fn, "đọc tổng theo ngày")
     except Exception as e:
         print(f"[fb] đọc daily lỗi: {type(e).__name__}: {e}", file=sys.stderr)
         return None
@@ -272,9 +308,9 @@ def fetch_conversation(psid: str) -> list | None:
     None nếu: Firebase tắt / khách chưa có / lỗi. Đồng bộ - chỉ gọi lúc miss (hiếm).
     ponytail: log là mảng liền mạch nên RTDB trả về list; dạng khác -> coi như chưa có.
     """
-    if not _init():
-        return None
-    try:
+    def fn():
+        if not _init():
+            return None
         from firebase_admin import db
         data = db.reference(f"conversations/{_safe(psid)}").get()
         if isinstance(data, list):
@@ -285,6 +321,8 @@ def fetch_conversation(psid: str) -> list | None:
                            key=lambda x: x[0])
             return [v for _, v in items] or None
         return None
+    try:
+        return _doc(fn, f"đọc lịch sử khách {psid}")
     except Exception as e:
         print(f"[fb] fetch lỗi psid={psid}: {type(e).__name__}: {e}", file=sys.stderr)
         # Miss cache + fetch hỏng = bot coi như khách MỚI, mất sạch ngữ cảnh cũ (hỏi lại từ đầu).

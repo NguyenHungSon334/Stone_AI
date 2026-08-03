@@ -10,6 +10,7 @@ Trả lời đúng 4 câu hỏi kinh doanh:
 Gọi FB Graph nên CÓ CACHE: dashboard mở nhiều tab / F5 liên tục không được đấm API.
 Mọi lỗi mạng đều nuốt và ghi vào phần `loi` - bảng điều khiển hỏng KHÔNG được kéo bot chết.
 """
+import asyncio
 import sys
 import time
 
@@ -152,9 +153,10 @@ async def snapshot(days: int = 30, force: bool = False) -> dict:
         except Exception as e:
             loi["comment"] = f"{type(e).__name__}: {e}"
 
-    chi_phi = stats.cost_breakdown(days)
-    tom_tat = stats.summary(7)
-    loi_gan_day = stats.recent_errors(7)
+    # 3 hàm này đọc Firebase ĐỒNG BỘ -> gọi thẳng trong coroutine là khoá event loop, bot
+    # ngừng nhận webhook suốt lúc dashboard kéo số (sự cố 30/07/2026). Gộp 1 lần sang thread.
+    chi_phi, tom_tat, loi_gan_day = await asyncio.to_thread(
+        lambda: (stats.cost_breakdown(days), stats.summary(7), stats.recent_errors(7)))
 
     data = {
         "luc": time.strftime("%Y-%m-%d %H:%M:%S"),

@@ -752,10 +752,20 @@ def _bo_qua_vi_khoa(psid: str, tag: str, force: bool, chu_dong: bool) -> bool:
     return chan
 
 
+async def _off(fn, *a, **kw):
+    """Chạy hàm ĐỒNG BỘ chạm state/Firebase ở thread khác.
+
+    state.get() khi cache local miss sẽ gọi Firebase ĐỒNG BỘ. Gọi thẳng trong coroutine là
+    khoá event loop: cả bot ngừng nhận webhook trong lúc chờ. Sự cố 30/07/2026 - 3 tin FB bị
+    reset sau 13.7s/9.4s/3.0s, /admin treo 173s, phải restart. Mọi lời gọi state.* từ code
+    async PHẢI đi qua đây."""
+    return await asyncio.to_thread(fn, *a, **kw)
+
+
 async def send_text(psid: str, text: str, force: bool = False, chu_dong: bool = False) -> None:
     if not (config.PAGE_TOKEN and psid and text):
         return
-    if _bo_qua_vi_khoa(psid, "text", force, chu_dong):
+    if await _off(_bo_qua_vi_khoa, psid, "text", force, chu_dong):
         return
     url = _SEND_API.format(ver=config.GRAPH_VER)
     for chunk in _split_text(text):
@@ -792,7 +802,7 @@ async def send_image_bytes(psid: str, data: bytes, ctype: str = "image/jpeg",
     Lượt đầu im lặng (không báo admin) để cảnh báo chỉ nổ khi ĐÃ hết cách."""
     if not (config.PAGE_TOKEN and psid and data):
         return
-    if _bo_qua_vi_khoa(psid, "img", force, chu_dong=False):
+    if await _off(_bo_qua_vi_khoa, psid, "img", force, chu_dong=False):
         return
     url = _SEND_API.format(ver=config.GRAPH_VER)
 
@@ -859,13 +869,13 @@ _FOLLOWUP_TEXT = ("Dạ Bác ơi, không biết Bác còn đang phân vân mẫu
 
 async def run_followups() -> None:
     """Quét khách im sau trả lời (chưa chốt) -> gửi 1 tin nhắc nhẹ. Chạy định kỳ từ app."""
-    for psid, last_user_at in brain.followup_candidates(config.FOLLOWUP_AFTER_H):
+    for psid, last_user_at in await _off(brain.followup_candidates, config.FOLLOWUP_AFTER_H):
         if psid in config.ADMIN_UIDS:
             continue
-        if _noise_state(psid).get("stopped"):   # bot đã cố ý ngưng (nhiễu/sticker) -> đừng đào lại
+        if (await _off(_noise_state, psid)).get("stopped"):   # bot đã cố ý ngưng (nhiễu/sticker) -> đừng đào lại
             continue
         await send_text(psid, _FOLLOWUP_TEXT, chu_dong=True)
-        brain.mark_followed(psid, last_user_at)
+        await _off(brain.mark_followed, psid, last_user_at)
         stats.log_event("followup", psid)
 
 
@@ -983,8 +993,10 @@ async def run_missed_check() -> None:
         return
 
     now = datetime.now(timezone.utc)
-    rows = [r for r in pick_unanswered(data.get("data"), pid, config.MISSED_AFTER_MIN, now)
-            if r[0] not in config.ADMIN_UIDS and not brain.missed_already_reported(r[0], r[3])]
+    rows = await _off(lambda: [r for r in pick_unanswered(data.get("data"), pid,
+                                                          config.MISSED_AFTER_MIN, now)
+                               if r[0] not in config.ADMIN_UIDS
+                               and not brain.missed_already_reported(r[0], r[3])])
     if not rows:
         return
 
@@ -1003,14 +1015,14 @@ async def run_missed_check() -> None:
         if _da_tra_loi_sau(psid, at):
             # Lịch sử đã có câu trả lời SAU tin đó (người thật rep tay, hoặc lượt trước vừa xong)
             # -> không rơi nữa. Đánh dấu để khỏi soi lại mãi.
-            brain.mark_missed_reported(psid, at)
+            await _off(brain.mark_missed_reported, psid, at)
             continue
-        if _noise_state(psid).get("stopped"):
+        if (await _off(_noise_state, psid)).get("stopped"):
             # Bot đã CỐ Ý ngưng trả lời khách này (nhiễu/sticker liên tiếp, đã báo admin 1 lần).
             # Không đánh dấu = mỗi vòng quét lại thấy "chưa trả lời" -> báo lặp mãi mãi.
-            brain.mark_missed_reported(psid, at)
+            await _off(brain.mark_missed_reported, psid, at)
             continue
-        if brain.is_closed(psid):
+        if await _off(brain.is_closed, psid):
             # Đã handoff/chốt phiếu -> chuyên gia đang cầm khách này, bot nhảy vào là phá.
             nguoi_that.append((psid, name, text, at, "đã handoff cho chuyên gia"))
         elif tuoi_h >= _TRA_BU_TOI_DA_H:
@@ -1045,7 +1057,7 @@ async def run_missed_check() -> None:
         await notify_admins(f"⚠️ {len(nguoi_that)} KHÁCH CẦN NGƯỜI THẬT TRẢ LỜI\n\n"
                             + "\n".join(lines) + more + "\n\n➡️ Bot KHÔNG tự trả lời các ca này.")
         for psid, _, _, at, _ly in nguoi_that:
-            brain.mark_missed_reported(psid, at)
+            await _off(brain.mark_missed_reported, psid, at)
     stats.log_event("missed_check", "", note=f"bù {len(tu_tra)}, người thật {len(nguoi_that)}")
 
 
@@ -1082,11 +1094,19 @@ async def run_tunnel_check() -> None:
     ok = fails < config.TUNNEL_FAILS_TO_ALERT
     if not ok and _tunnel_alive:
         _tunnel_alive = False
-        await notify_admins(f"🔴 TUNNEL CHẾT: FB không vào được bot qua {config.PUBLIC_URL}\n"
-                            f"Bot đang ĐIẾC - khách nhắn không tới. Bật lại ngrok/cloudflared ngay.")
+        # Handler bị ping là GET verify - chỉ echo lại challenge, không I/O. Quá 10s tức là
+        # BOT không chạy nổi event loop, gần như luôn là bot chứ không phải đường mạng.
+        # Câu cũ bảo "bật lại ngrok/cloudflared" (dấu vết thời dev) khiến admin đi soi nhầm chỗ.
+        await notify_admins(f"🔴 BOT KHÔNG TRẢ LỜI qua {config.PUBLIC_URL}\n"
+                            f"Bot đang ĐIẾC - khách nhắn không tới.\n"
+                            f"➡️ Trên VPS: docker compose logs --tail=100 bot\n"
+                            f"➡️ Hỏi bot TỪ TRONG container (loại trừ Caddy/mạng):\n"
+                            f"   docker compose exec bot python -c "
+                            f"\"import httpx;print(httpx.get('http://localhost:7900/healthz').text)\"\n"
+                            f"   Treo luôn ở đây = event loop bị chặn, không phải proxy.")
     elif ok and not _tunnel_alive:
         _tunnel_alive = True
-        await notify_admins(f"🟢 TUNNEL SỐNG LẠI: bot nhận tin bình thường qua {config.PUBLIC_URL}")
+        await notify_admins(f"🟢 BOT TRẢ LỜI LẠI: nhận tin bình thường qua {config.PUBLIC_URL}")
 
 
 # --- CANH TOKEN PAGE ---
@@ -1146,7 +1166,7 @@ async def _save_lead_to_crm(psid: str) -> None:
     result = await asyncio.to_thread(lark_crm.upsert_lead, psid, lead)
     tag = {"created": "✅ Đã tạo lead CRM", "updated": "♻️ Đã cập nhật lead CRM"}.get(result)
     if tag:
-        brain.mark_closed(psid)                       # cờ ĐÃ CHỐT lên database, hết đeo bám
+        await _off(brain.mark_closed, psid)           # cờ ĐÃ CHỐT lên database, hết đeo bám
         code = lark_crm.lead_code(psid)               # mã Lead/Chance vừa lưu
         head = f"{tag}: {lead.get('ten') or '?'} - {lead.get('sdt') or '?'}"
         if code:
@@ -1256,7 +1276,7 @@ async def _process_inner(psid: str, text: str, user_at: str | None = None) -> No
         text = _REFERRAL_PROMPT                        # khách cũ: AI tự mở lời theo ngữ cảnh
     if text == _STICKER_EVENT:
 
-        decision, noise = _sticker_decision(psid)
+        decision, noise = await _off(_sticker_decision, psid)
         if decision == "blocked":
             stats.log_event("sticker_blocked", psid)
             return
@@ -1284,7 +1304,7 @@ async def _process_inner(psid: str, text: str, user_at: str | None = None) -> No
     async with _SEM:
         _STICKER_COUNT.pop(psid, None)                 # có tin chữ thật -> reset đếm sticker
 
-        decision, noise = _noise_decision(psid, text)
+        decision, noise = await _off(_noise_decision, psid, text)
         if decision == "clarify":
             stats.log_event("unclear", psid)
             await send_text(psid, _NOISE_REPLY)
@@ -1304,7 +1324,7 @@ async def _process_inner(psid: str, text: str, user_at: str | None = None) -> No
         # Khách nói thẳng là không có nhu cầu -> ghi ý định vào database NGAY, không chờ AI chấm.
         y_dinh_cung = _y_dinh_tu_khoa(text) if not images else ""
         if y_dinh_cung:
-            state.patch(psid, y_dinh=y_dinh_cung)
+            await _off(state.patch, psid, y_dinh=y_dinh_cung)
         forced = _forced_handoff_reason(text) if not images else None
         if forced:
             doi_ngung = forced == _LY_DO_DOI_NGUNG
@@ -1315,7 +1335,7 @@ async def _process_inner(psid: str, text: str, user_at: str | None = None) -> No
             chot = _NGUNG_REPLY if doi_ngung else (_XOA_DIU_REPLY if kho_chiu else _HUMAN_HANDOFF_REPLY)
             await send_text(psid, chot, force=True)
             if kho_chiu:
-                _pause_bot(psid, forced)
+                await _off(_pause_bot, psid, forced)
             await notify_admins(f"{'😠 KHÁCH KHÓ CHỊU - BOT ĐÃ NGƯNG NHẮN' if kho_chiu else '🔔 CHUYỂN NGƯỜI THẬT'}"
                                 f": {await _label(psid)}\nPSID: {psid}\nLý do: {forced}\nTin khách: {text}"
                                 + (f"\n➡️ Cần người thật gọi/nhắn cho khách. Bot tự im {_PAUSE_H:g} giờ."
@@ -1355,7 +1375,7 @@ async def _process_inner(psid: str, text: str, user_at: str | None = None) -> No
         if pause_reason:
             # Khách khó chịu: gửi NỐT tin xoa dịu (im bặt giữa chừng còn khó chịu hơn), rồi im.
             stats.log_event("khach_kho_chiu", psid)
-            _pause_bot(psid, pause_reason)
+            await _off(_pause_bot, psid, pause_reason)
             if reply:
                 await send_text(psid, reply, force=True)   # tin cuối, gửi trước khi khoá có hiệu lực
             await notify_admins(f"😠 KHÁCH KHÓ CHỊU - BOT ĐÃ NGƯNG NHẮN: {await _label(psid)}\n"

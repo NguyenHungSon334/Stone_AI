@@ -901,6 +901,8 @@ def _answer_sync(psid: str, text: str, images: list[tuple[bytes, str]] | None = 
                 # là dấu hiệu rõ nhất của bot không nhớ gì.
                 reply = (reply + " Mẫu này bên em làm thiết kế riêng theo khuôn viên từng nhà "
                          "nên chưa có sẵn ảnh dựng ạ. " + _cau_xin_lien_he(profile.get("sdt"))).strip()
+            if (thay := _chan_bia_sdt(psid, reply, profile)):
+                reply, markers = thay, ""    # thay CẢ tin -> không sót marker ảnh/handoff nào
             if not reply:
                 raise BrainError("API chỉ trả marker ảnh, không có chữ.")
             reply_out = f"{reply} {markers}" if markers else reply   # marker CHỈ để gửi, KHÔNG lưu history
@@ -1003,11 +1005,50 @@ def _profile_luot_nay(psid: str, profile: dict, text: str) -> dict:
     return profile
 
 
+_CHUA_CO_SDT = ("SĐT/Zalo: CHƯA CÓ - khách chưa gõ số nào. CẤM tự nghĩ ra chữ số, CẤM nói "
+                "'em đã nhận được SĐT của Bác', CẤM gửi PHIẾU YÊU CẦU. Xin số trước đã.")
+# Tin BỊA về SĐT: gửi phiếu hoặc khẳng định đã có số, trong khi hồ sơ chưa có số nào.
+_BIA_SDT_RE = re.compile(r"PHIẾU YÊU CẦU|đã nhận được (?:SĐT|số)|em đã có s(?:ố|đt)", re.I)
+_XIN_SO_THAY_PHIEU = (
+    "Dạ thông tin nhà mình em ghi nhận đủ rồi ạ. Bác cho em xin số điện thoại hoặc Zalo, "
+    "chuyên gia bên em gọi trao đổi và gửi Bác phương án cụ thể ngay ạ.")
+
+
+def _chan_bia_sdt(psid: str, reply: str, profile: dict) -> str:
+    """Tin sắp gửi có bịa SĐT không? Có -> trả câu THAY THẾ, không thì trả "".
+
+    Chốt chặn cuối bằng CODE, không trông vào model đọc kỹ persona. Đã xảy ra thật: khách
+    28632036926390235 (13/08/2026) không hề cho số, bot vẫn nói 'em đã nhận được SĐT của Bác'
+    rồi gửi phiếu ghi 'SĐT: 0979655XXX' - số bịa nguyên chữ XXX - và lead ma đó vào CRM.
+
+    Gốc: persona ghi dòng SĐT trong phiếu là BẮT BUỘC + cấm để trống -> model điền bừa cho
+    hợp lệ. Persona đã sửa, nhưng luật chữ thì lượt nào model cũng có thể trượt; luật code thì
+    không."""
+    if profile.get("sdt") or not _BIA_SDT_RE.search(reply):
+        return ""
+    alerts.alert("bia:sdt",
+                 f"🔴 BOT ĐỊNH BỊA SĐT - đã chặn, thay bằng câu xin số.\n"
+                 f"psid: {psid}\nTin bị chặn: {reply[:400]}\n"
+                 f"➡️ Khách chưa gõ số nào mà bot gửi phiếu / nói đã có số. "
+                 f"Xem lại Personal.md mục B4 nếu lặp lại nhiều.")
+    print(f"[bia] chặn tin bịa SĐT psid={psid}: {reply[:120]}", file=sys.stderr)
+    return _XIN_SO_THAY_PHIEU
+
+
 def _profile_prompt(profile: dict) -> str:
+    """Khối hồ sơ nhét vào prompt mỗi lượt.
+
+    SĐT trống phải nói THẲNG là chưa có. Bản cũ chỉ in trường CÓ giá trị nên ô SĐT trống biến
+    mất khỏi prompt -> model không thấy tín hiệu nào, tới bước chốt phiếu (persona ghi SĐT là
+    dòng bắt buộc) thì tự điền một số cho hợp lệ. Đã bịa thật: khách 28632036926390235 nhận
+    phiếu ghi 'SĐT: 0979655XXX' và lead giả đó chui vào CRM."""
     lines = [f"{_PROFILE_LABELS[field]}: {profile[field]}" for field in _PROFILE_FIELDS if profile.get(field)]
+    if not profile.get("sdt"):
+        lines.insert(0, _CHUA_CO_SDT)
     if not lines:
         return ""
-    return ("[Hồ sơ khách đã xác nhận - coi là dữ kiện; KHÔNG hỏi lại bất kỳ mục nào có giá trị]\n"
+    return ("[Hồ sơ khách đã xác nhận - coi là dữ kiện; KHÔNG hỏi lại bất kỳ mục nào có giá trị.\n"
+            "Mục nào KHÔNG có ở dưới nghĩa là khách CHƯA nói - để trống, tuyệt đối không tự bịa]\n"
             + "\n".join(lines))
 
 
@@ -1118,10 +1159,14 @@ def _extract_lead_sync(psid: str) -> dict | None:
         cand = (resp.candidates or [None])[0]
         raw = "".join(p.text for p in (cand.content.parts or []) if p.text) if cand and cand.content else ""
         lead = json.loads(raw)
-        for field in ("ten", "sdt", "dia_chi", "tinh", "khu_vuc"):
+        for field in ("ten", "dia_chi", "tinh", "khu_vuc"):
             if profile.get(field):
                 lead[field] = profile[field]
-        return lead if (lead.get("sdt") or "").strip() else None
+        # SĐT KHÔNG lấy từ bản trích: `convo` ở trên gồm CẢ lời bot, nên số bot tự bịa trong
+        # phiếu ("SĐT: 0979655XXX") được trích ra chính nó rồi chui vào CRM - chuyên gia gọi
+        # số ma. Nguồn sự thật DUY NHẤT là chữ số khách tự gõ trong tin của khách.
+        lead["sdt"] = sdt_khach = _phones_in_history(hist)
+        return lead if sdt_khach else None
     except Exception as e:
         print(f"[lead] trích lỗi psid={psid}: {type(e).__name__}: {e}", file=sys.stderr)
         # Trích hỏng -> _save_lead_to_crm thoát sớm, KHÔNG có "lỗi CRM" nào bắn ra: lead im lặng

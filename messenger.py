@@ -97,7 +97,7 @@ _IMG_RE = re.compile(r"<<IMG:([^>]+)>>")   # marker ảnh: file_token Lark, bóc
 # Marker persona chèn khi khách KHÓ CHỊU: gửi nốt tin xoa dịu rồi bot im, người thật vào.
 _PAUSE_RE = re.compile(r"<<TAMDUNG(?::([^>]*))?>>")
 _PAUSE_H = 24.0        # im bấy nhiêu giờ; đủ để chuyên gia gọi, không khoá khách vĩnh viễn
-_PHONE_RE = re.compile(r"(?<!\d)(?:\+?84|0)\d{9,10}(?!\d)")   # SĐT VN trong tin khách
+# SĐT khách: dùng chung util.tim_sdt (đã chuẩn hoá 0xxxxxxxxx, khớp hồ sơ + CRM).
 
 # Handoff CƯỠNG BỨC ở code (chặn trước AI, tin cậy 100%): khách gõ tín hiệu tường minh.
 _HUMAN_KEYWORDS = ("gặp nhân viên", "gặp người", "người thật", "tư vấn viên", "tổng đài",
@@ -111,6 +111,17 @@ _COMPLAINT_KEYWORDS = ("lừa đảo", "cắt cổ", "chặt chém", "báo công
 # hỗ trợ trực tiếp" -> khách ngồi đợi người vào chat, không ai vào, khách bỏ.
 _HUMAN_HANDOFF_REPLY = ("Dạ nội dung này em nhờ chuyên gia bên em trao đổi với Bác cho chính xác ạ. "
                         "Bác cho em xin SĐT hoặc Zalo, chuyên gia sẽ gọi cho Bác ngay nhé!")
+
+
+def _cau_chuyen_nguoi_that(sdt: str) -> str:
+    """Câu chuyển người thật. Hồ sơ đã có SĐT -> XÁC NHẬN số, không xin lại.
+
+    Câu cố định không đi qua model nên không đọc hồ sơ: khách vừa cho số ở tin trước rồi gõ
+    'cho gặp nhân viên' là bị hỏi lại số ngay."""
+    if sdt:
+        return ("Dạ nội dung này em nhờ chuyên gia bên em trao đổi với Bác cho chính xác ạ. "
+                f"Chuyên gia sẽ gọi cho Bác theo số {sdt} ngay nhé!")
+    return _HUMAN_HANDOFF_REPLY
 # Khách đang gắt: KHÔNG xin số, KHÔNG hỏi thêm, KHÔNG chào mời - chỉ nhận lỗi rồi nhường người thật.
 _XOA_DIU_REPLY = ("Dạ em xin ghi nhận phản ánh của Bác ạ. Em rất tiếc vì đã làm Bác không hài lòng. "
                   "Em báo ngay quản lý bên em liên hệ trực tiếp với Bác để xử lý ạ.")
@@ -163,12 +174,6 @@ def _forced_handoff_reason(text: str) -> str | None:
     return None
 
 
-def _find_phone(text: str) -> str | None:
-    """SĐT VN đầu tiên trong tin (đã nén khoảng trắng/chấm/gạch). None nếu không có."""
-    compact = re.sub(r"[\s.\-()]", "", text or "")
-    m = _PHONE_RE.search(compact)
-
-    return m.group(0) if m else None
 _NOISE_TERMS = {
     "gia", "mau", "mo", "lang", "da", "tu", "van", "bao", "xem", "gui", "can", "muon",
     "lam", "xay", "ngoi", "met", "cong", "hang", "rao", "long", "dinh", "zalo",
@@ -186,7 +191,7 @@ def _is_meaningful_text(text: str) -> bool:
     plain = _plain_text(text)
     if not plain:
         return False
-    if _find_phone(text) or any(char.isdigit() for char in plain):
+    if util.tim_sdt(text) or any(char.isdigit() for char in plain):
         return True
     compact = plain.replace(" ", "")
     if compact in _SHORT_VALID_REPLIES or len(compact) >= 6:
@@ -535,6 +540,14 @@ _REFERRAL_EVENT = "\x00REF"      # khách bấm quảng cáo Click-to-Messenger 
 _IMAGE_REPLY = ("Dạ mẫu này bên em có khá nhiều biến thể về kích thước và loại đá ạ. "
                 "Để tư vấn chính xác nhất cho Bác, Bác cho em xin số điện thoại, "
                 "chuyên gia bên em sẽ liên hệ tư vấn cụ thể cho Bác ngay ạ!")
+
+
+def _cau_khach_gui_anh(sdt: str) -> str:
+    """Câu trả ảnh khách gửi (không đọc được). Đã có SĐT thì xác nhận số, không xin lại."""
+    if sdt:
+        return ("Dạ mẫu này bên em có khá nhiều biến thể về kích thước và loại đá ạ. "
+                f"Chuyên gia bên em sẽ liên hệ tư vấn cụ thể cho Bác theo số {sdt} ngay ạ!")
+    return _IMAGE_REPLY
 # Like/sticker lần đầu: chào hỏi mời tư vấn như bình thường (KHÔNG xin SĐT dồn).
 _STICKER_REPLY = ("Dạ em chào Bác ạ. Bác đang quan tâm hạng mục nào để em tư vấn giúp Bác ạ? "
                   "(Nhà thờ họ, Khu lăng mộ hay sản phẩm đá mỹ nghệ...)")
@@ -1256,7 +1269,7 @@ async def _process_inner(psid: str, text: str, user_at: str | None = None) -> No
         stats.log_event("image", psid)
         if not images:
             # Tải ảnh hỏng hoặc attachment không phải ảnh (file/video) -> câu cố định cũ.
-            await send_text(psid, _IMAGE_REPLY)
+            await send_text(psid, _cau_khach_gui_anh(await _off(brain.sdt_da_luu, psid)))
             return
         text = _IMG_ONLY_PROMPT                         # ảnh không kèm chữ -> Gemini tự nhìn ảnh tư vấn
     if text == _REFERRAL_EVENT:
@@ -1332,7 +1345,11 @@ async def _process_inner(psid: str, text: str, user_at: str | None = None) -> No
             stats.log_event("khach_kho_chiu" if kho_chiu else "handoff", psid)
             # Khách đang gắt: câu mời để lại SĐT lúc này chỉ đổ thêm dầu -> xoa dịu rồi im.
             # force: tin xoa dịu là tin ĐẶT RA cái khoá, không được tự chặn chính nó.
-            chot = _NGUNG_REPLY if doi_ngung else (_XOA_DIU_REPLY if kho_chiu else _HUMAN_HANDOFF_REPLY)
+            # Nhánh này THOÁT SỚM (không qua brain.answer): số khách gõ trong chính tin này phải
+            # tự ghi vào hồ sơ, nếu không thì _save_lead_to_crm bên dưới đọc log không thấy số.
+            sdt = await _off(brain.ghi_sdt, psid, util.tim_sdt(text))
+            chot = _NGUNG_REPLY if doi_ngung else (
+                _XOA_DIU_REPLY if kho_chiu else _cau_chuyen_nguoi_that(sdt))
             await send_text(psid, chot, force=True)
             if kho_chiu:
                 await _off(_pause_bot, psid, forced)
@@ -1410,7 +1427,7 @@ async def _process_inner(psid: str, text: str, user_at: str | None = None) -> No
             if is_new:
                 await notify_admins(f"👋 KHÁCH MỚI: {await _label(psid)}\nTin đầu: {text}\n"
                                     f"Bot trả lời: {reply}")
-            phone = _find_phone(text)
+            phone = util.tim_sdt(text)
             if phone:
                 await notify_admins(f"📞 KHÁCH ĐỂ LẠI SĐT: {phone} - {await _label(psid)}\n"
                                     f"Tin khách: {text}")

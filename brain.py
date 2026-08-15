@@ -52,7 +52,7 @@ _PROFILE_LABELS = {
     "tinh": "Tỉnh/TP", "khu_vuc": "Khu vực", "xe_cau": "Xe cẩu/đường vào",
     "thoi_gian": "Thời gian", "ghi_chu": "Ghi chú", "y_dinh": "Ý định hiện tại",
 }
-_PHONE_RE = re.compile(r"(?<!\d)(?:\+?84|0)\d{9,10}(?!\d)")
+# SĐT: dùng chung util.tim_sdt (xem util.py) - đừng dựng lại regex riêng ở đây.
 
 # BOT_MODEL: alias -> model id API. Có dấu '.' hoặc bắt đầu 'gemini' thì coi là id đầy đủ.
 _MODEL_ALIAS = {"flash": "gemini-3.5-flash", "pro": "gemini-2.5-pro",
@@ -836,7 +836,7 @@ def _answer_sync(psid: str, text: str, images: list[tuple[bytes, str]] | None = 
     with _psid_lock(psid):
         full = _load_hist(psid)                       # TOÀN BỘ log (lưu đủ cho admin)
         full, user_at = trim_resend(full, text, user_at)
-        profile = _profile_from_history_sync(psid, full)
+        profile = _profile_luot_nay(psid, _profile_from_history_sync(psid, full), text)
         # thời gian thực nhét ĐẦU contents (tách khỏi cache tĩnh)
         contents = [types.Content(role="user", parts=[types.Part.from_text(text=_time_note_text())])]
         if profile_context := _profile_prompt(profile):
@@ -897,9 +897,10 @@ def _answer_sync(psid: str, text: str, images: list[tuple[bytes, str]] | None = 
             reply = _sach_markdown(reply)
             if hua_anh_khong_co:
                 # Khách hỏi ảnh mà Base chưa có: nói thật + xin liên hệ, thay vì để khách chờ hụt.
+                # Đã có SĐT trong hồ sơ thì KHÔNG xin lại - khách vừa cho số xong lại bị hỏi số
+                # là dấu hiệu rõ nhất của bot không nhớ gì.
                 reply = (reply + " Mẫu này bên em làm thiết kế riêng theo khuôn viên từng nhà "
-                         "nên chưa có sẵn ảnh dựng ạ. Bác để lại số điện thoại hoặc Zalo, "
-                         "em gửi Bác bộ ảnh công trình thực tế và bản phối riêng ngay hôm nay ạ.").strip()
+                         "nên chưa có sẵn ảnh dựng ạ. " + _cau_xin_lien_he(profile.get("sdt"))).strip()
             if not reply:
                 raise BrainError("API chỉ trả marker ảnh, không có chữ.")
             reply_out = f"{reply} {markers}" if markers else reply   # marker CHỈ để gửi, KHÔNG lưu history
@@ -934,6 +935,36 @@ def _doc_profile(psid: str) -> dict:
     return _clean_profile(state.get(psid).get("profile"))
 
 
+def sdt_da_luu(psid: str) -> str:
+    """SĐT đã lưu trong hồ sơ khách. "" nếu chưa có. Đọc state, KHÔNG gọi AI.
+
+    Dùng cho các câu TRẢ LỜI CỐ ĐỊNH (không qua model): chúng không đọc hồ sơ nên vẫn xin số
+    của khách đã cho số từ lâu."""
+    return _doc_profile(psid).get("sdt", "")
+
+
+def ghi_sdt(psid: str, sdt: str) -> str:
+    """Lưu SĐT vào hồ sơ khách ngay, không chờ bản trích nền. Trả SĐT đang có sau khi lưu.
+
+    Cần cho các nhánh THOÁT SỚM (handoff cưỡng bức): chúng return trước brain.answer nên tin
+    khách không vào lịch sử -> _extract_lead_sync đọc log không thấy số -> lead bốc hơi dù
+    khách vừa cho số."""
+    profile = _doc_profile(psid)
+    if sdt and sdt != profile.get("sdt"):
+        _ghi_profile(psid, {**profile, "sdt": sdt})
+        return sdt
+    return profile.get("sdt", "")
+
+
+def _cau_xin_lien_he(sdt: str | None) -> str:
+    """Câu chốt mời liên hệ. Có SĐT rồi thì XÁC NHẬN số đó, không xin lại."""
+    if sdt:
+        return (f"Em gửi Bác bộ ảnh công trình thực tế và bản phối riêng qua Zalo {sdt} "
+                "ngay hôm nay ạ.")
+    return ("Bác để lại số điện thoại hoặc Zalo, em gửi Bác bộ ảnh công trình thực tế "
+            "và bản phối riêng ngay hôm nay ạ.")
+
+
 def _ghi_profile(psid: str, profile: dict) -> None:
     state.patch(psid, profile=profile, y_dinh=str(profile.get("y_dinh") or "").strip().lower())
 
@@ -946,16 +977,30 @@ def _clean_profile(raw: object) -> dict:
 
 
 def _phones_in_history(hist: list) -> str:
-    phones = []
-    for msg in hist:
-        if msg.get("role") != "user" or not isinstance(msg.get("content"), str):
-            continue
-        compact = re.sub(r"[.\s()-]", "", msg["content"])
-        phones.extend(_PHONE_RE.findall(compact))
-    if not phones:
-        return ""
-    phone = phones[-1]
-    return "0" + phone[3:] if phone.startswith("+84") else "0" + phone[2:] if phone.startswith("84") else phone
+    """SĐT khách cho GẦN NHẤT trong log. "" nếu chưa có. Số mới đè số cũ (khách đổi số)."""
+    phones = [sdt for msg in hist
+              if msg.get("role") == "user" and isinstance(msg.get("content"), str)
+              and (sdt := util.tim_sdt(msg["content"]))]
+    return phones[-1] if phones else ""
+
+
+def _profile_luot_nay(psid: str, profile: dict, text: str) -> dict:
+    """Phủ SĐT khách vừa gõ Ở CHÍNH LƯỢT NÀY lên hồ sơ, và lưu ngay.
+
+    Hồ sơ được trích từ log CŨ: tin khách vừa gửi mới nằm trong biến `text`, phải tới cuối
+    _answer_sync mới được ghi vào lịch sử. Không phủ ở đây thì đúng lượt khách gõ số, khối
+    "[Hồ sơ khách đã xác nhận]" vẫn trống ô SĐT -> model đọc thành "khách chưa cho số" rồi
+    XIN LẠI ngay trong câu vừa nhận số. Đây là lỗi mất khách hay gặp nhất của bot.
+
+    Chỉ dùng regex, KHÔNG gọi thêm AI: các trường còn lại để bản trích nền lo ở lượt sau.
+    Ghi state luôn -> bản trích nền có hỏng thì số vẫn còn cho câu cố định và cho CRM.
+    """
+    sdt = util.tim_sdt(text)
+    if not sdt or sdt == profile.get("sdt"):
+        return profile
+    profile = {**profile, "sdt": sdt}
+    _ghi_profile(psid, profile)
+    return profile
 
 
 def _profile_prompt(profile: dict) -> str:

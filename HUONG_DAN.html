@@ -1,0 +1,1033 @@
+<title>Sổ tay Thảo Vân</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bitter:ital,wght@0,500;0,600;0,700;1,400&family=Be+Vietnam+Pro:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+
+<style>
+/* ===================================================================
+   Bảng màu lấy từ vật liệu của xưởng: đá xanh đen (mực), đá mài (nền),
+   xanh rêu patina (accent), oxit sắt (cảnh báo).
+   :root = bộ sáng ĐẦY ĐỦ. Hai khối dưới chỉ định nghĩa lại token.
+   =================================================================== */
+:root {
+  --bg:        #F1F2EF;
+  --surface:   #FBFBFA;
+  --surface-2: #E7E9E4;
+  --ink:       #18211E;
+  --ink-2:     #4A5751;
+  --ink-3:     #77837D;
+  --line:      #D3D8D2;
+  --line-soft: #E2E6E0;
+  --accent:    #2F6F62;
+  --accent-2:  #1F4E45;
+  --accent-bg: #E2EDE9;
+  --warn:      #96601A;
+  --warn-bg:   #F5EBDA;
+  --crit:      #A63D2F;
+  --crit-bg:   #F7E5E1;
+  --code-bg:   #1B2422;
+  --code-ink:  #DCE3DF;
+
+  --step: clamp(1.5rem, 1.2rem + 1.2vw, 2.25rem);
+  --rail: 16rem;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg:        #131A18;
+    --surface:   #1B2422;
+    --surface-2: #232D2A;
+    --ink:       #E6EAE7;
+    --ink-2:     #A9B4AF;
+    --ink-3:     #7C8883;
+    --line:      #2E3A36;
+    --line-soft: #253330;
+    --accent:    #63B5A2;
+    --accent-2:  #8FD0C0;
+    --accent-bg: #1B2F2A;
+    --warn:      #D9A55C;
+    --warn-bg:   #2E2718;
+    --crit:      #E38878;
+    --crit-bg:   #331F1B;
+    --code-bg:   #0E1413;
+    --code-ink:  #D3DCD8;
+  }
+}
+
+:root[data-theme="dark"] {
+  --bg:        #131A18;
+  --surface:   #1B2422;
+  --surface-2: #232D2A;
+  --ink:       #E6EAE7;
+  --ink-2:     #A9B4AF;
+  --ink-3:     #7C8883;
+  --line:      #2E3A36;
+  --line-soft: #253330;
+  --accent:    #63B5A2;
+  --accent-2:  #8FD0C0;
+  --accent-bg: #1B2F2A;
+  --warn:      #D9A55C;
+  --warn-bg:   #2E2718;
+  --crit:      #E38878;
+  --crit-bg:   #331F1B;
+  --code-bg:   #0E1413;
+  --code-ink:  #D3DCD8;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: "Be Vietnam Pro", "Segoe UI", system-ui, sans-serif;
+  font-size: 16px;
+  line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ---------- Khung tổng ---------- */
+.shell {
+  display: grid;
+  grid-template-columns: var(--rail) minmax(0, 1fr);
+  gap: 0;
+  max-width: 78rem;
+  margin: 0 auto;
+}
+
+/* ---------- Rail điều hướng ---------- */
+.rail {
+  position: sticky;
+  top: 0;
+  align-self: start;
+  height: 100vh;
+  overflow-y: auto;
+  padding: 2.5rem 1.5rem 2.5rem 1.75rem;
+  border-right: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+.rail-brand { display: flex; flex-direction: column; gap: .2rem; }
+.rail-brand b {
+  font-family: Bitter, Georgia, serif;
+  font-weight: 700;
+  font-size: 1.05rem;
+  letter-spacing: -.01em;
+}
+.rail-brand span {
+  font-size: .75rem;
+  color: var(--ink-3);
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+.rail nav { display: flex; flex-direction: column; gap: .1rem; }
+.rail nav a {
+  display: flex;
+  gap: .6rem;
+  align-items: baseline;
+  padding: .34rem .5rem;
+  border-radius: 3px;
+  color: var(--ink-2);
+  text-decoration: none;
+  font-size: .875rem;
+  line-height: 1.35;
+}
+.rail nav a .n {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: .72rem;
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+  flex: none;
+}
+.rail nav a:hover { background: var(--surface-2); color: var(--ink); }
+.rail nav a:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* ---------- Cột đọc ---------- */
+main {
+  padding: 3.5rem clamp(1.25rem, 3vw, 3.5rem) 6rem;
+  min-width: 0;
+}
+.wrap { max-width: 44rem; }
+
+/* ---------- Mở đầu ---------- */
+.masthead { margin-bottom: 3.5rem; }
+.eyebrow {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: .74rem;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin: 0 0 .9rem;
+}
+h1 {
+  font-family: Bitter, Georgia, serif;
+  font-weight: 700;
+  font-size: clamp(2.1rem, 1.5rem + 2.6vw, 3.1rem);
+  line-height: 1.08;
+  letter-spacing: -.022em;
+  text-wrap: balance;
+  margin: 0 0 1rem;
+}
+.standfirst {
+  font-size: 1.075rem;
+  color: var(--ink-2);
+  margin: 0;
+  max-width: 38rem;
+}
+
+/* ---------- Thẻ dữ kiện ---------- */
+.facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: 1px;
+  background: var(--line);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  overflow: hidden;
+  margin-top: 2.25rem;
+}
+.fact { background: var(--surface); padding: .95rem 1.1rem; }
+.fact dt {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: .68rem;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  margin: 0 0 .3rem;
+}
+.fact dd {
+  margin: 0;
+  font-weight: 600;
+  font-size: .95rem;
+  line-height: 1.3;
+}
+
+/* ---------- Mục ---------- */
+section { margin-top: var(--step); scroll-margin-top: 1.5rem; }
+section > h2 {
+  font-family: Bitter, Georgia, serif;
+  font-weight: 600;
+  font-size: 1.6rem;
+  letter-spacing: -.015em;
+  line-height: 1.2;
+  text-wrap: balance;
+  margin: 3.25rem 0 .35rem;
+  padding-top: 1.6rem;
+  border-top: 1px solid var(--line);
+  display: flex;
+  gap: .7rem;
+  align-items: baseline;
+}
+section > h2 .n {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: .8rem;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+  flex: none;
+}
+.lede { color: var(--ink-2); margin: .35rem 0 1.5rem; }
+
+h3 {
+  font-family: Bitter, Georgia, serif;
+  font-weight: 600;
+  font-size: 1.115rem;
+  letter-spacing: -.008em;
+  margin: 2.25rem 0 .5rem;
+  text-wrap: balance;
+}
+h4 {
+  font-size: .8rem;
+  font-weight: 600;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  margin: 1.75rem 0 .5rem;
+}
+
+p { margin: 0 0 1rem; }
+a { color: var(--accent-2); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
+strong { font-weight: 600; }
+
+ul, ol { margin: 0 0 1rem; padding-left: 1.3rem; }
+li { margin-bottom: .4rem; }
+li::marker { color: var(--ink-3); }
+
+/* ---------- Mã ---------- */
+code {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: .855em;
+  background: var(--surface-2);
+  padding: .1em .36em;
+  border-radius: 3px;
+  word-break: break-word;
+}
+pre {
+  background: var(--code-bg);
+  color: var(--code-ink);
+  padding: 1rem 1.15rem;
+  border-radius: 5px;
+  overflow-x: auto;
+  margin: 0 0 1.25rem;
+  font-size: .82rem;
+  line-height: 1.6;
+  border: 1px solid var(--line);
+}
+pre code { background: none; padding: 0; font-size: inherit; color: inherit; }
+pre .c { color: #7E948C; }
+
+/* ---------- Các bước ---------- */
+.steps { list-style: none; padding: 0; margin: 0 0 1.5rem; counter-reset: s; }
+.steps > li {
+  counter-increment: s;
+  position: relative;
+  padding-left: 2.6rem;
+  margin-bottom: 1.9rem;
+}
+.steps > li::before {
+  content: counter(s);
+  position: absolute;
+  left: 0;
+  top: .05rem;
+  width: 1.8rem;
+  height: 1.8rem;
+  border-radius: 50%;
+  background: var(--accent-bg);
+  color: var(--accent-2);
+  border: 1px solid var(--accent);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: .8rem;
+  font-weight: 500;
+  display: grid;
+  place-items: center;
+  font-variant-numeric: tabular-nums;
+}
+.steps > li > b {
+  display: block;
+  font-family: Bitter, Georgia, serif;
+  font-weight: 600;
+  font-size: 1.04rem;
+  margin-bottom: .3rem;
+}
+
+/* ---------- Hộp lưu ý ---------- */
+.note {
+  border-left: 3px solid var(--accent);
+  background: var(--accent-bg);
+  padding: .9rem 1.1rem;
+  border-radius: 0 4px 4px 0;
+  margin: 0 0 1.35rem;
+  font-size: .945rem;
+}
+.note.warn { border-left-color: var(--warn); background: var(--warn-bg); }
+.note.crit { border-left-color: var(--crit); background: var(--crit-bg); }
+.note > :last-child { margin-bottom: 0; }
+.note b.tag {
+  display: block;
+  font-size: .72rem;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+  margin-bottom: .3rem;
+  font-family: "IBM Plex Mono", monospace;
+  color: var(--accent-2);
+}
+.note.warn b.tag { color: var(--warn); }
+.note.crit b.tag { color: var(--crit); }
+
+/* ---------- Bảng ---------- */
+.tbl { overflow-x: auto; margin: 0 0 1.5rem; border: 1px solid var(--line); border-radius: 4px; }
+table { border-collapse: collapse; width: 100%; font-size: .89rem; background: var(--surface); }
+th, td { text-align: left; padding: .6rem .85rem; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
+thead th {
+  background: var(--surface-2);
+  font-size: .72rem;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  font-weight: 600;
+  white-space: nowrap;
+}
+tbody tr:last-child td { border-bottom: none; }
+td code { white-space: nowrap; }
+
+/* ---------- Thẻ đầu việc ---------- */
+.task {
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--surface);
+  padding: 1.15rem 1.25rem;
+  margin: 0 0 1rem;
+}
+.task > h3 { margin: 0 0 .5rem; font-size: 1.03rem; }
+.task > :last-child { margin-bottom: 0; }
+
+/* ---------- Chip trạng thái ---------- */
+.chip {
+  display: inline-block;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: .7rem;
+  letter-spacing: .05em;
+  padding: .12rem .45rem;
+  border-radius: 3px;
+  border: 1px solid currentColor;
+  white-space: nowrap;
+}
+.chip.on   { color: var(--accent-2); background: var(--accent-bg); }
+.chip.warn { color: var(--warn);     background: var(--warn-bg); }
+.chip.off  { color: var(--ink-3);    background: var(--surface-2); }
+
+footer {
+  margin-top: 4rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--line);
+  color: var(--ink-3);
+  font-size: .85rem;
+}
+
+@media (max-width: 62rem) {
+  .shell { grid-template-columns: 1fr; }
+  .rail {
+    position: static;
+    height: auto;
+    border-right: none;
+    border-bottom: 1px solid var(--line);
+    padding: 1.5rem 1.25rem;
+  }
+  .rail nav { display: grid; grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr)); }
+  main { padding-top: 2.25rem; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+}
+</style>
+
+<div class="shell">
+
+<aside class="rail">
+  <div class="rail-brand">
+    <b>Sổ tay Thảo Vân</b>
+    <span>Hồn Đá · Messenger</span>
+  </div>
+  <nav aria-label="Mục lục">
+    <a href="#gioi-thieu"><span class="n">00</span> Bot làm gì</a>
+    <a href="#chuan-bi"><span class="n">01</span> Cần chuẩn bị</a>
+    <a href="#cai-dat"><span class="n">02</span> Cài đặt trên máy</a>
+    <a href="#facebook"><span class="n">03</span> Nối Facebook</a>
+    <a href="#deploy"><span class="n">04</span> Đưa lên VPS</a>
+    <a href="#dashboard"><span class="n">05</span> Trang quản trị</a>
+    <a href="#day-bot"><span class="n">06</span> Dạy bot, sửa hàng</a>
+    <a href="#tu-dong"><span class="n">07</span> Bot tự chạy nền</a>
+    <a href="#crm"><span class="n">08</span> Lead vào Lark</a>
+    <a href="#canh-bao"><span class="n">09</span> Đọc cảnh báo</a>
+    <a href="#su-co"><span class="n">10</span> Sự cố hay gặp</a>
+    <a href="#bien-env"><span class="n">11</span> Tra biến .env</a>
+  </nav>
+</aside>
+
+<main>
+<div class="wrap">
+
+  <header class="masthead">
+    <p class="eyebrow">Sổ tay cài đặt &amp; vận hành</p>
+    <h1>Thảo Vân — trợ lý bán đá mỹ nghệ trên Messenger</h1>
+    <p class="standfirst">
+      Bot trực fanpage <b>Hồn Đá — Lăng Mộ Đá Gia Tộc</b>: tư vấn khách, gửi ảnh mẫu,
+      xin số điện thoại, đẩy lead vào bảng CRM trên Lark và gọi người thật khi cần.
+      Tài liệu này đi từ máy trắng tới bot chạy thật, rồi tới việc vận hành hằng ngày.
+    </p>
+
+    <dl class="facts">
+      <div class="fact"><dt>Não</dt><dd>Google Gemini</dd></div>
+      <div class="fact"><dt>Chạy trên</dt><dd>Docker · VPS GCP</dd></div>
+      <div class="fact"><dt>Bảng hàng</dt><dd>126 mẫu, đủ ảnh</dd></div>
+      <div class="fact"><dt>Lưu khách</dt><dd>Firebase RTDB</dd></div>
+    </dl>
+  </header>
+
+  <!-- ============ 00 ============ -->
+  <section id="gioi-thieu">
+    <h2><span class="n">00</span> Bot làm gì</h2>
+    <p class="lede">Đọc mục này để biết bot chạm vào những hệ thống nào — cài đặt hỏng thường
+    là vì thiếu một mắt xích ở đây.</p>
+
+    <p>Khách nhắn fanpage → Facebook gọi webhook của bot → bot đọc lịch sử khách, tra bảng
+    sản phẩm, hỏi Gemini rồi trả lời. Trên đường đi bot còn chạm 4 nơi:</p>
+
+    <div class="tbl">
+      <table>
+        <thead><tr><th>Nơi</th><th>Dùng để</th><th>Thiếu thì sao</th></tr></thead>
+        <tbody>
+          <tr><td><b>Facebook</b></td><td>Nhận và gửi tin, đọc comment</td><td>Bot câm hoàn toàn</td></tr>
+          <tr><td><b>Gemini</b></td><td>Sinh câu trả lời</td><td>Bot không nghĩ được, tin rơi vào vòng trả lời bù</td></tr>
+          <tr><td><b>Lark Base</b></td><td>Kho ảnh sản phẩm + bảng CRM ghi lead</td><td>Khách chỉ nhận chữ; lead không vào bảng</td></tr>
+          <tr><td><b>Firebase</b></td><td>Lưu lịch sử chat + trạng thái khách</td><td>Dựng lại máy chủ là mất sạch lịch sử</td></tr>
+          <tr><td><b>Group Lark</b></td><td>Bắn cảnh báo cho người trực</td><td>Bot hỏng mà không ai biết</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>Ba việc bot làm mà người mới hay bất ngờ: bot <b>tự nhắn bù</b> khi một lượt trả lời bị
+    lỗi, bot <b>tự im 24 giờ</b> nếu khách tỏ ra khó chịu, và bot <b>tự ghi lead</b> vào Lark
+    ngay khi khách để lại số — không cần chờ chốt đơn.</p>
+  </section>
+
+  <!-- ============ 01 ============ -->
+  <section id="chuan-bi">
+    <h2><span class="n">01</span> Cần chuẩn bị</h2>
+    <p class="lede">Gom đủ 4 nhóm khoá này trước khi gõ lệnh nào. Thiếu nhóm 1 và 2 là bot
+    không chạy; thiếu nhóm 3 và 4 thì bot vẫn chạy nhưng cụt tính năng.</p>
+
+    <h3>Bắt buộc</h3>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>Khoá</th><th>Lấy ở đâu</th></tr></thead>
+        <tbody>
+          <tr><td><code>GEMINI_API_KEY</code></td><td><a href="https://aistudio.google.com/apikey">aistudio.google.com/apikey</a></td></tr>
+          <tr><td><code>MSGR_PAGE_TOKEN</code></td><td>Meta Developers → App → Messenger → Generate Token</td></tr>
+          <tr><td><code>MSGR_APP_SECRET</code></td><td>Meta Developers → App → Settings → Basic</td></tr>
+          <tr><td><code>MSGR_VERIFY_TOKEN</code></td><td>Tự đặt — chuỗi bí mật bất kỳ, phải khớp với ô điền bên Meta</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="note crit">
+      <b class="tag">Bẫy đã dính thật</b>
+      <p><b>Page Token và App Secret phải cùng một App.</b> Lấy token ở app A mà giữ secret của
+      app B thì mọi webhook trả <code>403</code> và bot câm — nhưng vòng trả lời bù vẫn nhắn được
+      qua Graph API, nên nhìn cứ như "lúc được lúc không". Rất tốn giờ để lần ra.</p>
+    </div>
+
+    <h3>Nên có</h3>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>Khoá</th><th>Được gì</th></tr></thead>
+        <tbody>
+          <tr><td><code>LARK_APP_ID</code> · <code>LARK_APP_SECRET</code></td><td>Gửi ảnh mẫu cho khách, ghi lead vào CRM. Tạo app nội bộ ở <code>open.larksuite.com</code>, cấp quyền <code>bitable:read</code>, <code>bitable:record:create</code>, <code>bitable:record:update</code>, <code>drive:read</code>, rồi <b>chia sẻ Base cho app với quyền chỉnh sửa</b></td></tr>
+          <tr><td><code>LARK_WEBHOOK_URL</code></td><td>Cảnh báo và thông báo lead về group Lark. Lấy ở group → Cài đặt → Bot → Custom Bot</td></tr>
+          <tr><td><code>FIREBASE_CRED</code> · <code>FIREBASE_DB_URL</code></td><td>Lịch sử khách sống sót qua mỗi lần dựng lại máy chủ</td></tr>
+          <tr><td><code>BOT_DASH_TOKEN</code></td><td>Bật trang quản trị. <b>Để trống là trang tắt hẳn</b></td></tr>
+          <tr><td><code>BOT_ADMIN_UIDS</code></td><td>PSID người trực, nhận thông báo khách cần chuyên gia</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>Mã Base ảnh sản phẩm và Base CRM đã có sẵn giá trị mặc định trong <code>config.py</code>,
+    không cần điền lại trừ khi bạn dùng Base khác.</p>
+  </section>
+
+  <!-- ============ 02 ============ -->
+  <section id="cai-dat">
+    <h2><span class="n">02</span> Cài đặt trên máy</h2>
+    <p class="lede">Chạy được ở máy mình trước rồi hãy nghĩ tới máy chủ. Bước này khoảng 5 phút.</p>
+
+    <ol class="steps">
+      <li>
+        <b>Cài thư viện</b>
+        <p>Cần Python 3.11 trở lên.</p>
+<pre><code>cd chatbot-mess
+python -m venv .venv
+.venv\Scripts\activate        <span class="c"># Linux/macOS: source .venv/bin/activate</span>
+pip install -r requirements.txt</code></pre>
+      </li>
+
+      <li>
+        <b>Tạo file cấu hình</b>
+        <p>Chép mẫu rồi điền các khoá đã gom ở mục 01.</p>
+<pre><code>copy .env.example .env         <span class="c"># Linux/macOS: cp .env.example .env</span></code></pre>
+        <p><code>.env</code> đã nằm trong <code>.gitignore</code> — đừng commit nó.</p>
+      </li>
+
+      <li>
+        <b>Chạy bot</b>
+<pre><code>python app.py</code></pre>
+        <p>Bot lắng nghe ở cổng <code>7900</code>. Mở <code>http://localhost:7900/healthz</code>,
+        thấy <code>"ok": true</code> và <code>"missing_config": []</code> là cấu hình đủ.</p>
+      </li>
+
+      <li>
+        <b>Chạy thử bộ test</b>
+        <p>Không cần mạng, không đụng dữ liệu thật.</p>
+<pre><code>python -m pytest tests -q</code></pre>
+      </li>
+    </ol>
+
+    <div class="note warn">
+      <b class="tag">Chạy máy dev khi máy chủ đang chạy</b>
+      <p>Hai môi trường dùng hai App Facebook khác nhau nhưng cùng bắn cảnh báo vào một group
+      Lark. Chạy bot ở máy mình lúc máy chủ đang chạy sẽ làm group nhận cảnh báo trùng, và
+      cảnh báo của máy dev trông y hệt cảnh báo thật. Để trống <code>LARK_WEBHOOK_URL</code>
+      trong <code>.env</code> ở máy dev là hết nhiễu.</p>
+    </div>
+  </section>
+
+  <!-- ============ 03 ============ -->
+  <section id="facebook">
+    <h2><span class="n">03</span> Nối Facebook</h2>
+    <p class="lede">Bot cần một địa chỉ công khai để Facebook gọi vào. Máy dev dùng ngrok,
+    máy chủ dùng domain thật.</p>
+
+    <ol class="steps">
+      <li>
+        <b>Mở đường vào máy</b>
+<pre><code>ngrok http 7900</code></pre>
+        <p>Chép địa chỉ <code>https://…</code> ngrok in ra. Trên máy chủ thì bỏ qua bước này,
+        dùng thẳng domain đã trỏ về VPS.</p>
+      </li>
+
+      <li>
+        <b>Khai webhook bên Meta</b>
+        <p>Meta Developers → App → Messenger → Webhooks:</p>
+        <ul>
+          <li>Callback URL: <code>https://&lt;domain&gt;/webhook/messenger</code></li>
+          <li>Verify token: đúng chuỗi đã đặt ở <code>MSGR_VERIFY_TOKEN</code></li>
+        </ul>
+      </li>
+
+      <li>
+        <b>Đăng ký đủ 4 sự kiện</b>
+        <p><code>messages</code> · <code>messaging_postbacks</code> ·
+        <code>messaging_referrals</code> · <code>feed</code></p>
+        <p>Thiếu <code>feed</code> là bot <b>không thấy comment</b> dưới bài viết — log sẽ không
+        có dòng <code>[comment]</code> nào. Không cần <code>message_echoes</code>.</p>
+      </li>
+
+      <li>
+        <b>Thử bằng tin thật</b>
+        <p>Nhắn cho fanpage một câu. Bot phải trả lời trong vài giây, và log hiện
+        <code>POST /webhook/messenger … 200 OK</code>. Ra <code>403</code> tức là chữ ký sai —
+        xem lại bẫy Token/Secret ở mục 01.</p>
+      </li>
+    </ol>
+  </section>
+
+  <!-- ============ 04 ============ -->
+  <section id="deploy">
+    <h2><span class="n">04</span> Đưa lên VPS</h2>
+    <p class="lede">Cách đang dùng thật: đóng gói mã nguồn ở máy mình, đẩy lên VPS rồi build tại chỗ.
+    Không cần Docker chạy ở máy mình.</p>
+
+    <div class="tbl">
+      <table>
+        <thead><tr><th>Hạng mục</th><th>Giá trị</th></tr></thead>
+        <tbody>
+          <tr><td>Máy chủ</td><td><code>hon-da-vps</code>, zone <code>us-central1-a</code></td></tr>
+          <tr><td>Thư mục</td><td><code>/home/admin/chatbot-mess</code> (file thuộc user <code>admin</code> → ghi phải <code>sudo</code>)</td></tr>
+          <tr><td>Domain</td><td><code>hondabotchat.duckdns.org</code>, Caddy tự lấy SSL</td></tr>
+          <tr><td>Image</td><td><code>hondastone-bot:latest</code>, build tại VPS</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <ol class="steps">
+      <li>
+        <b>Đóng gói mã nguồn</b>
+        <p>Cố tình bỏ <code>.env</code>, <code>data/</code>, khoá Firebase, <code>Caddyfile</code>
+        và <code>docker-compose.yml</code> ra ngoài.</p>
+<pre><code>tar czf /tmp/src.tgz --exclude='__pycache__' *.py bot_tools Document_ChatBot_Mess \
+    dashboard.html Dockerfile entrypoint.sh requirements.txt database.rules.json .dockerignore</code></pre>
+      </li>
+
+      <li>
+        <b>Đẩy lên máy chủ</b>
+<pre><code>gcloud compute scp /tmp/src.tgz hon-da-vps:/tmp/src.tgz --zone=us-central1-a</code></pre>
+      </li>
+
+      <li>
+        <b>Giải nén, build, đổi container</b>
+        <p>Lệnh này tự sao lưu mã nguồn cũ trước khi ghi đè.</p>
+<pre><code>gcloud compute ssh hon-da-vps --zone=us-central1-a --command="cd /home/admin/chatbot-mess && \
+  sudo tar czf ~/backup-src-\$(date +%F-%H%M%S).tgz *.py bot_tools && \
+  sudo tar xzf /tmp/src.tgz -C . && rm -f /tmp/src.tgz && \
+  docker compose build bot && docker compose up -d bot && docker image prune -f"</code></pre>
+      </li>
+
+      <li>
+        <b>Kiểm tra bot đã lên</b>
+<pre><code>curl -s https://hondabotchat.duckdns.org/healthz</code></pre>
+        <p>Thấy <code>"ok":true</code> là xong. Nếu chưa lên:</p>
+<pre><code>gcloud compute ssh hon-da-vps --zone=us-central1-a \
+  --command="cd /home/admin/chatbot-mess && docker compose logs --tail=50 bot"</code></pre>
+      </li>
+    </ol>
+
+    <div class="note warn">
+      <b class="tag">Đừng ghi đè</b>
+      <p><code>Caddyfile</code> và <code>docker-compose.yml</code> trên VPS có thể đã chỉnh
+      riêng (trần RAM, route <code>/privacy</code>). Gói mã nguồn ở bước 1 đã loại sẵn hai file
+      này — giữ nguyên như vậy.</p>
+    </div>
+
+    <p>Đổi container mất khoảng 2–3 phút. Khách nhắn trong khoảng đó không mất: lưới quét tin
+    rơi chạy mỗi 2 phút sẽ nhắn bù.</p>
+  </section>
+
+  <!-- ============ 05 ============ -->
+  <section id="dashboard">
+    <h2><span class="n">05</span> Trang quản trị</h2>
+    <p class="lede">Nơi người trực làm việc hằng ngày. Mở bằng
+    <code>https://&lt;domain&gt;/admin?token=&lt;BOT_DASH_TOKEN&gt;</code>.</p>
+
+    <div class="tbl">
+      <table>
+        <thead><tr><th>Tab</th><th>Trả lời câu hỏi</th><th>Xem gì</th></tr></thead>
+        <tbody>
+          <tr><td><b>Tổng quan</b></td><td>Bot tốn bao nhiêu tiền?</td><td>Token đã dùng, chi phí hôm nay và 7 ngày, số khách, tỉ lệ trả lời được</td></tr>
+          <tr><td><b>Tình hình</b></td><td>Có khách nào đang bị bỏ không?</td><td>Inbox chưa trả lời, comment chưa trả lời, hạn token page, lỗi gần đây. Con số đỏ trên tab là số khách đang chờ</td></tr>
+          <tr><td><b>Khách hàng</b></td><td>Khách này đã nói gì?</td><td>Danh sách khách, log từng người, nút <b>Mở khoá</b>, nút xoá khách</td></tr>
+          <tr><td><b>Cài đặt</b></td><td>Đổi cách bot chạy</td><td>Đổi model, danh sách admin, giới hạn tốc độ, nút Test Lark, nút Restart</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="note crit">
+      <b class="tag">Ô nhập không ghi được token và mật khẩu</b>
+      <p>Tab Cài đặt <b>chỉ ghi được 4 mục</b>: <code>BOT_MODEL</code>,
+      <code>BOT_ADMIN_UIDS</code>, <code>BOT_PER_PSID_RATE_S</code>,
+      <code>BOT_MAX_CONCURRENT</code>. Các ô bí mật vẫn hiện ra mời điền, nhưng giá trị bị
+      <b>bỏ đi im lặng</b> mà giao diện vẫn báo lưu thành công. Muốn đổi token thì sửa
+      <code>.env</code> qua SSH:</p>
+<pre><code>gcloud compute ssh hon-da-vps --zone=us-central1-a
+cd ~/chatbot-mess &amp;&amp; sudo nano .env
+docker compose restart bot</code></pre>
+    </div>
+
+    <h3>Việc hay làm</h3>
+
+    <div class="task">
+      <h3>Khách bị bot ngừng nhắn, muốn mở lại</h3>
+      <p>Tab <b>Khách hàng</b> → tìm khách → nút <b>Mở khoá</b>. Dùng khi bot đã tự im vì khách
+      gắt nhưng người thật đã gọi và xử lý xong.</p>
+    </div>
+
+    <div class="task">
+      <h3>Đổi model cho rẻ hơn hoặc thông minh hơn</h3>
+      <p>Tab <b>Cài đặt</b> → ô <code>BOT_MODEL</code> → chọn <code>lite</code>,
+      <code>flash</code> (mặc định) hoặc <code>pro</code>. Ăn ngay, không cần restart.</p>
+    </div>
+
+    <div class="task">
+      <h3>Kiểm tra group Lark còn nhận cảnh báo không</h3>
+      <p>Tab <b>Cài đặt</b> → nút <b>Test Lark</b>. Group phải nhận được một tin thử.</p>
+    </div>
+
+    <div class="task">
+      <h3>Số tiền hiển thị bị sai</h3>
+      <p>Giá lấy từ <code>GEMINI_PRICE_IN_USD</code> và <code>GEMINI_PRICE_OUT_USD</code>
+      (USD cho mỗi triệu token). Google đổi bảng giá thì phải tự sửa hai biến này.</p>
+    </div>
+  </section>
+
+  <!-- ============ 06 ============ -->
+  <section id="day-bot">
+    <h2><span class="n">06</span> Dạy bot, sửa bảng hàng</h2>
+    <p class="lede">Đây là phần thay đổi cách bot nói và bán, không cần biết lập trình.</p>
+
+    <h3>Sửa cách bot nói — <code>Personal.md</code></h3>
+    <p>File <code>Document_ChatBot_Mess/Personal.md</code> là toàn bộ tính cách và luật của bot,
+    chia thành 10 mục:</p>
+
+    <div class="tbl">
+      <table>
+        <thead><tr><th>Mục</th><th>Chỉnh khi muốn</th></tr></thead>
+        <tbody>
+          <tr><td>1. Vai trò</td><td>Đổi tên, xưng hô, tư cách của trợ lý</td></tr>
+          <tr><td>2. Cách nhắn tin</td><td>Đổi độ dài câu, giọng điệu, cách xuống dòng</td></tr>
+          <tr><td>3 · 3b. Tin rác, thái độ khách</td><td>Đổi mức bot chịu đựng trước khi ngừng nhắn</td></tr>
+          <tr><td>4. Phạm vi sản phẩm</td><td>Thêm hoặc bớt nhóm hàng bot được phép tư vấn</td></tr>
+          <tr><td>5. Tra sản phẩm</td><td>Đổi cách bot chọn mẫu để gợi ý</td></tr>
+          <tr><td>6. Ảnh</td><td>Đổi lúc nào bot gửi ảnh mẫu</td></tr>
+          <tr><td>7. Báo chuyên gia</td><td>Đổi tiêu chí chuyển cho người thật</td></tr>
+          <tr><td>8. Luồng hội thoại</td><td>Đổi thứ tự bot hỏi thông tin khách</td></tr>
+          <tr><td>9. Tự soát</td><td>Thêm luật bot phải tự kiểm trước khi gửi</td></tr>
+          <tr><td>10. Thông tin công ty</td><td>Đổi địa chỉ, hotline, chính sách</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>Sửa bảng hàng — <code>Danh_Muc_San_Pham.csv</code></h3>
+    <p>Mỗi dòng là một mẫu. Các cột bot dùng nhiều nhất:</p>
+    <ul>
+      <li><code>Mã Sản Phẩm</code> — cũng là mã tra ảnh bên Lark. Mẫu biến thể <code>M01.2</code> sẽ lấy ảnh của mã gốc <code>M01</code></li>
+      <li><code>Bán chạy</code> — mẫu bán chạy được xếp lên trước khi bot gợi ý</li>
+      <li><code>Có ảnh</code> — do <code>bot_tools/sync_anh_flag.py</code> ghi, đừng sửa tay</li>
+      <li>Các cột giá theo loại đá — <code>Đá xanh đen</code>, <code>Đá xanh rêu</code>, <code>Đá xám BĐ</code>, <code>Đá GRN đen Ấn Độ</code>, <code>Đá xanh Bình Định</code>, <code>Đá trắng Yên Bái</code></li>
+    </ul>
+
+    <h3>Thêm ảnh cho mẫu mới</h3>
+    <p>Ảnh nằm trong Lark Base, không nằm trong mã nguồn. Thêm record vào Base với đúng
+    <code>Mã Sản Phẩm</code> và ảnh ở cột <code>Ảnh báo giá</code>, rồi chạy:</p>
+<pre><code>python bot_tools/sync_anh_flag.py --prune</code></pre>
+    <p>Lệnh này cập nhật cột <code>Có ảnh</code> trong CSV cho khớp với Base.</p>
+
+    <div class="note crit">
+      <b class="tag">Sửa xong phải chép lên VPS — build lại image là không đủ</b>
+      <p>Trên máy chủ, thư mục <code>Document_ChatBot_Mess</code> bị gắn đè từ
+      <code>data/docs</code>, nên bản nằm trong image <b>không có tác dụng</b>. Sửa
+      <code>Personal.md</code> hoặc CSV xong phải chép thẳng lên host:</p>
+<pre><code>gcloud compute scp Document_ChatBot_Mess/Personal.md \
+  hon-da-vps:/tmp/Personal.md --zone=us-central1-a
+
+gcloud compute ssh hon-da-vps --zone=us-central1-a \
+  --command="sudo cp /tmp/Personal.md /home/admin/chatbot-mess/data/docs/Personal.md"</code></pre>
+      <p>Không cần restart — bot đọc lại file ngay khi nội dung đổi.</p>
+    </div>
+  </section>
+
+  <!-- ============ 07 ============ -->
+  <section id="tu-dong">
+    <h2><span class="n">07</span> Bot tự chạy nền</h2>
+    <p class="lede">Bốn vòng lặp chạy suốt, không cần ai bấm. Biết chúng tồn tại thì mới hiểu
+    vì sao bot đôi khi tự nhắn khách.</p>
+
+    <div class="tbl">
+      <table>
+        <thead><tr><th>Vòng</th><th>Làm gì</th><th>Nhịp</th><th>Trạng thái</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><b>Nhắc khách</b></td>
+            <td>Khách im sau khi bot trả lời mà chưa chốt → nhắn nhẹ 1 tin</td>
+            <td>im 23 giờ, quét mỗi 15 phút</td>
+            <td><span class="chip on">bật</span></td>
+          </tr>
+          <tr>
+            <td><b>Nhặt tin rơi</b></td>
+            <td>Hỏi thẳng Facebook xem ai nhắn mà chưa được trả lời → bot nhắn bù</td>
+            <td>quá 2 phút, quét mỗi 2 phút</td>
+            <td><span class="chip on">bật</span></td>
+          </tr>
+          <tr>
+            <td><b>Canh token</b></td>
+            <td>Soi token page, chết hoặc còn dưới 7 ngày → báo Lark</td>
+            <td>mỗi 15 phút</td>
+            <td><span class="chip on">luôn bật</span></td>
+          </tr>
+          <tr>
+            <td><b>Canh đường mạng</b></td>
+            <td>Tự ping domain từ bên ngoài, đứt → báo Lark</td>
+            <td>mỗi 3 phút, fail 2 lần mới báo</td>
+            <td><span class="chip on">bật</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>Vòng nhặt tin rơi là <b>đường phục hồi duy nhất</b> khi một lượt trả lời bị lỗi: lúc lỗi
+    bot cố tình không nhắn gì cho khách (câu xin lỗi tự động vừa lộ lỗi vừa bắt khách chờ),
+    vòng này sẽ trả lời bù ở lần quét sau.</p>
+
+    <h3>Bot không đeo bám khách</h3>
+    <p>Có hai mức khoá, đều lưu trên Firebase nên sống sót qua mọi lần dựng lại máy chủ:</p>
+
+    <div class="tbl">
+      <table>
+        <thead><tr><th>Mức</th><th>Đặt khi</th><th>Chặn gì</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><b>Im hoàn toàn</b><br><span class="chip warn">24 giờ</span></td>
+            <td>Khách chửi, khiếu nại, viết HOA cả câu, đòi ngừng nhắn</td>
+            <td>Mọi tin, kể cả tin trả lời</td>
+          </tr>
+          <tr>
+            <td><b>Cấm nhắn trước</b><br><span class="chip off">vĩnh viễn</span></td>
+            <td>Vừa hết hạn im, hoặc khách từ chối / hẹn lại</td>
+            <td>Chỉ chặn bot tự nhắn. Khách hỏi thì bot <b>vẫn trả lời</b></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>Hết 24 giờ chỉ mở lại quyền trả lời, <b>không xoá</b> mức cấm nhắn trước — khách đã gắt
+    một lần thì bot không bao giờ tự đi nhắc nữa. Muốn mở hẳn: nút <b>Mở khoá</b> ở tab Khách hàng.</p>
+  </section>
+
+  <!-- ============ 08 ============ -->
+  <section id="crm">
+    <h2><span class="n">08</span> Lead vào bảng Lark</h2>
+    <p class="lede">Khách để lại số điện thoại là bot ghi lead ngay, không chờ chốt đơn.</p>
+
+    <p>Mỗi khách ứng với đúng <b>một dòng</b> trong Base CRM. Bot nhớ mã dòng đó theo từng khách
+    nên các lần sau chỉ cập nhật, không đẻ dòng trùng. Các cột bot ghi:</p>
+
+    <div class="tbl">
+      <table>
+        <thead><tr><th>Cột Lark</th><th>Nguồn</th></tr></thead>
+        <tbody>
+          <tr><td>Tên khách hàng</td><td>Tên tài khoản Facebook — bot không hỏi tên khách nữa</td></tr>
+          <tr><td>Số điện thoại</td><td><b>Chỉ</b> lấy chữ số khách tự gõ, không lấy từ lời bot</td></tr>
+          <tr><td>Địa chỉ · Ghi chú</td><td>Trích từ hội thoại</td></tr>
+          <tr><td>Khu vực · Tỉnh/Thành phố</td><td>Chỉ ghi khi khớp option có sẵn trong Base</td></tr>
+          <tr><td>Nguồn lead</td><td>Cố định <code>Facebook</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="note">
+      <b class="tag">Bảng cập nhật theo suốt cuộc chat</b>
+      <p>Từ 18/08/2026, mỗi lượt khách trả lời đều đồng bộ lại tên, địa chỉ và tỉnh sang Lark —
+      không chỉ đúng lượt khách gõ số. Trước đó bảng đứng yên ở trạng thái lúc vừa nhận số,
+      nên mọi thứ khách nói sau đó không lên bảng.</p>
+    </div>
+
+    <h3>Khi một cột bị bỏ trống</h3>
+    <p>Cột <b>Tỉnh/Thành phố</b> và <b>Khu vực</b> chỉ nhận đúng những option đã có trong Base.
+    Bot đã tự bỏ tiền tố (<i>TP</i>, <i>tỉnh</i>) và bỏ dấu khi so, nên
+    <code>TP Hồ Chí Minh</code> vẫn khớp option <code>Ho Chi Minh City</code>. Còn giá trị nào
+    không khớp thì bot <b>báo về group Lark</b> — thêm option đó vào Base là xong.</p>
+
+    <p>Riêng <b>Tỉnh/Thành phố</b> đang là cột phân cấp, Lark chặn ghi qua API. Bot vẫn thử ghi
+    mỗi lần có thay đổi thật; giá trị không mất vì còn nằm trong cột Địa chỉ và Ghi chú. Bỏ phân
+    cấp cho cột này là bot tự ghi được, không phải sửa mã nguồn.</p>
+  </section>
+
+  <!-- ============ 09 ============ -->
+  <section id="canh-bao">
+    <h2><span class="n">09</span> Đọc cảnh báo trong group Lark</h2>
+    <p class="lede">Mỗi cảnh báo ứng với một việc cần làm. Cảnh báo cùng loại được gộp 15 phút
+    một lần nên không bao giờ bão tin.</p>
+
+    <div class="tbl">
+      <table>
+        <thead><tr><th>Tin</th><th>Nghĩa</th><th>Làm gì</th></tr></thead>
+        <tbody>
+          <tr><td>🔴 <b>TOKEN PAGE ĐÃ CHẾT</b></td><td>Bot không gửi được tin nào</td><td>Lấy token mới — xem mục Token trong <code>README.md</code></td></tr>
+          <tr><td>🔴 <b>BOT KHÔNG TRẢ LỜI</b></td><td>Bot đang điếc, khách nhắn không tới</td><td><code>docker compose logs --tail=100 bot</code></td></tr>
+          <tr><td>🔴 <b>GHI LEAD CRM LỖI</b></td><td>Token hoặc quyền Lark hỏng</td><td>Kiểm app Lark còn được chia sẻ Base với quyền chỉnh sửa không</td></tr>
+          <tr><td>🔴 <b>LEAD BỊ BỎ</b></td><td>Khách đã cho số nhưng thiếu cấu hình CRM</td><td>Điền <code>LARK_APP_ID</code>, <code>LARK_CRM_*</code> trong <code>.env</code></td></tr>
+          <tr><td>⚠️ <b>CỘT … BỎ TRỐNG</b></td><td>Giá trị không khớp option nào trong Base</td><td>Thêm option đó vào cột tương ứng</td></tr>
+          <tr><td>⚠️ <b>TOKEN SẮP HẾT HẠN</b></td><td>Còn dưới 7 ngày</td><td>Đổi sang token System User (hạn vĩnh viễn)</td></tr>
+          <tr><td>😠 <b>KHÁCH KHÓ CHỊU</b></td><td>Bot đã tự ngừng nhắn 24 giờ</td><td>Người thật gọi hoặc nhắn cho khách</td></tr>
+          <tr><td>🔔 <b>KHÁCH CẦN CHUYÊN GIA</b></td><td>Bot đã chuyển tiếp</td><td>Vào xem log khách rồi liên hệ</td></tr>
+          <tr><td>📞 <b>KHÁCH ĐỂ LẠI SĐT</b></td><td>Có lead mới</td><td>Đã tự vào bảng CRM, chỉ cần gọi</td></tr>
+          <tr><td>✅ ♻️ <b>lead CRM</b></td><td>Đã tạo hoặc cập nhật dòng trong Lark</td><td>Không phải làm gì</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>Xem log CRM bất cứ lúc nào:</p>
+<pre><code>gcloud compute ssh hon-da-vps --zone=us-central1-a \
+  --command="docker logs chatbot-mess-bot-1 --since 2h 2>&amp;1 | grep -iE '\[crm\]|\[lead\]'"</code></pre>
+  </section>
+
+  <!-- ============ 10 ============ -->
+  <section id="su-co">
+    <h2><span class="n">10</span> Sự cố hay gặp</h2>
+    <p class="lede">Xếp theo thứ tự nên nghi ngờ, không phải theo mức nghiêm trọng.</p>
+
+    <div class="task">
+      <h3>Bot im hoàn toàn, khách nhắn không ai trả lời</h3>
+      <p>Kiểm theo thứ tự: <code>/healthz</code> có trả lời không → token page còn sống không
+      (tab <b>Tình hình</b> hiện hạn token) → webhook bên Meta còn trỏ đúng domain không.</p>
+      <p>Nếu <code>/healthz</code> treo quá 10 giây thì lỗi nằm ở chính bot chứ không phải đường
+      mạng — bot đang bị chặn vòng lặp, restart container.</p>
+    </div>
+
+    <div class="task">
+      <h3>Webhook trả 403, bot câm nhưng thỉnh thoảng vẫn nhắn</h3>
+      <p>Gần như chắc chắn là Page Token và App Secret khác App. Bot chặn chữ ký sai nên tin
+      trực tiếp không vào, nhưng vòng nhặt tin rơi vẫn nhắn bù qua Graph API — nên nhìn như
+      chập chờn. Lấy lại cả token lẫn secret từ <b>cùng một App</b>.</p>
+    </div>
+
+    <div class="task">
+      <h3>Sửa Personal.md hoặc bảng hàng mà bot vẫn nói kiểu cũ</h3>
+      <p>Chưa chép file lên <code>data/docs</code> trên VPS. Build lại image không có tác dụng
+      vì thư mục bị gắn đè — xem hộp cảnh báo ở mục 06.</p>
+    </div>
+
+    <div class="task">
+      <h3>Khách nhận được chữ nhưng không có ảnh</h3>
+      <p>Bot gửi chữ trước, ảnh sau, nên ảnh hỏng thì khách vẫn đọc được nội dung tư vấn.
+      Kiểm: thư viện Pillow có trên máy chủ không (thiếu là hỏng sạch mà bot vẫn chạy), và
+      record trong Lark Base có ảnh thật ở đúng cột không.</p>
+    </div>
+
+    <div class="task">
+      <h3>Bot nhắn lại khách đã bảo đừng nhắn nữa</h3>
+      <p>Không nên xảy ra — cờ khoá nằm trên Firebase. Nếu có, kiểm Firebase còn kết nối không
+      (<code>/healthz</code> hiện trạng thái). Mất Firebase là mất cờ khoá.</p>
+    </div>
+
+    <div class="task">
+      <h3>Trang quản trị báo 404 hoặc không vào được</h3>
+      <p><code>BOT_DASH_TOKEN</code> đang để trống — trang bị tắt hẳn. Điền một chuỗi ngẫu nhiên
+      dài vào <code>.env</code> rồi restart.</p>
+    </div>
+  </section>
+
+  <!-- ============ 11 ============ -->
+  <section id="bien-env">
+    <h2><span class="n">11</span> Tra biến <code>.env</code></h2>
+    <p class="lede">Cột cuối cho biết đổi xong có phải khởi động lại không.</p>
+
+    <h4>Bắt buộc</h4>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>Biến</th><th>Mặc định</th><th>Việc</th><th></th></tr></thead>
+        <tbody>
+          <tr><td><code>GEMINI_API_KEY</code></td><td>—</td><td>Khoá Gemini</td><td><span class="chip warn">restart</span></td></tr>
+          <tr><td><code>MSGR_PAGE_TOKEN</code></td><td>—</td><td>Token gửi tin</td><td><span class="chip warn">restart</span></td></tr>
+          <tr><td><code>MSGR_VERIFY_TOKEN</code></td><td>—</td><td>Chuỗi Meta dùng để xác minh webhook</td><td><span class="chip warn">restart</span></td></tr>
+          <tr><td><code>MSGR_APP_SECRET</code></td><td>—</td><td>Kiểm chữ ký webhook</td><td><span class="chip warn">restart</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h4>Cách bot chạy</h4>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>Biến</th><th>Mặc định</th><th>Việc</th><th></th></tr></thead>
+        <tbody>
+          <tr><td><code>BOT_MODEL</code></td><td><code>flash</code></td><td><code>lite</code> / <code>flash</code> / <code>pro</code> hoặc model id đầy đủ</td><td><span class="chip on">ăn ngay</span></td></tr>
+          <tr><td><code>BOT_ADMIN_UIDS</code></td><td>—</td><td>PSID người trực, cách nhau dấu phẩy</td><td><span class="chip on">ăn ngay</span></td></tr>
+          <tr><td><code>BOT_DASH_TOKEN</code></td><td>—</td><td>Mật khẩu trang quản trị. Trống = tắt trang</td><td><span class="chip on">ăn ngay</span></td></tr>
+          <tr><td><code>BOT_PER_PSID_RATE_S</code></td><td><code>3</code></td><td>Giãn cách tối thiểu giữa 2 tin cùng một khách</td><td><span class="chip on">ăn ngay</span></td></tr>
+          <tr><td><code>BOT_MAX_CONCURRENT</code></td><td><code>4</code></td><td>Số khách xử lý song song</td><td><span class="chip warn">restart</span></td></tr>
+          <tr><td><code>PORT</code></td><td><code>7900</code></td><td>Cổng lắng nghe</td><td><span class="chip warn">restart</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h4>Vòng chạy nền</h4>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>Biến</th><th>Mặc định</th><th>Việc</th></tr></thead>
+        <tbody>
+          <tr><td><code>BOT_FOLLOWUP_ENABLED</code></td><td><code>1</code></td><td>Bật nhắc khách im</td></tr>
+          <tr><td><code>BOT_FOLLOWUP_AFTER_H</code></td><td><code>23</code></td><td>Im bao nhiêu giờ thì nhắc. <b>Giữ dưới 24</b> cho hợp cửa sổ nhắn tin của Facebook</td></tr>
+          <tr><td><code>BOT_FOLLOWUP_CHECK_MIN</code></td><td><code>15</code></td><td>Chu kỳ quét (phút)</td></tr>
+          <tr><td><code>BOT_MISSED_AFTER_MIN</code></td><td><code>2</code></td><td>Chưa trả lời quá bao lâu thì coi là tin rơi</td></tr>
+          <tr><td><code>BOT_MISSED_AUTOREPLY</code></td><td><code>1</code></td><td><code>1</code> bot tự nhắn bù, <code>0</code> chỉ báo người trực</td></tr>
+          <tr><td><code>BOT_TUNNEL_WATCH</code></td><td><code>1</code></td><td>Canh đường mạng đứt</td></tr>
+          <tr><td><code>BOT_STATS_KEEP_DAYS</code></td><td><code>2</code></td><td>Giữ thống kê bao nhiêu ngày. <b>Không đụng</b> lịch sử khách và CRM</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h4>Lark, Firebase, giá</h4>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>Biến</th><th>Việc</th></tr></thead>
+        <tbody>
+          <tr><td><code>LARK_APP_ID</code> · <code>LARK_APP_SECRET</code></td><td>App Lark đọc ảnh và ghi CRM</td></tr>
+          <tr><td><code>LARK_BASE_APP_TOKEN</code> · <code>LARK_TABLE_ID</code></td><td>Base ảnh sản phẩm (đã có mặc định)</td></tr>
+          <tr><td><code>LARK_CRM_APP_TOKEN</code> · <code>LARK_CRM_TABLE_ID</code></td><td>Base CRM ghi lead (đã có mặc định)</td></tr>
+          <tr><td><code>LARK_WEBHOOK_URL</code> · <code>LARK_WEBHOOK_SECRET</code></td><td>Group Lark nhận cảnh báo</td></tr>
+          <tr><td><code>FIREBASE_CRED</code> · <code>FIREBASE_DB_URL</code></td><td>Lưu lịch sử khách lên cloud. Cả hai trống = tắt</td></tr>
+          <tr><td><code>PUBLIC_URL</code></td><td>Domain công khai, dùng để tự canh đường mạng</td></tr>
+          <tr><td><code>GEMINI_PRICE_IN_USD</code> · <code>_OUT_USD</code></td><td>Giá USD mỗi triệu token, để dashboard tính tiền</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <footer>
+    <p>Tài liệu này đi kèm mã nguồn. Chi tiết kỹ thuật sâu hơn nằm ở
+    <code>README.md</code> (token Facebook, cách não hoạt động),
+    <code>DEPLOY.md</code> (dựng VPS từ đầu) và <code>DESIGN.md</code> (quyết định thiết kế).</p>
+  </footer>
+
+</div>
+</main>
+</div>

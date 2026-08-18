@@ -23,8 +23,9 @@ import alerts
 import brain
 from bot_tools import lark_crm
 
+# "Da Nang" để KHÔNG DẤU đúng như Base thật - hồ sơ khách trích ra là "Đà Nẵng".
 _OPTIONS = {"Khu vực": {"Miền Bắc", "Miền Trung", "Miền Nam"},
-            "Tỉnh/Thành phố": {"Hà Nội", "Nghệ An"},
+            "Tỉnh/Thành phố": {"Hà Nội", "Nghệ An", "Da Nang"},
             "Nguồn lead": {"Facebook"}}
 
 
@@ -52,6 +53,9 @@ def test_option_khop_du_co_tien_to(monkeypatch):
     assert lark_crm._match_option("TP Hà Nội", "Tỉnh/Thành phố") == "Hà Nội"
     assert lark_crm._match_option("tỉnh nghệ an", "Tỉnh/Thành phố") == "Nghệ An"
     assert lark_crm._match_option("Hà Nội", "Tỉnh/Thành phố") == "Hà Nội"
+    # Base để "Da Nang" không dấu, hồ sơ trích ra "Đà Nẵng" -> so có dấu là trượt sạch.
+    assert lark_crm._match_option("Đà Nẵng", "Tỉnh/Thành phố") == "Da Nang"
+    assert lark_crm._match_option("thành phố Đà Nẵng", "Tỉnh/Thành phố") == "Da Nang"
 
 
 def test_option_khong_khop_thi_bao_admin(monkeypatch):

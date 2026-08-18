@@ -1137,14 +1137,29 @@ _TINH_OPTIONS = ("Hà Nội, Hải Phòng, Quảng Ninh, Bắc Giang, Bắc Ninh
                  "Vĩnh Long, Đồng Tháp, An Giang, Kiên Giang, Hậu Giang")
 
 
-def _extract_lead_sync(psid: str) -> dict | None:
-    """Trích thông tin lead + tóm tắt từ hội thoại khách. None nếu không có SĐT / lỗi."""
-    hist = _load_hist(psid)
-    if not hist:
-        return None
-    profile = _profile_from_history_sync(psid, hist)
-    convo = "\n".join(f"{'Khách' if m.get('role') == 'user' else 'Bot'}: {m.get('content', '')}"
-                      for m in hist if isinstance(m.get("content"), str))
+# Prompt tóm tắt nhồi CẢ hội thoại -> chat dài làm prompt phình, model trả JSON cụt hoặc
+# rỗng, json.loads ném lỗi và lead bốc hơi. Tóm tắt 2-4 câu không cần đọc từ tin thứ nhất.
+_LEAD_CONVO_TIN = 60
+# Log dài thêm ngần này tin kể từ lần tóm tắt trước thì mới tốn 1 lượt AI tóm tắt lại. Dưới
+# ngưỡng -> đồng bộ RẺ: tên/địa chỉ/tỉnh lấy từ hồ sơ (đã trích sẵn mỗi lượt, đọc không mất gì).
+_LEAD_TOM_TAT_MOI = 4
+
+
+def _sdt_khach(psid: str, hist: list, profile: dict) -> str:
+    """SĐT do CHÍNH KHÁCH gõ. "" nếu chưa có.
+
+    Hai nguồn, đều chỉ chứa chữ số khách tự gõ (hồ sơ trích từ dòng 'Khách:' + ghi_sdt lấy
+    thẳng từ tin khách) -> không dính số bot bịa trong phiếu. Phải có nguồn hồ sơ: nhánh
+    thoát sớm (handoff cưỡng bức, khách đang bị khoá) return TRƯỚC brain.answer nên tin vừa
+    nhận chưa vào log - chỉ đọc log là mất trắng lead của đúng lượt khách cho số.
+    """
+    return _phones_in_history(hist) or profile.get("sdt", "")
+
+
+def _tom_tat_lead(psid: str, hist: list) -> dict:
+    """Gọi AI lấy tóm tắt + các trường hồ sơ còn thiếu. {} nếu hỏng (lead vẫn ghi được)."""
+    duoi = [m for m in hist if isinstance(m.get("content"), str)][-_LEAD_CONVO_TIN:]
+    convo = "\n".join(f"{'Khách' if m.get('role') == 'user' else 'Bot'}: {m['content']}" for m in duoi)
     prompt = (f"Trích thông tin khách từ hội thoại dưới đây thành JSON. "
               f"Tỉnh/Thành phố PHẢI chọn khớp chính xác 1 trong: {_TINH_OPTIONS}.\n\n{convo}")
     try:
@@ -1158,23 +1173,42 @@ def _extract_lead_sync(psid: str) -> dict | None:
         )
         cand = (resp.candidates or [None])[0]
         raw = "".join(p.text for p in (cand.content.parts or []) if p.text) if cand and cand.content else ""
-        lead = json.loads(raw)
-        for field in ("ten", "dia_chi", "tinh", "khu_vuc"):
-            if profile.get(field):
-                lead[field] = profile[field]
-        # SĐT KHÔNG lấy từ bản trích: `convo` ở trên gồm CẢ lời bot, nên số bot tự bịa trong
-        # phiếu ("SĐT: 0979655XXX") được trích ra chính nó rồi chui vào CRM - chuyên gia gọi
-        # số ma. Nguồn sự thật DUY NHẤT là chữ số khách tự gõ trong tin của khách.
-        lead["sdt"] = sdt_khach = _phones_in_history(hist)
-        return lead if sdt_khach else None
+        return json.loads(raw)
     except Exception as e:
-        print(f"[lead] trích lỗi psid={psid}: {type(e).__name__}: {e}", file=sys.stderr)
-        # Trích hỏng -> _save_lead_to_crm thoát sớm, KHÔNG có "lỗi CRM" nào bắn ra: lead im lặng
-        # bốc hơi dù khách đã cho SĐT. Đây là đường mất lead khó thấy nhất.
-        alerts.alert(f"lead:extract:{type(e).__name__}",
-                     f"🔴 TRÍCH LEAD HỎNG - khách đã handoff nhưng KHÔNG lead nào vào CRM.\n"
+        print(f"[lead] tóm tắt lỗi psid={psid}: {type(e).__name__}: {e}", file=sys.stderr)
+        # KHÔNG return None nữa: hỏng tóm tắt thì chỉ thiếu ô Ghi chú, lead (tên/SĐT/địa chỉ)
+        # vẫn phải vào CRM. Trước đây nhánh này nuốt cả lead - đường mất lead khó thấy nhất.
+        alerts.alert(f"lead:tomtat:{type(e).__name__}",
+                     f"⚠️ TÓM TẮT LEAD HỎNG - lead vẫn vào CRM nhưng ô Ghi chú giữ bản cũ.\n"
                      f"{type(e).__name__}: {e}")
+        return {}
+
+
+def _extract_lead_sync(psid: str, deep: bool = True, tom_tat_toi: int = 0) -> dict | None:
+    """Trích lead của 1 khách. None nếu khách CHƯA cho SĐT (chưa phải lead).
+
+    deep=True (handoff/khách vừa gõ số) -> luôn gọi AI tóm tắt lại.
+    deep=False (khách chat tiếp bình thường) -> chỉ gọi AI khi log đã dài thêm
+    _LEAD_TOM_TAT_MOI tin kể từ `tom_tat_toi`; còn lại đồng bộ rẻ từ hồ sơ.
+    """
+    hist = _load_hist(psid)
+    profile = _profile_from_history_sync(psid, hist) if hist else _doc_profile(psid)
+    sdt = _sdt_khach(psid, hist, profile)
+    if not sdt:
         return None
+    lead = {"sdt": sdt, "n_msg": len(hist),
+            **{f: profile.get(f, "") for f in ("ten", "dia_chi", "tinh", "khu_vuc")}}
+    if not (deep or len(hist) - tom_tat_toi >= _LEAD_TOM_TAT_MOI):
+        return lead                       # rẻ: hồ sơ mới nhất, ô Ghi chú giữ nguyên bản cũ
+    ai = _tom_tat_lead(psid, hist) if hist else {}
+    if not ai:
+        return lead
+    for field in ("ten", "dia_chi", "tinh", "khu_vuc"):
+        if not lead[field]:               # hồ sơ ưu tiên; AI chỉ lấp ô hồ sơ còn trống
+            lead[field] = str(ai.get(field) or "").strip()
+    lead["tom_tat"] = str(ai.get("tom_tat") or "").strip()
+    lead["tom_tat_toi"] = len(hist)       # mốc để lượt sau biết khi nào cần tóm tắt lại
+    return lead
 
 
 # Comment có nhu cầu -> mới nhắn riêng vào inbox. Comment khen/chào/spam thì chỉ cảm ơn công khai,
@@ -1228,9 +1262,9 @@ async def answer(psid: str, text: str, images: list[tuple[bytes, str]] | None = 
     return await asyncio.to_thread(_answer_sync, psid, text, images, user_at)
 
 
-async def extract_lead(psid: str) -> dict | None:
-    """Trích lead (async wrapper). Gọi khi handoff để ghi vào CRM."""
-    return await asyncio.to_thread(_extract_lead_sync, psid)
+async def extract_lead(psid: str, deep: bool = True, tom_tat_toi: int = 0) -> dict | None:
+    """Trích lead (async wrapper). Gọi mỗi lượt khách đã có SĐT để CRM không lệch."""
+    return await asyncio.to_thread(_extract_lead_sync, psid, deep, tom_tat_toi)
 
 
 if __name__ == "__main__":

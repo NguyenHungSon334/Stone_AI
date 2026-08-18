@@ -1168,9 +1168,15 @@ async def run_token_check() -> None:
         await alert_admins("fb:token:health", canh_bao)
 
 
-async def _save_lead_to_crm(psid: str) -> None:
-    """Handoff: trích lead từ hội thoại -> ghi Lark CRM. Best-effort, lỗi chỉ báo admin."""
-    lead = await brain.extract_lead(psid)
+async def _save_lead_to_crm(psid: str, deep: bool = True) -> None:
+    """Trích lead từ hội thoại -> ghi Lark CRM. Best-effort, lỗi chỉ báo admin.
+
+    deep=True: mốc quan trọng (handoff / khách vừa gõ số) -> tóm tắt lại bằng AI.
+    deep=False: khách chat tiếp -> đồng bộ RẺ tên/địa chỉ/tỉnh từ hồ sơ, chỉ tóm tắt lại khi
+    log đã dài thêm đáng kể. Không có nhánh này thì mọi thông tin khách nói SAU lúc cho số
+    (địa chỉ, tỉnh, hạng mục) không bao giờ lên bảng Lark."""
+    lead = await brain.extract_lead(psid, deep=deep,
+                                    tom_tat_toi=await _off(lark_crm.tom_tat_toi, psid))
     if not lead:
         return
     name = await profile_name(psid)          # tên tài khoản FB - không xin tên khách nữa
@@ -1318,6 +1324,14 @@ async def _process_inner(psid: str, text: str, user_at: str | None = None) -> No
         _STICKER_COUNT.pop(psid, None)                 # có tin chữ thật -> reset đếm sticker
 
         decision, noise = await _off(_noise_decision, psid, text)
+        if decision != "allow":
+            # BOT im, nhưng LEAD thì không được im. Ba nhánh dưới đây đều thoát TRƯỚC
+            # brain.answer nên tin này không vào log -> số khách gõ ở chính tin này phải ghi
+            # thẳng vào hồ sơ, không thì trích lead đọc log không thấy gì. Ca đắt nhất: khách
+            # gắt một lần bị khoá 24h, nguôi rồi quay lại nhắn SĐT - trước đây rơi thẳng vào
+            # hư không, không lên Lark, không ai được báo.
+            await _off(brain.ghi_sdt, psid, util.tim_sdt(text))
+            await _save_lead_to_crm(psid)
         if decision == "clarify":
             stats.log_event("unclear", psid)
             await send_text(psid, _NOISE_REPLY)
@@ -1431,6 +1445,12 @@ async def _process_inner(psid: str, text: str, user_at: str | None = None) -> No
             if phone:
                 await notify_admins(f"📞 KHÁCH ĐỂ LẠI SĐT: {phone} - {await _label(psid)}\n"
                                     f"Tin khách: {text}")
-                # SĐT = lead thật, kể cả khi chưa handoff. Trước đây chỉ handoff mới ghi CRM
-                # nên khách để số giữa cuộc tư vấn là mất lead. upsert theo psid -> không trùng.
-                await _save_lead_to_crm(psid)
+            # SĐT = lead thật, kể cả khi chưa handoff. Trước đây chỉ handoff mới ghi CRM nên
+            # khách để số giữa cuộc tư vấn là mất lead. upsert theo psid -> không trùng.
+            #
+            # Chạy MỌI lượt, không chỉ lượt có SĐT trong tin: khách cho số ở lượt 1 rồi mới nói
+            # địa chỉ/tỉnh/hạng mục ở các lượt sau - bản cũ không lượt nào chạm CRM nên bảng
+            # Lark đứng yên ở trạng thái lúc vừa nhận số. Khách chưa cho số -> extract_lead trả
+            # None, thoát ngay không tốn gì. deep chỉ khi khách vừa gõ số -> không đẻ thêm
+            # 1 lượt AI cho mỗi tin.
+            await _save_lead_to_crm(psid, deep=bool(phone))

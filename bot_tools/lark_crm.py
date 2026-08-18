@@ -76,15 +76,17 @@ _ERR_SELECT_CONV = 1254062        # mã Lark: value không convert được sang
 # Khách/AI hay viết kèm tiền tố ("TP Hà Nội", "tỉnh Nghệ An") trong khi option Base chỉ có
 # "Hà Nội", "Nghệ An". So thẳng bằng `in` là trượt -> cột trống mà không ai biết.
 _TIEN_TO_RE = re.compile(r"^(tỉnh|thành phố|tp\.?|t\.p\.?|thanh pho)\s+", re.I)
-# Base đang để 2 tỉnh KHÔNG DẤU ("Da Nang", "Ho Chi Minh City") còn hồ sơ khách trích ra là
-# "Đà Nẵng", "Hồ Chí Minh" -> so có dấu là trượt sạch cả 2 thành phố lớn. Bỏ dấu cả hai vế.
+# Base đang để 2 tỉnh KHÔNG DẤU và theo lối Anh ("Da Nang", "Ho Chi Minh City") còn hồ sơ
+# khách trích ra là "Đà Nẵng", "Hồ Chí Minh" -> so nguyên văn là trượt sạch 2 thành phố lớn.
+# Bỏ dấu + cắt hậu tố city/province ở CẢ HAI VẾ (đối xứng với tiền tố tỉnh/TP ở trên).
+_HAU_TO_RE = re.compile(r"\s+(city|province)$", re.I)
 _DAU_D = str.maketrans("đĐ", "dD")
 
 
 def _rut_gon(s: str) -> str:
     s = _TIEN_TO_RE.sub("", (s or "").strip()).strip().translate(_DAU_D)
     khong_dau = unicodedata.normalize("NFD", s)
-    return "".join(c for c in khong_dau if not unicodedata.combining(c))
+    return _HAU_TO_RE.sub("", "".join(c for c in khong_dau if not unicodedata.combining(c)))
 
 
 def _match_option(value: str, col: str) -> str:

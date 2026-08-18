@@ -23,9 +23,11 @@ import alerts
 import brain
 from bot_tools import lark_crm
 
-# "Da Nang" để KHÔNG DẤU đúng như Base thật - hồ sơ khách trích ra là "Đà Nẵng".
+# "Da Nang" / "Ho Chi Minh City" để không dấu, lối Anh - đúng như Base thật. Hồ sơ khách
+# trích ra lại là "Đà Nẵng" / "Hồ Chí Minh".
 _OPTIONS = {"Khu vực": {"Miền Bắc", "Miền Trung", "Miền Nam"},
-            "Tỉnh/Thành phố": {"Hà Nội", "Nghệ An", "Da Nang"},
+            "Tỉnh/Thành phố": {"Hà Nội", "Nghệ An", "Da Nang", "Ho Chi Minh City",
+                               "Bình Dương", "Bình Định"},
             "Nguồn lead": {"Facebook"}}
 
 
@@ -56,6 +58,12 @@ def test_option_khop_du_co_tien_to(monkeypatch):
     # Base để "Da Nang" không dấu, hồ sơ trích ra "Đà Nẵng" -> so có dấu là trượt sạch.
     assert lark_crm._match_option("Đà Nẵng", "Tỉnh/Thành phố") == "Da Nang"
     assert lark_crm._match_option("thành phố Đà Nẵng", "Tỉnh/Thành phố") == "Da Nang"
+    # Base để lối Anh "Ho Chi Minh City" -> phải cắt hậu tố city mới khớp.
+    assert lark_crm._match_option("Hồ Chí Minh", "Tỉnh/Thành phố") == "Ho Chi Minh City"
+    assert lark_crm._match_option("TP Hồ Chí Minh", "Tỉnh/Thành phố") == "Ho Chi Minh City"
+    # Cắt tiền tố/hậu tố + bỏ dấu KHÔNG được làm 2 tỉnh khác nhau đụng nhau.
+    assert lark_crm._match_option("Bình Định", "Tỉnh/Thành phố") == "Bình Định"
+    assert lark_crm._match_option("Bình Dương", "Tỉnh/Thành phố") == "Bình Dương"
 
 
 def test_option_khong_khop_thi_bao_admin(monkeypatch):

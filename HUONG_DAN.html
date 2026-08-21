@@ -423,6 +423,11 @@ footer {
     <a href="#canh-bao"><span class="n">09</span> Đọc cảnh báo</a>
     <a href="#su-co"><span class="n">10</span> Sự cố hay gặp</a>
     <a href="#bien-env"><span class="n">11</span> Tra biến .env</a>
+    <a href="#kien-truc"><span class="n">12</span> Bên trong bot</a>
+    <a href="#token"><span class="n">13</span> Token Facebook</a>
+    <a href="#kiem-thu"><span class="n">14</span> Chạy thử</a>
+    <a href="#du-lieu"><span class="n">15</span> Dữ liệu, sao lưu</a>
+    <a href="#api"><span class="n">16</span> Địa chỉ API</a>
   </nav>
 </aside>
 
@@ -1020,12 +1025,406 @@ gcloud compute ssh hon-da-vps --zone=us-central1-a \
         </tbody>
       </table>
     </div>
+
+    <h4>Ít khi phải đụng tới</h4>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>Biến</th><th>Mặc định</th><th>Việc</th></tr></thead>
+        <tbody>
+          <tr><td><code>MSGR_GRAPH_VER</code></td><td><code>v21.0</code></td><td>Phiên bản Graph API bot gọi</td></tr>
+          <tr><td><code>DOMAIN</code></td><td>—</td><td>Domain Caddy xin chứng chỉ SSL. Chỉ dùng khi chạy Docker</td></tr>
+          <tr><td><code>BOT_MISSED_CHECK_MIN</code></td><td><code>2</code></td><td>Chu kỳ quét tin rơi (phút)</td></tr>
+          <tr><td><code>BOT_TUNNEL_CHECK_MIN</code></td><td><code>3</code></td><td>Chu kỳ tự ping domain</td></tr>
+          <tr><td><code>BOT_TUNNEL_FAILS</code></td><td><code>2</code></td><td>Ping trượt mấy lần liền mới báo, tránh báo giả</td></tr>
+          <tr><td><code>BOT_STATS_PRUNE_H</code></td><td><code>12</code></td><td>Cách mấy giờ thì dọn kho sự kiện một lần</td></tr>
+          <tr><td><code>LARK_DOMAIN</code></td><td><code>open.larksuite.com</code></td><td>Đổi sang <code>open.feishu.cn</code> nếu dùng bản Trung Quốc</td></tr>
+          <tr><td><code>LARK_PRODUCT_FIELD</code> · <code>LARK_IMAGE_FIELD</code></td><td>theo Base hiện tại</td><td>Tên cột mã sản phẩm và cột ảnh trong Base</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>Đầy đủ kèm ghi chú tiếng Việt nằm trong <code>.env.example</code> — chép file đó ra làm
+    <code>.env</code> là có sẵn khung.</p>
+  </section>
+
+  <!-- ============ 12 ============ -->
+  <section id="kien-truc">
+    <h2><span class="n">12</span> Bên trong bot</h2>
+    <p class="lede">Phần này dành cho người sửa mã nguồn. Biết một tin đi qua những chặng nào
+    thì mới sửa đúng chỗ, thay vì vá ở nơi triệu chứng lộ ra.</p>
+
+    <h3>Mỗi file làm việc gì</h3>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>File</th><th>Việc</th></tr></thead>
+        <tbody>
+          <tr><td><code>app.py</code></td><td>Webhook FastAPI, tự soát cấu hình lúc khởi động, 4 vòng chạy nền</td></tr>
+          <tr><td><code>messenger.py</code></td><td>Toàn bộ giao thức Facebook: kiểm chữ ký, bóc tin và comment, gom tin, gửi chữ và ảnh, chặn tốc độ, chuyển chuyên gia, khoá nhắn</td></tr>
+          <tr><td><code>brain.py</code></td><td>Gọi Gemini, giữ lịch sử và bản tóm tắt từng khách, tool <code>suggest_products</code>, dựng hồ sơ khách, chấm ý định</td></tr>
+          <tr><td><code>config.py</code></td><td>Đọc <code>.env</code>, đọc persona và bảng hàng (nhớ theo thời điểm sửa file), <code>reload_env()</code> nạp nóng</td></tr>
+          <tr><td><code>state.py</code></td><td>Cờ trạng thái khách: khoá nhắn, ý định, số lần đã nhắc, đã chốt CRM chưa</td></tr>
+          <tr><td><code>returning.py</code></td><td>Khách cũ quay lại: kéo tin cũ từ Facebook dựng lại lịch sử, báo khi khách im trên 24 giờ nhắn lại</td></tr>
+          <tr><td><code>fb.py</code></td><td>Đồng bộ hội thoại, cờ trạng thái và thống kê lên Firebase</td></tr>
+          <tr><td><code>alerts.py</code></td><td>Bắn cảnh báo sang group Lark, gộp tin cùng loại để không bão tin</td></tr>
+          <tr><td><code>stats.py</code></td><td>Đếm token, quy ra tiền, ghi sự kiện, dọn kho sự kiện cũ</td></tr>
+          <tr><td><code>admin.py</code> · <code>dashboard.html</code></td><td>Trang quản trị và các API sau nó</td></tr>
+          <tr><td><code>control.py</code></td><td>Số liệu tab Tình hình: inbox và comment chưa trả lời, hạn token</td></tr>
+          <tr><td><code>bot_tools/find_by_price.py</code></td><td>Tra sản phẩm theo giá hoặc theo mã — ruột của tool <code>suggest_products</code></td></tr>
+          <tr><td><code>bot_tools/lark_image.py</code></td><td>Lấy ảnh sản phẩm từ Lark Base theo mã</td></tr>
+          <tr><td><code>bot_tools/lark_crm.py</code></td><td>Tạo và cập nhật dòng lead trong Base CRM</td></tr>
+          <tr><td><code>bot_tools/sync_anh_flag.py</code></td><td>Đối chiếu Base với CSV rồi ghi cột <code>Có ảnh</code></td></tr>
+          <tr><td><code>util.py</code></td><td>Làm sạch psid, ghi JSON an toàn (ghi tạm rồi đổi tên, mất điện không hỏng file)</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>Một tin của khách đi qua đâu</h3>
+    <ol class="steps">
+      <li>
+        <b>Facebook gọi webhook</b>
+        <p><code>POST /webhook/messenger</code>. Bot kiểm chữ ký <code>X-Hub-Signature-256</code>
+        bằng App Secret — sai là trả <code>403</code> và bỏ tin, không có ngoại lệ.</p>
+      </li>
+      <li>
+        <b>Bóc sự kiện</b>
+        <p>Một gói tin có thể chứa nhiều loại: tin chữ, ảnh khách gửi, sticker hoặc like,
+        khách bấm quảng cáo Click-to-Messenger, và comment dưới bài viết. Mỗi loại có đường
+        xử lý riêng nhưng cùng đổ về một chỗ trả lời.</p>
+      </li>
+      <li>
+        <b>Gom tin rồi mới trả lời</b>
+        <p>Khách hay gõ 3–4 tin liền. Bot chờ khoảng 4 giây gom lại thành một lượt, để không
+        trả lời cắt ngang câu đang gõ dở. Cùng lúc có tối đa <b>4</b> khách được xử lý
+        (<code>BOT_MAX_CONCURRENT</code>), và hai tin gửi cùng một khách cách nhau tối thiểu
+        <b>3 giây</b> (<code>BOT_PER_PSID_RATE_S</code>).</p>
+      </li>
+      <li>
+        <b>Dựng lại ngữ cảnh</b>
+        <p>Chưa có lịch sử ở máy thì <code>returning.py</code> kéo 30 tin cũ từ Facebook về.
+        Bước này chạy trước khi bot quyết định coi đây là khách mới hay khách cũ.</p>
+      </li>
+      <li>
+        <b>Hỏi Gemini</b>
+        <p>Lời dặn hệ thống gồm persona và toàn bộ bảng hàng — khoảng 30 nghìn token. Phần này
+        đứng yên nên được đẩy lên bộ nhớ đệm của Gemini, giữ 1 giờ, mỗi lượt chỉ tham chiếu tới.
+        Sửa <code>Personal.md</code> hoặc CSV là bộ đệm tự dựng lại. 12 lượt gần nhất gửi nguyên
+        văn, phần cũ hơn đã được tóm tắt nền.</p>
+      </li>
+      <li>
+        <b>Gọi tool nếu cần tra hàng</b>
+        <p>Bot có đúng một tool: <code>suggest_products</code> — lọc theo tầm giá, loại đá, hạng
+        mục, hoặc lấy đúng mã. Hàm Python chạy ngay trong tiến trình, không mở shell. Tối đa
+        5 vòng gọi tool cho một câu trả lời.</p>
+      </li>
+      <li>
+        <b>Bóc marker ẩn</b>
+        <p>Câu trả lời có thể kèm <code>&lt;&lt;HANDOFF:lý do&gt;&gt;</code> (gọi chuyên gia),
+        <code>&lt;&lt;TAMDUNG&gt;&gt;</code> (ngừng nhắn 24 giờ) và
+        <code>&lt;&lt;IMG:mã ảnh&gt;&gt;</code> (gửi ảnh mẫu). Khách không bao giờ nhìn thấy các
+        marker này.</p>
+      </li>
+      <li>
+        <b>Gửi: chữ trước, ảnh sau</b>
+        <p>Chữ được cắt theo câu, mỗi tin tối đa 2000 ký tự, giãn 0,5 giây giữa hai tin. Ảnh tải
+        từ Lark, nén xuống cạnh dài 1600px định dạng JPEG rồi tải thẳng lên Facebook, tối đa 4
+        ảnh một tin. Thứ tự này có chủ ý: ảnh hỏng thì khách <b>vẫn đọc được nội dung tư vấn</b>.</p>
+      </li>
+      <li>
+        <b>Ghi lại</b>
+        <p>Lịch sử ghi xuống <code>conversations/</code> và đồng bộ lên Firebase, hồ sơ khách
+        được cập nhật, lead đủ thông tin thì ghi sang Base CRM, và số token của lượt vừa rồi vào
+        kho thống kê.</p>
+      </li>
+    </ol>
+
+    <h3>Những con số trần đã đặt sẵn</h3>
+    <p>Các trần này nằm trong mã nguồn chứ không phải <code>.env</code> — đổi thì phải sửa file
+    rồi dựng lại image.</p>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>Trần</th><th>Giá trị</th><th>Ở đâu</th></tr></thead>
+        <tbody>
+          <tr><td>Lượt gần nhất gửi nguyên văn cho Gemini</td><td>12</td><td><code>brain._MAX_TURNS</code></td></tr>
+          <tr><td>Vượt bao nhiêu tin thì tóm tắt lại</td><td>20</td><td><code>brain._SUMMARY_TRIGGER</code></td></tr>
+          <tr><td>Số vòng gọi tool cho một câu trả lời</td><td>5</td><td><code>brain._MAX_TOOL_LOOPS</code></td></tr>
+          <tr><td>Số mẫu gợi ý mỗi lượt</td><td>2</td><td><code>brain._MAX_GOI_Y</code></td></tr>
+          <tr><td>Ảnh gửi kèm một tin</td><td>4</td><td><code>brain._MAX_NEW_IMAGES</code></td></tr>
+          <tr><td>Số lần nhắc lại một khách, tính cả đời</td><td>1</td><td><code>brain._MAX_FOLLOWUPS</code></td></tr>
+          <tr><td>Thời gian im khi khách khó chịu</td><td>24 giờ</td><td><code>messenger._PAUSE_H</code></td></tr>
+          <tr><td>Ký tự tối đa một tin gửi khách</td><td>2000</td><td><code>messenger._TEXT_MAX</code></td></tr>
+          <tr><td>Cạnh dài ảnh gửi Facebook</td><td>1600px, JPEG chất lượng 85</td><td><code>messenger._IMG_MAX_DIM</code></td></tr>
+          <tr><td>Hạn bộ nhớ đệm lời dặn hệ thống</td><td>1 giờ</td><td><code>brain._CACHE_TTL_S</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>Chọn model</h3>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>Điền vào <code>BOT_MODEL</code></th><th>Model thật</th><th>Khi nào dùng</th></tr></thead>
+        <tbody>
+          <tr><td><code>lite</code></td><td><code>gemini-2.5-flash-lite</code></td><td>Rẻ nhất, câu trả lời đơn giản hơn</td></tr>
+          <tr><td><code>flash</code></td><td><code>gemini-3.5-flash</code></td><td>Mặc định, đang chạy thật</td></tr>
+          <tr><td><code>pro</code></td><td><code>gemini-2.5-pro</code></td><td>Trả lời sâu nhất, đắt nhất</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>Điền thẳng model id đầy đủ cũng được. Khi Gemini trả lỗi tạm thời (499, 500, 503, 504)
+    bot thử lại tối đa 4 lần rồi hạ xuống <code>gemini-2.5-flash-lite</code>; vẫn hỏng thì lượt
+    đó bot <b>im</b> và vòng nhặt tin rơi nhắn bù — cố tình như vậy, vì một câu xin lỗi tự động
+    vừa lộ lỗi vừa bắt khách chờ.</p>
+  </section>
+
+  <!-- ============ 13 ============ -->
+  <section id="token">
+    <h2><span class="n">13</span> Token Facebook</h2>
+    <p class="lede">Hầu hết ca "bot chết" đều là token. Mục này để chẩn đoán bằng bằng chứng
+    thay vì đoán.</p>
+
+    <div class="note warn">
+      <b class="tag">Hai môi trường, hai App khác nhau</b>
+      <p>Máy chủ và máy lập trình dùng <b>hai App Facebook riêng</b> nhưng bắn cảnh báo vào
+      <b>cùng một group Lark</b>. Một tin "token chết" chưa chắc là của bản chạy thật. Muốn chạy
+      bot ở máy mình mà không làm nhiễu: để trống <code>LARK_WEBHOOK_URL</code> trong
+      <code>.env</code> máy dev.</p>
+    </div>
+
+    <div class="tbl">
+      <table>
+        <thead><tr><th></th><th>Chạy thật (VPS)</th><th>Máy lập trình</th></tr></thead>
+        <tbody>
+          <tr><td>Meta App</td><td><code>2073944916564638</code></td><td><code>1674782393625789</code> — tên hiện là "Test"</td></tr>
+          <tr><td>Page</td><td>Hồn Đá — Lăng Mộ Đá Gia Tộc</td><td>Page thử</td></tr>
+          <tr><td>File <code>.env</code></td><td><code>/home/admin/chatbot-mess/.env</code></td><td><code>.env</code> trong mã nguồn</td></tr>
+          <tr><td>Khách thật</td><td>Có</td><td>Không</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>Soi một token bất kỳ</h3>
+    <p>Chạy ngay trong thư mục chứa <code>.env</code> cần soi.</p>
+<pre><code>T=$(grep -m1 '^MSGR_PAGE_TOKEN=' .env | cut -d= -f2-)
+S=$(grep -m1 '^MSGR_APP_SECRET=' .env | cut -d= -f2-)
+A=&lt;app-id-cua-file-env-do&gt;
+curl -s "https://graph.facebook.com/v21.0/debug_token?input_token=$T&amp;access_token=$A|$S" \
+  | python3 -m json.tool</code></pre>
+
+    <div class="tbl">
+      <table>
+        <thead><tr><th>Kết quả</th><th>Nghĩa</th><th>Làm gì</th></tr></thead>
+        <tbody>
+          <tr><td><code>is_valid: true</code>, <code>expires_at: 0</code></td><td>Token khoẻ, không hạn</td><td>Không phải làm gì</td></tr>
+          <tr><td><code>application</code> ra tên app lạ</td><td>Đang soi nhầm file <code>.env</code></td><td>Soi lại đúng môi trường</td></tr>
+          <tr><td><code>#190</code> mã phụ <b>458</b>, <code>scopes</code> rỗng</td><td>Tài khoản cấp token đã bị gỡ quyền cho app</td><td>Cấp lại quyền rồi sinh token mới</td></tr>
+          <tr><td><code>#190</code> mã phụ <b>463</b> hoặc <b>466</b></td><td>Token hết hạn (bản 60 ngày)</td><td>Sinh lại từ user token dài hạn</td></tr>
+          <tr><td><code>#190</code> mã phụ <b>460</b></td><td>Chủ tài khoản đổi mật khẩu Facebook</td><td>Sinh token mới</td></tr>
+          <tr><td><code>#190</code> không kèm <code>data</code></td><td>Đang soi bằng App Secret của app khác</td><td>Dùng đúng cặp app id và secret</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="note crit">
+      <b class="tag">Đọc kỹ chỗ này</b>
+      <p><code>expires_at: 0</code> <b>không có nghĩa là token còn sống</b>. Đã gặp thật: token
+      nguyên chuỗi, không hạn, nhưng <code>scopes</code> rỗng — quyền đã bị rút, token thành
+      giấy lộn.</p>
+    </div>
+
+    <h3>Lấy lại token không hạn</h3>
+    <p>Page token chỉ không hạn khi sinh ra từ <b>user token dài hạn</b>. Đổi thẳng từ page token
+    ngắn hạn chỉ ra 60 ngày.</p>
+    <ol class="steps">
+      <li>
+        <b>Kiểm quyền trước</b>
+        <p>Nếu đang dính mã phụ 458: <code>developers.facebook.com</code> → App → App Roles —
+        tài khoản sinh token phải còn vai trò Admin, Developer hoặc Tester. Rồi vào
+        <code>facebook.com/settings?tab=business_tools</code>, gỡ app và cấp lại từ đầu để xoá
+        sạch những quyền đã từng bị từ chối. Bỏ bước này thì token mới sinh ra cũng chết y như cũ.</p>
+      </li>
+      <li>
+        <b>Sinh user token ở Graph API Explorer</b>
+        <p>Chọn đúng App, để loại <b>User Token</b>, tick <code>pages_show_list</code>,
+        <code>pages_messaging</code>, <code>pages_read_engagement</code>,
+        <code>pages_manage_metadata</code>, <code>pages_manage_engagement</code>,
+        <code>business_management</code> rồi Generate. Trong popup chọn Page và <b>bật hết</b>
+        các nút gạt.</p>
+      </li>
+      <li>
+        <b>Đổi sang bản dài hạn rồi lấy page token</b>
+<pre><code>cd ~/chatbot-mess
+U='&lt;user-token-vua-sinh&gt;'; A=2073944916564638
+S=$(sudo grep -m1 '^MSGR_APP_SECRET=' .env | cut -d= -f2-)
+LU=$(curl -s "https://graph.facebook.com/v21.0/oauth/access_token?grant_type=fb_exchange_token&amp;client_id=$A&amp;client_secret=$S&amp;fb_exchange_token=$U" \
+  | python3 -c 'import sys,json;print(json.load(sys.stdin)["access_token"])')
+PT=$(curl -s "https://graph.facebook.com/v21.0/me/accounts?access_token=$LU" \
+  | python3 -c 'import sys,json;d=json.load(sys.stdin);print(next(p["access_token"] for p in d["data"] if p["id"]=="122094807350018300"))')
+curl -s "https://graph.facebook.com/v21.0/debug_token?input_token=$PT&amp;access_token=$A|$S" \
+  | python3 -m json.tool | grep expires_at</code></pre>
+        <p><code>expires_at</code> phải bằng <b>0</b>. Khác 0 là bước đổi đã trượt —
+        <b>đừng ghi vào <code>.env</code></b>.</p>
+      </li>
+      <li>
+        <b>Ghi vào .env rồi dựng lại container</b>
+<pre><code>sudo cp .env .env.bak-$(date +%F-%H%M%S)
+sudo sed -i '/^MSGR_PAGE_TOKEN=/d' .env
+printf 'MSGR_PAGE_TOKEN=%s\n' "$PT" | sudo tee -a /home/admin/chatbot-mess/.env &gt;/dev/null
+docker compose restart bot</code></pre>
+      </li>
+    </ol>
+
+    <p>Token "không hạn" vẫn có thể chết khi: đổi mật khẩu Facebook, gỡ app khỏi Business
+    Integrations, mất quyền quản trị Page, đặt lại App Secret, hoặc Meta thu hồi. Vòng canh token
+    quét mỗi 15 phút và báo Lark trước khi khách kịp nhắn hụt — giữ vòng này kể cả khi token đang
+    khoẻ.</p>
+
+    <p><b>Bản nâng cấp còn treo:</b> token System User. Tài khoản máy thuộc Business, không có
+    mật khẩu nên không chết theo người nào. Cần Business Verification. Đúng loại khi
+    <code>debug_token</code> trả <code>user_id</code> trống.</p>
+  </section>
+
+  <!-- ============ 14 ============ -->
+  <section id="kiem-thu">
+    <h2><span class="n">14</span> Chạy thử trước khi đưa lên</h2>
+    <p class="lede">Bộ test không cần mạng, không đụng khách thật, chạy hết dưới một phút.
+    Chạy nó trước mỗi lần đưa mã nguồn lên máy chủ.</p>
+
+<pre><code>python -m pytest tests -q</code></pre>
+
+    <div class="tbl">
+      <table>
+        <thead><tr><th>Test</th><th>Giữ cho điều gì không tái diễn</th></tr></thead>
+        <tbody>
+          <tr><td><code>test_messenger.py</code></td><td>Kiểm chữ ký, bóc tin, gom tin, cắt tin dài</td></tr>
+          <tr><td><code>test_khong_deo_bam.py</code></td><td>Khách đã bảo dừng thì bot không bao giờ tự nhắn nữa</td></tr>
+          <tr><td><code>test_khong_bia_sdt.py</code> · <code>test_sdt_khong_hoi_lai.py</code></td><td>Bot không tự nghĩ ra số điện thoại, và không hỏi lại số khách vừa cho</td></tr>
+          <tr><td><code>test_crm_dong_bo.py</code></td><td>Lead lên Lark đúng cột, cập nhật suốt cuộc chat, không đẻ dòng trùng</td></tr>
+          <tr><td><code>test_goi_y_san_pham.py</code></td><td>Tra hàng theo giá và theo mã, ưu tiên mẫu bán chạy có ảnh</td></tr>
+          <tr><td><code>test_img_send.py</code> · <code>test_dinh_dang_va_anh.py</code></td><td>Nén ảnh, thử lại khi Facebook nghẹn, bóc marker ảnh khỏi câu chữ</td></tr>
+          <tr><td><code>test_returning.py</code></td><td>Khách cũ quay lại được nạp đúng lịch sử, không đè lên log thật</td></tr>
+          <tr><td><code>test_comment_intent.py</code> · <code>test_referral.py</code></td><td>Comment dưới bài và khách bấm quảng cáo được trả lời đúng kiểu</td></tr>
+          <tr><td><code>test_noise_guard.py</code></td><td>Tin rác và icon lẻ không kích hoạt cả một lượt tư vấn</td></tr>
+          <tr><td><code>test_event_loop_khong_bi_chan.py</code></td><td>Việc nặng không chặn vòng lặp, bot không đơ khi đông khách</td></tr>
+          <tr><td><code>test_prune_stats.py</code> · <code>test_rollup_stats.py</code></td><td>Dọn thống kê không chạm lịch sử khách, số liệu cộng đúng</td></tr>
+          <tr><td><code>test_dashboard_perf.py</code></td><td>Trang quản trị không chậm dần khi số khách tăng</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>Thử tải nhiều khách cùng lúc</h3>
+<pre><code>python tests/loadtest.py</code></pre>
+    <p>Bắn nhiều cuộc chat song song vào webhook để xem trần đồng thời và chặn tốc độ có giữ được
+    không. Chạy trên máy dev, đừng bắn vào bản đang phục vụ khách thật.</p>
+  </section>
+
+  <!-- ============ 15 ============ -->
+  <section id="du-lieu">
+    <h2><span class="n">15</span> Dữ liệu, sao lưu, khôi phục</h2>
+    <p class="lede">Biết dữ liệu nằm ở đâu thì mới dám dựng lại máy chủ mà không sợ mất khách.</p>
+
+    <div class="tbl">
+      <table>
+        <thead><tr><th>Chỗ</th><th>Chứa gì</th><th>Trên VPS</th></tr></thead>
+        <tbody>
+          <tr><td><code>conversations/&lt;psid&gt;.json</code></td><td>Toàn bộ lịch sử chat của một khách</td><td><code>./data/conversations</code></td></tr>
+          <tr><td><code>conversations/&lt;psid&gt;.crm.json</code></td><td>Mã dòng CRM và thông tin lead của khách đó</td><td>cùng thư mục trên</td></tr>
+          <tr><td><code>conversations/&lt;psid&gt;.state.json</code></td><td>Bản nhớ tạm của cờ trạng thái — nguồn thật nằm trên Firebase</td><td>cùng thư mục trên</td></tr>
+          <tr><td><code>stats/events.jsonl</code> · <code>stats/daily.json</code></td><td>Sự kiện và số token theo ngày</td><td><code>./data/stats</code></td></tr>
+          <tr><td><code>Document_ChatBot_Mess/</code></td><td>Persona và bảng hàng</td><td><code>./data/docs</code></td></tr>
+          <tr><td><code>.env</code></td><td>Toàn bộ token và cấu hình</td><td><code>./.env</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="note warn">
+      <b class="tag">Vì sao dựng lại image không mất dữ liệu</b>
+      <p>Bốn chỗ trên được gắn từ máy chủ vào container, image chỉ chứa phần mã nguồn. Mặt trái:
+      sửa <code>Personal.md</code> hay bảng hàng trong mã nguồn rồi build lại là <b>vô ích</b> —
+      phải chép thẳng lên <code>data/docs</code> như mục 06.</p>
+    </div>
+
+    <h3>Trên Firebase có gì</h3>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>Nhánh</th><th>Chứa gì</th></tr></thead>
+        <tbody>
+          <tr><td><code>conversations/&lt;psid&gt;</code></td><td>Lịch sử chat — đây là <b>nguồn chính</b>, mất bản ở máy chủ thì bot tự kéo lại</td></tr>
+          <tr><td><code>khach_state/&lt;psid&gt;</code></td><td>Cờ khoá nhắn, ý định khách, số lần đã nhắc, mốc khách quay lại</td></tr>
+          <tr><td><code>stats/events</code> · <code>stats/daily</code></td><td>Sự kiện và thống kê theo ngày</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>Mất Firebase là mất cờ khoá nhắn — bot có thể nhắn lại khách đã bảo đừng nhắn. Đây chính
+    là lý do các cờ này không còn để ở file rời như bản đầu.</p>
+
+    <h3>Sao lưu</h3>
+<pre><code>gcloud compute ssh hon-da-vps --zone=us-central1-a --command="cd /home/admin/chatbot-mess && \
+  sudo tar czf ~/backup-data-\$(date +%F).tgz data .env"
+gcloud compute scp hon-da-vps:~/backup-data-*.tgz . --zone=us-central1-a</code></pre>
+    <p>Lịch sử chat còn một bản trên Firebase, nhưng <code>.env</code> thì <b>chỉ có một bản</b> —
+    mất là phải lấy lại toàn bộ token từ đầu. Sao lưu file này trước mỗi lần đụng vào nó.</p>
+
+    <h3>Xoá dữ liệu</h3>
+    <p>Nút <b>Xoá toàn bộ data</b> ở tab Cài đặt xoá cả bản ở máy chủ lẫn bản trên Firebase, và
+    <b>không hoàn tác được</b>. Muốn bỏ một khách thôi thì dùng nút xoá ở tab Khách hàng.</p>
+    <p>Kho sự kiện thống kê tự dọn, mặc định giữ 2 ngày (<code>BOT_STATS_KEEP_DAYS</code>). Vòng
+    dọn này <b>không bao giờ</b> đụng lịch sử khách và dữ liệu CRM. Muốn biểu đồ chi phí dài hơn
+    thì nới số ngày lên.</p>
+  </section>
+
+  <!-- ============ 16 ============ -->
+  <section id="api">
+    <h2><span class="n">16</span> Tra cứu địa chỉ API</h2>
+    <p class="lede">Dùng khi cần kiểm tra bằng dòng lệnh, hoặc nối bot vào hệ thống khác.</p>
+
+    <h3>Công khai</h3>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>Địa chỉ</th><th>Việc</th></tr></thead>
+        <tbody>
+          <tr><td><code>GET /healthz</code></td><td>Trạng thái bot: model đang chạy, cấu hình còn thiếu gì, kênh cảnh báo sống không</td></tr>
+          <tr><td><code>GET /webhook/messenger</code></td><td>Facebook gọi một lần để xác minh, đối chiếu <code>MSGR_VERIFY_TOKEN</code></td></tr>
+          <tr><td><code>POST /webhook/messenger</code></td><td>Nhận tin và comment. Chữ ký sai trả <code>403</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+<pre><code>curl -s https://hondabotchat.duckdns.org/healthz</code></pre>
+    <p>Mong đợi <code>"ok": true</code> và <code>"missing_config": []</code>. Còn tên biến nào
+    nằm trong <code>missing_config</code> là bot sẽ không trả lời khách.</p>
+
+    <h3>Trang quản trị</h3>
+    <p>Mọi địa chỉ dưới đây đều cần <code>?token=&lt;BOT_DASH_TOKEN&gt;</code>. Token trống thì cả
+    nhóm này tắt hẳn.</p>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>Địa chỉ</th><th>Việc</th></tr></thead>
+        <tbody>
+          <tr><td><code>GET /admin</code></td><td>Trang quản trị</td></tr>
+          <tr><td><code>GET /admin/api/overview?days=7</code></td><td>Token đã dùng, chi phí, số khách, tỉ lệ trả lời được</td></tr>
+          <tr><td><code>GET /admin/api/control</code></td><td>Số liệu tab Tình hình: inbox và comment chưa trả lời, hạn token</td></tr>
+          <tr><td><code>GET /admin/api/customers?limit=50&amp;q=</code></td><td>Danh sách khách, tìm theo tên hoặc psid</td></tr>
+          <tr><td><code>GET /admin/api/customers/&lt;psid&gt;</code></td><td>Log đầy đủ của một khách</td></tr>
+          <tr><td><code>POST /admin/api/customers/&lt;psid&gt;/mo-khoa</code></td><td>Gỡ khoá nhắn cho khách đó</td></tr>
+          <tr><td><code>DELETE /admin/api/customers/&lt;psid&gt;</code></td><td>Xoá một khách khỏi cả máy chủ lẫn Firebase</td></tr>
+          <tr><td><code>GET · POST /admin/api/config</code></td><td>Đọc và ghi cấu hình qua ô nhập</td></tr>
+          <tr><td><code>POST /admin/api/test-lark</code></td><td>Bắn một tin thử vào group Lark</td></tr>
+          <tr><td><code>POST /admin/api/clean-data</code></td><td>Xoá toàn bộ dữ liệu — không hoàn tác</td></tr>
+          <tr><td><code>POST /admin/api/restart</code></td><td>Thoát tiến trình, Docker tự dựng lại container</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="note warn">
+      <b class="tag">Đường ghi cấu hình đời đầu vẫn còn</b>
+      <p><code>POST /admin/api/settings</code> chỉ nhận 4 biến thường và <b>bỏ im lặng</b> mọi
+      token gửi vào, trong khi vẫn trả về báo lưu thành công. Đổi token thì sửa <code>.env</code>
+      qua SSH.</p>
+    </div>
   </section>
 
   <footer>
-    <p>Tài liệu này đi kèm mã nguồn. Chi tiết kỹ thuật sâu hơn nằm ở
-    <code>README.md</code> (token Facebook, cách não hoạt động),
-    <code>DEPLOY.md</code> (dựng VPS từ đầu) và <code>DESIGN.md</code> (quyết định thiết kế).</p>
+    <p>Mục 00–11 là phần vận hành, mục 12–16 là phần kỹ thuật. Tài liệu đi kèm mã nguồn;
+    những quyết định thiết kế và lý do đằng sau từng lựa chọn nằm ở <code>DESIGN.md</code>,
+    bản dựng VPS từ máy trắng nằm ở <code>DEPLOY.md</code>.</p>
   </footer>
 
 </div>

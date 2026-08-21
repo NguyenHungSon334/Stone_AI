@@ -888,6 +888,10 @@ async def run_followups() -> None:
         if (await _off(_noise_state, psid)).get("stopped"):   # bot đã cố ý ngưng (nhiễu/sticker) -> đừng đào lại
             continue
         await send_text(psid, _FOLLOWUP_TEXT, chu_dong=True)
+        # Vào log: khách đáp lại lời nhắc thì model biết CHÍNH NÓ vừa chủ động nhắn, không đọc
+        # thành khách tự nhiên nhắn trống không. (Mốc tin khách cuối không đổi -> followup_
+        # candidates/mark_followed vẫn tính đúng.)
+        await brain.ghi_luot_async(psid, "", _FOLLOWUP_TEXT)
         await _off(brain.mark_followed, psid, last_user_at)
         stats.log_event("followup", psid)
 
@@ -1266,6 +1270,12 @@ async def _process(psid: str, text: str, user_at: str | None = None) -> None:
 
 
 async def _process_inner(psid: str, text: str, user_at: str | None = None) -> None:
+    # Khách nhắn từ TRƯỚC khi bot lên: chưa có log -> dựng lại từ Graph API để brain trả lời
+    # có ngữ cảnh. Im quá 1 ngày rồi quay lại -> báo admin qua Lark.
+    # Chạy ĐẦU TIÊN, trước MỌI nhánh câu cố định: seed_history chỉ ghi khi log còn TRỐNG, mà
+    # từ nay các nhánh đó cũng ghi log (brain.ghi_luot) -> để sau là seed vĩnh viễn không chạy
+    # nữa, khách cũ bấm quảng cáo bị tiếp như người lạ.
+    await returning.xu_ly_khach_quay_lai(psid)
     pending_urls = _PENDING_IMAGES.pop(psid, None)     # ảnh khách kèm lượt này (nếu có)
     images: list[tuple[bytes, str]] = []
     if pending_urls:
@@ -1275,7 +1285,10 @@ async def _process_inner(psid: str, text: str, user_at: str | None = None) -> No
         stats.log_event("image", psid)
         if not images:
             # Tải ảnh hỏng hoặc attachment không phải ảnh (file/video) -> câu cố định cũ.
-            await send_text(psid, _cau_khach_gui_anh(await _off(brain.sdt_da_luu, psid)))
+            cau = _cau_khach_gui_anh(await _off(brain.sdt_da_luu, psid))
+            await send_text(psid, cau)
+            # Câu này XIN SĐT -> phải vào log, không thì khách gõ số xong bot hỏi lại y hệt.
+            await brain.ghi_luot_async(psid, "[khách gửi ảnh/file]", cau, user_at)
             return
         text = _IMG_ONLY_PROMPT                         # ảnh không kèm chữ -> Gemini tự nhìn ảnh tư vấn
     if text == _REFERRAL_EVENT:
@@ -1285,8 +1298,11 @@ async def _process_inner(psid: str, text: str, user_at: str | None = None) -> No
         hist = await brain.load_history_async(psid)
         if not hist:                                   # khách mới: câu chào cố định, khỏi gọi AI
             await send_text(psid, _REFERRAL_REPLY)
+            # Ghi log: lượt sau model biết mình đã chào và đã hỏi hạng mục rồi. Bonus: bấm ad
+            # lần 2 thì hist hết trống -> rơi vào nhánh im _REFERRAL_IM_H, không chào 2 lần.
+            await brain.ghi_luot_async(psid, "", _REFERRAL_REPLY)
             return
-        im_h = returning.gio_im_lang(hist)
+        im_h = returning.gio_im_lang(hist, role="assistant")   # BOT vừa nhắn cách đây bao lâu
         if 0 <= im_h < _REFERRAL_IM_H:
             # Bấm ad mấy lần liên tiếp (Doàn Luyến bấm 4 lần/2 ngày) -> đừng nhắn chồng.
             print(f"[referral] {psid}: bot vừa nhắn {im_h:.2f}h trước, không mở lời lại",
@@ -1313,6 +1329,7 @@ async def _process_inner(psid: str, text: str, user_at: str | None = None) -> No
         _STICKER_COUNT[psid] = n
         if n == 1:
             await send_text(psid, _STICKER_REPLY)
+            await brain.ghi_luot_async(psid, "", _STICKER_REPLY)
         elif n == 2:
             stats.log_event("sticker_stop", psid)
             await notify_admins(f"🔕 Ngừng trả lời {await _label(psid)}: gửi like/sticker/icon "
@@ -1335,6 +1352,9 @@ async def _process_inner(psid: str, text: str, user_at: str | None = None) -> No
         if decision == "clarify":
             stats.log_event("unclear", psid)
             await send_text(psid, _NOISE_REPLY)
+            # Tin khách + câu hỏi lại đều vào log: khách nói rõ hơn ở lượt sau thì model còn
+            # biết mình vừa hỏi gì, không hỏi lại vòng hai.
+            await brain.ghi_luot_async(psid, text, _NOISE_REPLY, user_at)
             return
         if decision == "stop":
             stats.log_event("noise_stop", psid)
@@ -1365,6 +1385,9 @@ async def _process_inner(psid: str, text: str, user_at: str | None = None) -> No
             chot = _NGUNG_REPLY if doi_ngung else (
                 _XOA_DIU_REPLY if kho_chiu else _cau_chuyen_nguoi_that(sdt))
             await send_text(psid, chot, force=True)
+            # Vào log cả tin khách lẫn câu chốt: hết khoá, khách nhắn tiếp thì model đọc được
+            # cả lý do chuyển người thật, không tiếp như chưa có chuyện gì.
+            await brain.ghi_luot_async(psid, text, chot, user_at)
             if kho_chiu:
                 await _off(_pause_bot, psid, forced)
             await notify_admins(f"{'😠 KHÁCH KHÓ CHỊU - BOT ĐÃ NGƯNG NHẮN' if kho_chiu else '🔔 CHUYỂN NGƯỜI THẬT'}"
@@ -1374,10 +1397,6 @@ async def _process_inner(psid: str, text: str, user_at: str | None = None) -> No
             await _save_lead_to_crm(psid)
             return
         await send_action(psid, "typing_on")
-        # Khách nhắn từ TRƯỚC khi bot lên: chưa có log -> dựng lại từ Graph API để brain trả
-        # lời có ngữ cảnh. Im quá 1 ngày rồi quay lại -> báo admin qua Lark. Chạy TRƯỚC
-        # is_new_customer: nạp được log thì khách này là khách CŨ, không phải khách mới.
-        await returning.xu_ly_khach_quay_lai(psid)
         # to_thread: is_new_customer có thể chạm Firebase (cache miss) - offload để
         # Firebase chậm/chết không block event loop (mọi khách khác đứng).
         is_new = await asyncio.to_thread(brain.is_new_customer, psid)  # TRƯỚC khi brain ghi lịch sử

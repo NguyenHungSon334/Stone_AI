@@ -49,8 +49,13 @@ def test_doi_tin_fb_moc_hong_van_giu_noi_dung():
 
 
 def test_doi_tin_fb_bo_tin_quang_cao_cua_page():
-    """Tin hệ thống FB + auto-reply quảng cáo của Page KHÔNG được vào log dưới role assistant:
-    model coi đó là văn mẫu của chính nó rồi chép lại vào tin gửi khách (đã xảy ra thật)."""
+    """Tin hệ thống FB bị bỏ. Auto-reply quảng cáo thì THAY bằng ghi chú, không bỏ hẳn:
+
+    - bỏ CHỮ quảng cáo: model coi đó là văn mẫu của chính nó rồi chép lại cho khách (đã xảy ra).
+    - giữ DẤU VẾT "Page đã xin số": câu ad chính là câu xin SĐT. Bỏ hẳn thì khách bấm ad, gõ số
+      ra, log chỉ còn dãy số trơ không câu hỏi nào -> bot chào lại như người lạ rồi XIN SỐ LẦN
+      NỮA (khách 27234963929538234, 28/07/2026).
+    """
     chao_ad = ("Chào Bác Luyến! Bác đang quan tâm đến hạng mục Lăng Mộ Đá hay Nhà Thờ Họ ạ ? "
                "Để nắm rõ nhu cầu cũng như mong muốn của bác . Bác gửi em số điện thoại")
     tin = [
@@ -61,7 +66,11 @@ def test_doi_tin_fb_bo_tin_quang_cao_cua_page():
          "created_time": "2026-07-20T10:00:00+0000"},
     ]
     out = returning.doi_tin_fb(tin, "PAGE", _fb_time)
-    assert out == [{"role": "user", "content": "Tôi cần tư vấn", "at": "2026-07-20 10:02:00"}]
+    assert out == [
+        {"role": "assistant", "content": returning._CHAO_QUANG_CAO_NOTE, "at": "2026-07-20 10:01:00"},
+        {"role": "user", "content": "Tôi cần tư vấn", "at": "2026-07-20 10:02:00"},
+    ]
+    assert "quan tâm đến hạng mục" not in returning._CHAO_QUANG_CAO_NOTE
 
 
 def test_doi_tin_fb_giu_tin_tu_van_that_va_bo_trung_lien_tiep():
@@ -112,3 +121,22 @@ def test_doi_tin_fb_bo_su_kien_trang_thai_lead_cua_meta():
                     "at": "2026-07-20 10:01:00"}]
 
 
+
+
+def test_gio_im_lang_tach_theo_role():
+    """REGRESSION: tin BOT tự gửi không được reset đồng hồ im lặng của KHÁCH.
+
+    Bot nhắc khách im lâu (_FOLLOWUP_TEXT) -> tin đó nay vào log. Nếu gio_im_lang lấy tin cuối
+    bất kể của ai thì khách đáp lại lời nhắc bị tính là "im 2 giờ" -> mất thông báo
+    🔁 KHÁCH QUAN TÂM LẠI. Ngược lại nhánh referral cần đúng mốc tin BOT."""
+    def moc(gio):
+        return (datetime.now() - timedelta(hours=gio)).strftime("%Y-%m-%d %H:%M:%S")
+
+    msgs = [{"role": "user", "content": "xin giá", "at": moc(30)},
+            {"role": "assistant", "content": "Dạ 33 triệu ạ", "at": moc(29)},
+            {"role": "assistant", "content": "Bác còn phân vân mẫu nào không ạ?", "at": moc(1)}]
+
+    assert 29 <= returning.gio_im_lang(msgs, role="user") <= 31, "khách im ~30h"
+    assert returning.gio_im_lang(msgs, role="assistant") < 2, "bot vừa nhắn ~1h trước"
+    assert returning.gio_im_lang(msgs) < 2, "mặc định vẫn là tin cuối bất kể role"
+    assert returning.gio_im_lang([{"role": "assistant", "at": moc(1)}], role="user") == -1.0

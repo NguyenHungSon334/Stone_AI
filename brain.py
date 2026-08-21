@@ -388,11 +388,13 @@ def _psid_path(psid: str) -> Path:
 
 
 def is_new_customer(psid: str) -> bool:
-    """Khách lần đầu nhắn (báo admin). Cache local miss -> hỏi Firebase (đĩa mới,
-    khách có thể đã tồn tại). Chỉ 1 lần/khách/đĩa; Firebase tắt -> fetch trả None ngay."""
-    if _psid_path(psid).exists():
-        return False
-    return fb.fetch_conversation(psid) is None
+    """Khách lần đầu GÕ CHỮ (báo admin). Cache local miss -> hỏi Firebase (đĩa mới, khách có
+    thể đã tồn tại). Firebase tắt -> fetch trả None ngay.
+
+    Mốc là "có tin nào của KHÁCH chưa", không phải "có file log chưa": log chỉ chứa câu cố
+    định do bot tự gửi (chào quảng cáo, sticker, nhắc khách) thì khách vẫn CHƯA nói gì -
+    tính là khách cũ là nuốt mất thông báo 👋 KHÁCH MỚI của đúng người vừa bấm quảng cáo."""
+    return not any(m.get("role") == "user" for m in _load_hist(psid))
 
 
 # Ý định do lượt trích hồ sơ (chạy sẵn ở nền mỗi lượt) chấm - không tốn thêm lượt gọi AI.
@@ -475,6 +477,31 @@ def seed_history(psid: str, msgs: list) -> bool:
         return False
     _save_hist(psid, msgs, msgs)
     return True
+
+
+def ghi_luot(psid: str, user_text: str, bot_text: str, user_at: str | None = None) -> None:
+    """Ghi 1 lượt vào lịch sử cho nhánh KHÔNG đi qua answer() (mọi câu CỐ ĐỊNH).
+
+    Câu cố định - chào quảng cáo, sticker, tin nhiễu, ảnh hỏng, chuyển người thật, nhắc khách
+    im lâu - gửi xong là bay: lượt sau model đọc lịch sử thấy mình CHƯA HỀ nói gì. Đúng vòng
+    làm mất khách: khách bấm ad -> bot xin số -> khách gõ số -> bot không biết mình vừa hỏi,
+    xin lại lần nữa. Ghi vào log thì model biết mình đã nói gì và khách đang đáp lại cái gì.
+
+    user_text rỗng (referral/sticker: khách chưa gõ chữ nào) -> chỉ ghi tin bot.
+    """
+    if not bot_text:
+        return
+    msgs = []
+    if user_text:
+        msgs.append({"role": "user", "content": user_text, "at": user_at or _now_str()})
+    msgs.append({"role": "assistant", "content": bot_text, "at": _now_str()})
+    with _psid_lock(psid):
+        full = _load_hist(psid)
+        _save_hist(psid, full + msgs, msgs)
+
+
+async def ghi_luot_async(psid: str, user_text: str, bot_text: str, user_at: str | None = None) -> None:
+    await asyncio.to_thread(ghi_luot, psid, user_text, bot_text, user_at)
 
 
 async def load_history_async(psid: str) -> list:
@@ -1007,6 +1034,13 @@ def _profile_luot_nay(psid: str, profile: dict, text: str) -> dict:
 
 _CHUA_CO_SDT = ("SĐT/Zalo: CHƯA CÓ - khách chưa gõ số nào. CẤM tự nghĩ ra chữ số, CẤM nói "
                 "'em đã nhận được SĐT của Bác', CẤM gửi PHIẾU YÊU CẦU. Xin số trước đã.")
+# Ô SĐT có giá trị mà chỉ in trơ "SĐT/Zalo: 09..." thì model vẫn xin lại: persona nhắc xin số
+# ở chục chỗ, một dòng dữ kiện không đủ sức cãi. Đã xảy ra thật: khách 27234963929538234
+# (28/07 10:23) và 25803381659296922 (28/07 15:30) đều gõ số rồi bị hỏi lại ngay tin sau.
+# -> ô SĐT phải là LỆNH CẤM, cân với _CHUA_CO_SDT ở nhánh ngược lại.
+_DA_CO_SDT = ("SĐT/Zalo: {sdt} - khách ĐÃ tự gõ số này rồi. CẤM xin số thêm lần nào nữa, dưới "
+              "mọi cách nói ('cho em xin SĐT', 'Bác để lại số', 'xin số Zalo của Bác'). Cần "
+              "chuyên gia liên hệ thì nói thẳng 'em báo chuyên gia gọi lại Bác qua số {sdt}'.")
 # Tin BỊA về SĐT: gửi phiếu hoặc khẳng định đã có số, trong khi hồ sơ chưa có số nào.
 _BIA_SDT_RE = re.compile(r"PHIẾU YÊU CẦU|đã nhận được (?:SĐT|số)|em đã có s(?:ố|đt)", re.I)
 _XIN_SO_THAY_PHIEU = (
@@ -1042,9 +1076,10 @@ def _profile_prompt(profile: dict) -> str:
     mất khỏi prompt -> model không thấy tín hiệu nào, tới bước chốt phiếu (persona ghi SĐT là
     dòng bắt buộc) thì tự điền một số cho hợp lệ. Đã bịa thật: khách 28632036926390235 nhận
     phiếu ghi 'SĐT: 0979655XXX' và lead giả đó chui vào CRM."""
-    lines = [f"{_PROFILE_LABELS[field]}: {profile[field]}" for field in _PROFILE_FIELDS if profile.get(field)]
-    if not profile.get("sdt"):
-        lines.insert(0, _CHUA_CO_SDT)
+    lines = [f"{_PROFILE_LABELS[field]}: {profile[field]}"
+             for field in _PROFILE_FIELDS if field != "sdt" and profile.get(field)]
+    sdt = profile.get("sdt")
+    lines.insert(0, _DA_CO_SDT.format(sdt=sdt) if sdt else _CHUA_CO_SDT)
     if not lines:
         return ""
     return ("[Hồ sơ khách đã xác nhận - coi là dữ kiện; KHÔNG hỏi lại bất kỳ mục nào có giá trị.\n"

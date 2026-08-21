@@ -77,6 +77,38 @@ def test_cau_co_dinh_khong_xin_lai_so():
         assert "xin" in cau.lower() or "để lại" in cau.lower(), "chưa có số thì vẫn phải xin"
 
 
+_CHAO_AD = ("Chào Bác Long Lê Khánh   Bác đang quan tâm đến hạng mục Lăng Mộ Đá hay Nhà Thờ Họ ạ ? "
+            "Để nắm rõ nhu cầu cũng như mong muốn của bác . Bác gửi em số điện thoại để em tư vấn "
+            "cho bác 1 cách chi tiết và tốt nhất ạ")
+
+
+def test_chao_quang_cao_giu_dau_vet_da_xin_so():
+    """REGRESSION: auto-reply ad CHÍNH LÀ câu xin số - bỏ hẳn thì khách gõ số xong bị hỏi lại.
+
+    Khách 27234963929538234 (28/07/2026): bấm ad, Page hỏi số, khách gõ số ở tin đầu, 40 giây
+    sau bot vẫn 'Bác cho bên em xin SĐT'. Log dựng lại chỉ có mỗi dãy số trơ, không có câu hỏi
+    nào trước đó -> model không hiểu số đó trả lời cái gì.
+    """
+    import returning
+
+    raw = [{"from": {"id": "U"}, "message": "0909315447", "created_time": "t"},   # Graph: mới trước
+           {"from": {"id": "P"}, "message": _CHAO_AD, "created_time": "t"}]
+    out = returning.doi_tin_fb(raw, "P", lambda _a: "2026-07-28 10:22:00")
+
+    assert len(out) == 2, "câu Page xin số phải còn trong log, không được bỏ"
+    assert out[0]["role"] == "assistant" and out[1]["content"] == "0909315447"
+    assert "ĐÃ XIN SỐ" in out[0]["content"], "phải giữ dấu vết Page đã xin số"
+    assert "quan tâm đến hạng mục" not in out[0]["content"], "bỏ chữ quảng cáo, model hay chép lại"
+
+
+def test_o_sdt_co_so_la_lenh_cam_xin_lai():
+    """Ô SĐT có giá trị phải CẤM xin lại, không chỉ in số: persona nhắc xin số ở chục chỗ."""
+    prompt = brain._profile_prompt({"sdt": "0912345678", "tinh": "Hà Nội"})
+    assert "SĐT/Zalo: 0912345678" in prompt and "Tỉnh/TP: Hà Nội" in prompt
+    assert "CẤM xin số" in prompt
+    assert "CHƯA CÓ" in brain._profile_prompt({"sdt": "", "tinh": "Hà Nội"})
+
+
 if __name__ == "__main__":
     import tempfile
     from pathlib import Path
@@ -87,6 +119,8 @@ if __name__ == "__main__":
 
     test_tim_sdt_chuan_hoa()
     test_cau_co_dinh_khong_xin_lai_so()
+    test_chao_quang_cao_giu_dau_vet_da_xin_so()
+    test_o_sdt_co_so_la_lenh_cam_xin_lai()
     with tempfile.TemporaryDirectory() as tmp:
         goc = state._DIR
         try:

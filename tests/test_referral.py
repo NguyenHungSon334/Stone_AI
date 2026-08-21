@@ -14,7 +14,7 @@ import returning
 
 def _chay(psid: str, hist: list) -> dict:
     """Chạy 1 lượt referral với lịch sử cho sẵn. Trả về những gì bot đã làm."""
-    ghi = {"sent": [], "ai_prompt": None}
+    ghi = {"sent": [], "ai_prompt": None, "logged": []}
 
     async def _load(_psid):
         return hist
@@ -29,15 +29,19 @@ def _chay(psid: str, hist: list) -> dict:
     async def _noop(*a, **kw):
         return None
 
+    async def _ghi_luot(_psid, user_text, bot_text, *a, **kw):
+        ghi["logged"].append((user_text, bot_text))
+
     # Chặn 2 tác dụng phụ ra ngoài: gọi Graph API (typing) và báo admin/ghi mark khách quay lại.
-    orig = (brain.load_history_async, brain.answer, messenger.send_text,
+    orig = (brain.load_history_async, brain.answer, brain.ghi_luot_async, messenger.send_text,
             messenger.send_action, returning.xu_ly_khach_quay_lai)
     brain.load_history_async, brain.answer, messenger.send_text = _load, _answer, _send
+    brain.ghi_luot_async = _ghi_luot          # KHÔNG cho test ghi thật vào conversations/
     messenger.send_action = returning.xu_ly_khach_quay_lai = _noop
     try:
         asyncio.run(messenger._process_inner(psid, messenger._REFERRAL_EVENT))
     finally:
-        (brain.load_history_async, brain.answer, messenger.send_text,
+        (brain.load_history_async, brain.answer, brain.ghi_luot_async, messenger.send_text,
          messenger.send_action, returning.xu_ly_khach_quay_lai) = orig
     return ghi
 
@@ -47,6 +51,9 @@ def test_khach_moi_nhan_cau_chao_co_dinh():
     ghi = _chay("PSID_MOI", [])
     assert ghi["sent"] == [messenger._REFERRAL_REPLY]
     assert ghi["ai_prompt"] is None
+    # Câu chào PHẢI vào log: không ghi thì lượt sau model tưởng mình chưa nói gì -> khách đáp
+    # số điện thoại xong bị hỏi lại, và bấm ad lần 2 lại nhận đúng câu chào đó lần nữa.
+    assert ghi["logged"] == [("", messenger._REFERRAL_REPLY)]
 
 
 def test_khach_cu_thi_ai_mo_loi_tiep_noi():

@@ -60,23 +60,29 @@ _TIN_TRANG_THAI_LEAD = re.compile(
     r"|^lead (?:stage|status):\b", re.I)
 _CHAO_QUANG_CAO = re.compile(
     r"(quan tâm đến hạng mục|để nắm rõ nhu cầu cũng như mong muốn)", re.I)
+# Câu auto-reply đó CHÍNH LÀ câu xin SĐT. Bỏ hẳn khỏi log thì khách bấm ad, được Page hỏi số,
+# gõ số ra -> model chỉ thấy một dãy số trơ không đầu không đuôi: nó chào lại như người lạ rồi
+# XIN SỐ LẦN NỮA (khách 27234963929538234, 28/07: gõ số ở tin đầu, 40 giây sau bị hỏi lại).
+# Nên: giữ DẤU VẾT "Page đã xin số", bỏ CHỮ của quảng cáo để model không chép lại.
+_CHAO_QUANG_CAO_NOTE = (
+    "[Ghi chú hệ thống - KHÔNG chép lại câu này cho khách] Page đã tự động chào và ĐÃ XIN SỐ "
+    "ĐIỆN THOẠI của khách. Số khách gõ sau đây là để trả lời câu xin số đó: xác nhận đã nhận "
+    "số, TUYỆT ĐỐI không xin lại.")
 
 
 def _bo_tin_page_may(noi_dung: str, la_page: bool) -> bool:
     """True = bỏ tin này khỏi lịch sử nạp lại."""
     if _TIN_HE_THONG.search(noi_dung):
         return True
-    if la_page and _TIN_TRANG_THAI_LEAD.search(noi_dung):
-        return True
-    return la_page and bool(_CHAO_QUANG_CAO.search(noi_dung))
+    return la_page and bool(_TIN_TRANG_THAI_LEAD.search(noi_dung))
 
 
 def doi_tin_fb(msgs: list, page_id: str, fb_time_to_local) -> list:
     """Tin thô Graph -> log bot ({"role", "content", "at"}), cũ trước mới sau.
 
     Graph trả MỚI TRƯỚC nên phải đảo. Bỏ: tin rỗng (ảnh/sticker/file - API không trả nội
-    dung, giữ lại chỉ tạo lượt trống), tin hệ thống FB, auto-reply quảng cáo của Page, và
-    tin Page trùng lặp liên tiếp."""
+    dung, giữ lại chỉ tạo lượt trống), tin hệ thống FB, và tin Page trùng lặp liên tiếp.
+    Auto-reply quảng cáo của Page KHÔNG bỏ mà thay bằng _CHAO_QUANG_CAO_NOTE."""
     out = []
     for m in reversed(msgs or []):
         noi_dung = (m.get("message") or "").strip()
@@ -85,6 +91,8 @@ def doi_tin_fb(msgs: list, page_id: str, fb_time_to_local) -> list:
         la_page = str((m.get("from") or {}).get("id") or "") == page_id
         if _bo_tin_page_may(noi_dung, la_page):
             continue
+        if la_page and _CHAO_QUANG_CAO.search(noi_dung):
+            noi_dung = _CHAO_QUANG_CAO_NOTE             # giữ việc "đã xin số", bỏ chữ quảng cáo
         if out and out[-1]["content"] == noi_dung:      # Page/khách gửi trùng liên tiếp
             continue
         ban_ghi = {"role": "assistant" if la_page else "user", "content": noi_dung}
@@ -126,9 +134,18 @@ def _ghi_mark(psid: str, moc: str) -> None:
     state.patch(psid, returning_at=moc)
 
 
-def gio_im_lang(msgs: list, bay_gio: datetime | None = None) -> float:
-    """Số giờ từ tin CUỐI CÙNG trong log tới giờ. -1 nếu không đọc được mốc nào."""
-    moc = next((m.get("at") for m in reversed(msgs or []) if m.get("at")), None)
+def gio_im_lang(msgs: list, bay_gio: datetime | None = None, role: str | None = None) -> float:
+    """Số giờ từ tin CUỐI của `role` (None = mọi role) tới giờ. -1 nếu không đọc được mốc nào.
+
+    Hai người gọi hỏi hai chuyện KHÁC NHAU, phải tách bằng `role`:
+      - "khách im bao lâu rồi quay lại?"  -> role="user"
+      - "bot vừa nhắn cách đây bao lâu?"  -> role="assistant"
+    Để chung (lấy tin cuối bất kể của ai) thì mỗi tin bot tự gửi lại reset đồng hồ im lặng của
+    KHÁCH: bot nhắc khách lúc T, khách đáp lúc T+2h -> tính ra "im 2 giờ", nuốt mất thông báo
+    🔁 KHÁCH QUAN TÂM LẠI của đúng khách vừa được đánh thức.
+    """
+    moc = next((m.get("at") for m in reversed(msgs or [])
+                if m.get("at") and (role is None or m.get("role") == role)), None)
     if not moc:
         return -1.0
     try:
@@ -167,11 +184,12 @@ async def xu_ly_khach_quay_lai(psid: str) -> None:
         if not msgs:
             return                            # khách mới thật -> luồng khách mới lo, không báo
 
-        im_h = gio_im_lang(msgs)
+        im_h = gio_im_lang(msgs, role="user")     # KHÁCH im bao lâu, không tính tin bot tự gửi
         if im_h < NGUONG_QUAY_LAI_H:
             return                            # đang trò chuyện liên tục, không phải "quay lại"
 
-        moc = next((m.get("at") for m in reversed(msgs) if m.get("at")), "") or ""
+        moc = next((m.get("at") for m in reversed(msgs)
+                    if m.get("at") and m.get("role") == "user"), "") or ""
         if _da_bao(psid, moc):
             return
 

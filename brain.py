@@ -868,6 +868,8 @@ def _answer_sync(psid: str, text: str, images: list[tuple[bytes, str]] | None = 
         contents = [types.Content(role="user", parts=[types.Part.from_text(text=_time_note_text())])]
         if profile_context := _profile_prompt(profile):
             contents.append(types.Content(role="user", parts=[types.Part.from_text(text=profile_context)]))
+        if gia_context := _gia_prompt(full, text, profile):
+            contents.append(types.Content(role="user", parts=[types.Part.from_text(text=gia_context)]))
         # AI đọc NHẸ: tóm tắt phần cũ + đuôi verbatim. upto = tin đã gộp vào tóm tắt.
         summ = _load_summary(psid)
         if summ:
@@ -1011,6 +1013,47 @@ def _phones_in_history(hist: list) -> str:
               if msg.get("role") == "user" and isinstance(msg.get("content"), str)
               and (sdt := util.tim_sdt(msg["content"]))]
     return phones[-1] if phones else ""
+
+
+# --- LUỒNG GIÁ 2 NHỊP (nghiệp vụ: lần 1 xin số, lần 2 mới báo giá + ảnh) ---
+# Đếm bằng CODE chứ không để model tự đếm trong lịch sử: model đếm lệch là hỏng cả kịch bản
+# (báo giá ngay lần 1 -> mất cơ hội lấy SĐT, hoặc né giá mãi -> khách bỏ đi).
+# "đánh giá"/"giá trị" bị loại để không đếm nhầm.
+_HOI_GIA_RE = re.compile(
+    r"(?<!đánh )\bgiá\b(?!\s*trị)|báo\s*giá|bao\s*nhiêu|\bbn\b|chi\s*phí|mấy\s*(?:tiền|triệu)"
+    r"|\bgia\s*(?:bao|ca|the)|\bbao\s*nhieu\b",
+    re.IGNORECASE)
+
+
+def _dem_hoi_gia(hist: list, text: str) -> int:
+    """Số lần khách hỏi giá tính CẢ lượt này. 0 = chưa hỏi giá lần nào."""
+    cu = sum(1 for msg in hist
+             if msg.get("role") == "user" and isinstance(msg.get("content"), str)
+             and _HOI_GIA_RE.search(msg["content"]))
+    return cu + (1 if _HOI_GIA_RE.search(text or "") else 0)
+
+
+_GIA_LAN_1 = (
+    "[NHỊP GIÁ - khách hỏi giá LẦN ĐẦU trong cả cuộc trò chuyện]\n"
+    "Tin này TUYỆT ĐỐI KHÔNG nêu con số tiền nào, KHÔNG nêu mã mẫu, KHÔNG gọi suggest_products.\n"
+    "Nói đúng ý này: giá tuỳ từng công trình, kích thước, loại đá và nhu cầu của khách nên mỗi "
+    "nhà một khác - rồi xin SĐT/Zalo để báo giá đúng phần khách cần. Tối đa 3 câu, không hỏi thêm ý nào khác.")
+_GIA_LAN_2 = (
+    "[NHỊP GIÁ - khách đã hỏi giá {n} lần]\n"
+    "Lần này PHẢI báo giá thật: gọi suggest_products rồi nêu 1-2 MÃ kèm khoảng giá và kích thước "
+    "tool trả về (hệ thống tự gửi ảnh báo giá theo mã). CẤM né bằng 'tuỳ công trình', CẤM đáp bằng "
+    "xin số trơn.")
+
+
+def _gia_prompt(hist: list, text: str, profile: dict) -> str:
+    """Khối điều hướng nhịp giá cho lượt này. "" nếu khách không hỏi giá."""
+    n = _dem_hoi_gia(hist, text)
+    if n <= 0:
+        return ""
+    # Đã có SĐT rồi thì mục đích của nhịp 1 (lấy số) hết ý nghĩa -> báo giá luôn.
+    if n == 1 and not profile.get("sdt"):
+        return _GIA_LAN_1
+    return _GIA_LAN_2.format(n=n)
 
 
 def _profile_luot_nay(psid: str, profile: dict, text: str) -> dict:

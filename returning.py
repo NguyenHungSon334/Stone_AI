@@ -168,8 +168,13 @@ def _tom_tat_crm(psid: str) -> str:
     return "\n".join(phan)
 
 
-async def xu_ly_khach_quay_lai(psid: str) -> None:
-    """Gọi TRƯỚC brain.answer mỗi lượt khách nhắn. Nuốt mọi lỗi."""
+async def xu_ly_khach_quay_lai(psid: str) -> bool:
+    """Gọi TRƯỚC brain.answer mỗi lượt khách nhắn. Nuốt mọi lỗi.
+
+    True = khách im >= NGUONG_QUAY_LAI_H rồi nhắn lại. Người gọi dùng cờ này để BẮT tóm tắt
+    lại ô Ghi chú CRM: khách quay lại thường chỉ nhắn 1 tin (log dài thêm 2) nên không chạm
+    ngưỡng _LEAD_TOM_TAT_MOI, đồng bộ rẻ giữ nguyên Ghi chú cũ - bảng Lark đứng yên đúng lúc
+    khách vừa quan tâm lại."""
     try:
         import messenger                      # import trong hàm: messenger đã import module này
 
@@ -182,16 +187,16 @@ async def xu_ly_khach_quay_lai(psid: str) -> None:
                 msgs = cu
 
         if not msgs:
-            return                            # khách mới thật -> luồng khách mới lo, không báo
+            return False                      # khách mới thật -> luồng khách mới lo, không báo
 
         im_h = gio_im_lang(msgs, role="user")     # KHÁCH im bao lâu, không tính tin bot tự gửi
         if im_h < NGUONG_QUAY_LAI_H:
-            return                            # đang trò chuyện liên tục, không phải "quay lại"
+            return False                      # đang trò chuyện liên tục, không phải "quay lại"
 
         moc = next((m.get("at") for m in reversed(msgs)
                     if m.get("at") and m.get("role") == "user"), "") or ""
         if _da_bao(psid, moc):
-            return
+            return True                       # đã báo admin rồi, nhưng VẪN là lượt quay lại
 
         ho_so = _tom_tat_crm(psid)
         than = (f"🔁 KHÁCH QUAN TÂM LẠI: {await messenger._label(psid)}\n"
@@ -202,6 +207,8 @@ async def xu_ly_khach_quay_lai(psid: str) -> None:
         await messenger.notify_admins(than)
         _ghi_mark(psid, moc)
         print(f"[quaylai] báo admin {psid}: im {int(im_h)}h", file=sys.stderr)
+        return True
     except Exception as e:
         print(f"[quaylai] {type(e).__name__}: {e}", file=sys.stderr)
+        return False
 

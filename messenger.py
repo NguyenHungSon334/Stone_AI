@@ -1275,7 +1275,15 @@ async def _process_inner(psid: str, text: str, user_at: str | None = None) -> No
     # Chạy ĐẦU TIÊN, trước MỌI nhánh câu cố định: seed_history chỉ ghi khi log còn TRỐNG, mà
     # từ nay các nhánh đó cũng ghi log (brain.ghi_luot) -> để sau là seed vĩnh viễn không chạy
     # nữa, khách cũ bấm quảng cáo bị tiếp như người lạ.
-    await returning.xu_ly_khach_quay_lai(psid)
+    # True = khách im >=24h rồi nhắn lại -> ép tóm tắt lại ô Ghi chú CRM ở cuối lượt.
+    quay_lai = await returning.xu_ly_khach_quay_lai(psid)
+    if quay_lai and text in (_IMG_EVENT, _STICKER_EVENT, _REFERRAL_EVENT):
+        # Ba nhánh sự kiện dưới đây thoát sớm ở NHIỀU chỗ và không nhánh nào chạm CRM: khách cũ
+        # bấm lại quảng cáo / thả tim / gửi ảnh là tín hiệu quan tâm lại rõ nhất mà bảng Lark
+        # không hay biết. Ghi ở ĐÂY (một chỗ, trước mọi return) thay vì rải _save_lead_to_crm
+        # vào từng nhánh - thêm nhánh mới sau này cũng không lọt.
+        await _save_lead_to_crm(psid)
+        quay_lai = False                      # đã tóm tắt lượt này rồi, cuối lượt khỏi tốn lượt AI nữa
     pending_urls = _PENDING_IMAGES.pop(psid, None)     # ảnh khách kèm lượt này (nếu có)
     images: list[tuple[bytes, str]] = []
     if pending_urls:
@@ -1472,4 +1480,7 @@ async def _process_inner(psid: str, text: str, user_at: str | None = None) -> No
             # Lark đứng yên ở trạng thái lúc vừa nhận số. Khách chưa cho số -> extract_lead trả
             # None, thoát ngay không tốn gì. deep chỉ khi khách vừa gõ số -> không đẻ thêm
             # 1 lượt AI cho mỗi tin.
-            await _save_lead_to_crm(psid, deep=bool(phone))
+            # quay_lai: khách quay lại thường chỉ nhắn 1 tin -> log dài thêm 2, dưới ngưỡng
+            # _LEAD_TOM_TAT_MOI nên đồng bộ rẻ giữ Ghi chú CŨ và upsert trả 'unchanged':
+            # bảng Lark đứng yên đúng lúc khách vừa quan tâm lại. Ép deep 1 lượt cho ca này.
+            await _save_lead_to_crm(psid, deep=bool(phone) or quay_lai)

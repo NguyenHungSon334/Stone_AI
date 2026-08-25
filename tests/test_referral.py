@@ -12,9 +12,11 @@ import messenger
 import returning
 
 
-def _chay(psid: str, hist: list) -> dict:
-    """Chạy 1 lượt referral với lịch sử cho sẵn. Trả về những gì bot đã làm."""
-    ghi = {"sent": [], "ai_prompt": None, "logged": []}
+def _chay(psid: str, hist: list, quay_lai: bool = False) -> dict:
+    """Chạy 1 lượt referral với lịch sử cho sẵn. Trả về những gì bot đã làm.
+
+    quay_lai: giả lập khách im >=24h rồi mới bấm quảng cáo lại."""
+    ghi = {"sent": [], "ai_prompt": None, "logged": [], "crm": []}
 
     async def _load(_psid):
         return hist
@@ -29,20 +31,28 @@ def _chay(psid: str, hist: list) -> dict:
     async def _noop(*a, **kw):
         return None
 
+    async def _quay_lai(*a, **kw):
+        return quay_lai
+
+    async def _save_crm(_psid, deep=True):
+        ghi["crm"].append((_psid, deep))
+
     async def _ghi_luot(_psid, user_text, bot_text, *a, **kw):
         ghi["logged"].append((user_text, bot_text))
 
     # Chặn 2 tác dụng phụ ra ngoài: gọi Graph API (typing) và báo admin/ghi mark khách quay lại.
     orig = (brain.load_history_async, brain.answer, brain.ghi_luot_async, messenger.send_text,
-            messenger.send_action, returning.xu_ly_khach_quay_lai)
+            messenger.send_action, returning.xu_ly_khach_quay_lai, messenger._save_lead_to_crm)
     brain.load_history_async, brain.answer, messenger.send_text = _load, _answer, _send
     brain.ghi_luot_async = _ghi_luot          # KHÔNG cho test ghi thật vào conversations/
-    messenger.send_action = returning.xu_ly_khach_quay_lai = _noop
+    messenger.send_action = _noop
+    returning.xu_ly_khach_quay_lai = _quay_lai
+    messenger._save_lead_to_crm = _save_crm   # KHÔNG cho test gọi Lark thật
     try:
         asyncio.run(messenger._process_inner(psid, messenger._REFERRAL_EVENT))
     finally:
         (brain.load_history_async, brain.answer, brain.ghi_luot_async, messenger.send_text,
-         messenger.send_action, returning.xu_ly_khach_quay_lai) = orig
+         messenger.send_action, returning.xu_ly_khach_quay_lai, messenger._save_lead_to_crm) = orig
     return ghi
 
 
@@ -74,8 +84,27 @@ def test_bam_ad_don_thi_im():
     assert ghi["sent"] == [] and ghi["ai_prompt"] is None
 
 
+def test_khach_quay_lai_bam_ad_van_cap_nhat_crm():
+    """REGRESSION: nhánh referral thoát sớm ở nhiều chỗ, KHÔNG chỗ nào chạm CRM.
+
+    Khách cũ im mấy ngày rồi bấm lại quảng cáo = tín hiệu quan tâm lại rõ nhất, mà ô Ghi chú
+    trên Lark đứng yên ở trạng thái lần chốt trước."""
+    from datetime import datetime, timedelta
+    vua_xong = (datetime.now() - timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
+    hist = [{"role": "assistant", "content": "Dạ em chào Bác ạ.", "at": vua_xong}]
+
+    # Nhánh im lặng (bấm ad dồn) - thoát sớm nhất, vẫn phải cập nhật CRM.
+    ghi = _chay("PSID_QL", hist, quay_lai=True)
+    assert ghi["crm"] == [("PSID_QL", True)], "khách quay lại bấm ad phải tóm tắt lại Ghi chú"
+    assert ghi["sent"] == [], "vẫn không nhắn chồng lên tin bot vừa gửi"
+
+    # Đang trò chuyện liên tục -> không tốn thêm lượt AI tóm tắt.
+    assert _chay("PSID_LT", hist, quay_lai=False)["crm"] == []
+
+
 if __name__ == "__main__":
     test_khach_moi_nhan_cau_chao_co_dinh()
     test_khach_cu_thi_ai_mo_loi_tiep_noi()
     test_bam_ad_don_thi_im()
+    test_khach_quay_lai_bam_ad_van_cap_nhat_crm()
     print("OK - referral")

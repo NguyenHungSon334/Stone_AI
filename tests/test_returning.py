@@ -140,3 +140,44 @@ def test_gio_im_lang_tach_theo_role():
     assert returning.gio_im_lang(msgs, role="assistant") < 2, "bot vừa nhắn ~1h trước"
     assert returning.gio_im_lang(msgs) < 2, "mặc định vẫn là tin cuối bất kể role"
     assert returning.gio_im_lang([{"role": "assistant", "at": moc(1)}], role="user") == -1.0
+
+
+def test_quay_lai_tra_true_de_ep_tom_tat_lai_ghi_chu(monkeypatch):
+    """REGRESSION: khách im lâu rồi nhắn lại mà ô Ghi chú CRM đứng yên.
+
+    1 tin khách = log dài thêm 2, dưới ngưỡng brain._LEAD_TOM_TAT_MOI -> đồng bộ rẻ giữ Ghi
+    chú cũ, upsert trả 'unchanged', Lark không nhúc nhích. messenger dùng cờ này ép deep."""
+    import asyncio
+
+    import messenger
+
+    def moc(gio):
+        return (datetime.now() - timedelta(hours=gio)).strftime("%Y-%m-%d %H:%M:%S")
+
+    hist = [{"role": "user", "content": "cho hỏi giá", "at": moc(72)},
+            {"role": "assistant", "content": "Dạ", "at": moc(71)}]
+    monkeypatch.setattr(returning.brain, "load_history_async", _tra_ve(hist))
+    monkeypatch.setattr(returning, "_tom_tat_crm", lambda psid: "")
+    monkeypatch.setattr(returning, "_da_bao", lambda psid, m: False)
+    monkeypatch.setattr(returning, "_ghi_mark", lambda psid, m: None)
+    monkeypatch.setattr(messenger, "_label", _tra_ve("Khách A"))
+    monkeypatch.setattr(messenger, "notify_admins", _tra_ve(None))
+
+    assert asyncio.run(returning.xu_ly_khach_quay_lai("p1")) is True, "im 72h = quay lại"
+
+    # Đang trò chuyện liên tục -> KHÔNG ép deep (mỗi lần deep tốn 1 lượt AI tóm tắt).
+    lien_tuc = [{"role": "user", "content": "vâng", "at": moc(1)}]
+    monkeypatch.setattr(returning.brain, "load_history_async", _tra_ve(lien_tuc))
+    assert asyncio.run(returning.xu_ly_khach_quay_lai("p1")) is False
+
+    # Chưa có log và Graph không trả gì -> khách mới, không phải quay lại.
+    monkeypatch.setattr(returning.brain, "load_history_async", _tra_ve([]))
+    monkeypatch.setattr(returning, "_keo_lich_su_cu", _tra_ve([]))
+    assert asyncio.run(returning.xu_ly_khach_quay_lai("p1")) is False
+
+
+def _tra_ve(gia_tri):
+    """Coroutine giả luôn trả `gia_tri` (nuốt mọi tham số)."""
+    async def _f(*a, **kw):
+        return gia_tri
+    return _f

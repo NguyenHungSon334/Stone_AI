@@ -1130,6 +1130,35 @@ def _profile_prompt(profile: dict) -> str:
             + "\n".join(lines))
 
 
+def _sinh_json(prompt: str, schema: dict, max_tokens: int, tries: int = 2) -> dict:
+    """Gọi AI lấy JSON theo schema. Ném BrainError nếu hết lượt vẫn không parse được.
+
+    Gemini thỉnh thoảng trả text CỤT (đứt giữa chuỗi -> JSONDecodeError "Unterminated
+    string"): thinking ăn hết max_output_tokens, hoặc response bị cắt lúc tải cao. Cụt là
+    lỗi TẠM như 503 -> gọi lại thường ra đủ, đắt hơn 1 lượt nhưng rẻ hơn mất ô Ghi chú.
+    Log kèm finish_reason + đầu chuỗi raw để lần sau nhìn alert là biết cụt vì lý do gì.
+    """
+    loi = "chưa gọi được"
+    for i in range(tries):
+        resp = _generate(
+            _get_client(), tries=2, model=_model_id(),
+            contents=[types.Content(role="user", parts=[types.Part.from_text(text=prompt)])],
+            config=types.GenerateContentConfig(response_mime_type="application/json",
+                                               response_json_schema=schema,
+                                               max_output_tokens=max_tokens,
+                                               thinking_config=_NO_THINK),
+        )
+        cand = (resp.candidates or [None])[0]
+        raw = "".join(p.text for p in (cand.content.parts or []) if p.text) if cand and cand.content else ""
+        try:
+            return json.loads(raw)
+        except ValueError as e:
+            loi = (f"{type(e).__name__}: {e} | finish={getattr(cand, 'finish_reason', None)} "
+                   f"| raw[{len(raw)}]={raw[:120]!r}")
+            print(f"[ai-json] JSON cụt, thử lại {i + 1}/{tries}: {loi}", file=sys.stderr)
+    raise BrainError(f"AI trả JSON hỏng sau {tries} lượt: {loi}")
+
+
 def _profile_from_history_sync(psid: str, hist: list) -> dict:
     current = _doc_profile(psid)
     if current["upto"] >= len(hist):
@@ -1153,16 +1182,7 @@ def _profile_from_history_sync(psid: str, hist: list) -> dict:
         "Không chắc thì để chuỗi rỗng.\n\n"
         + "\n".join(user_lines))
     try:
-        resp = _generate(
-            _get_client(), tries=2, model=_model_id(),
-            contents=[types.Content(role="user", parts=[types.Part.from_text(text=prompt)])],
-            config=types.GenerateContentConfig(response_mime_type="application/json",
-                                               response_json_schema=_PROFILE_SCHEMA,
-                                               max_output_tokens=1024, thinking_config=_NO_THINK),
-        )
-        cand = (resp.candidates or [None])[0]
-        raw = "".join(part.text for part in (cand.content.parts or []) if part.text) if cand and cand.content else ""
-        profile = _clean_profile(json.loads(raw))
+        profile = _clean_profile(_sinh_json(prompt, _PROFILE_SCHEMA, 1024))
         profile["upto"] = len(hist)
     except Exception as e:
         print(f"[profile] trích lỗi psid={psid}: {type(e).__name__}: {e}", file=sys.stderr)
@@ -1241,17 +1261,7 @@ def _tom_tat_lead(psid: str, hist: list) -> dict:
     prompt = (f"Trích thông tin khách từ hội thoại dưới đây thành JSON. "
               f"Tỉnh/Thành phố PHẢI chọn khớp chính xác 1 trong: {_TINH_OPTIONS}.\n\n{convo}")
     try:
-        resp = _generate(
-            _get_client(),
-            model=_model_id(),
-            contents=[types.Content(role="user", parts=[types.Part.from_text(text=prompt)])],
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json", response_json_schema=_LEAD_SCHEMA,
-                max_output_tokens=2048, thinking_config=_NO_THINK),
-        )
-        cand = (resp.candidates or [None])[0]
-        raw = "".join(p.text for p in (cand.content.parts or []) if p.text) if cand and cand.content else ""
-        return json.loads(raw)
+        return _sinh_json(prompt, _LEAD_SCHEMA, 2048)
     except Exception as e:
         print(f"[lead] tóm tắt lỗi psid={psid}: {type(e).__name__}: {e}", file=sys.stderr)
         # KHÔNG return None nữa: hỏng tóm tắt thì chỉ thiếu ô Ghi chú, lead (tên/SĐT/địa chỉ)

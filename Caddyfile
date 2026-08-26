@@ -61,3 +61,14 @@ tại <a href="https://www.facebook.com/settings?tab=business_tools">Cài đặt
 		reverse_proxy bot:7900
 	}
 }
+
+# ── Agent Lỗ Ban — Hồn Đá (thêm 2026-08-06) ──
+# Site riêng, không đụng block {$DOMAIN} của bot Messenger ở trên.
+hondatools.duckdns.org {
+	encode zstd gzip
+	log {
+		output file /data/loban-access.log
+		format json
+	}
+	reverse_proxy loban_agent-app-1:8000
+}

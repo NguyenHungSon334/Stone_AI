@@ -574,13 +574,15 @@ _PENDING_IMAGES: dict[str, list[str]] = {}
 _PENDING_IMAGES_MAX = 2000
 _MAX_CUSTOMER_IMAGES = 4
 # Khách gửi ảnh KHÔNG kèm chữ -> prompt để Gemini chủ động nhìn ảnh, DÒ bảng sản phẩm, gợi ý mẫu.
+# Khách gửi ảnh = ĐƯA MẪU CỦA HỌ, không phải xin xem hàng. Bản cũ bắt bot dò bảng hàng rồi
+# dội 1-3 mẫu "gần giống" kèm ảnh -> phủ đầu ý khách, khách khó tính chặn luôn. Nay chỉ nhận
+# diện ngắn + xin số + chuyển chuyên gia (brain._ANH_KHACH_GUI chặn cứng mã/ảnh/giá lượt này).
 _IMG_ONLY_PROMPT = (
-    "(Khách vừa gửi ảnh, chưa nhắn gì thêm. Hãy NHÌN KỸ ảnh và tư vấn:\n"
-    "1. Nhận diện hạng mục (mộ đá, lăng thờ, cổng, lan can...) và đặc điểm (số mái, kiểu dáng, loại đá nếu thấy).\n"
-    "2. Neu lich su truoc do da co loai da/vat lieu khach chon (dac biet granite/GRN/G20/An Do), PHAI giu loai da do khi tra gia; anh chi dung de nhan dien kieu dang, khong duoc tu doi vat lieu.\n"
-    "3. DÒ trong BẢNG SẢN PHẨM tìm 1-3 mẫu GIỐNG/gần nhất với ảnh, nêu rõ mã + tên "
-    "(nhắc mã -> hệ thống tự gửi ảnh mẫu kèm). Nếu không chắc mẫu chính xác, nói rõ đây là mẫu gần giống "
-    "cùng dòng, đừng khẳng định chắc nịch.\n"
+    "(Khách vừa gửi ảnh, chưa nhắn gì thêm. Đây là MẪU CỦA KHÁCH - khách muốn làm đúng mẫu này:\n"
+    "1. Nhận diện NGẮN 1 câu hạng mục trong ảnh (mộ đá, lăng thờ, cổng, lan can...) để khách biết em đã xem.\n"
+    "2. TUYỆT ĐỐI KHÔNG dò bảng hàng, KHÔNG nêu mã, KHÔNG gọi suggest_products, KHÔNG nêu giá.\n"
+    "3. Xin SĐT/Zalo - đã có số trong hồ sơ thì xác nhận lại số đó, KHÔNG xin lại - rồi nói "
+    "chuyên gia sẽ GỌI trao đổi đúng mẫu Bác gửi.\n"
     "4. Nếu ảnh không phải sản phẩm đá (ảnh khác/không rõ), hỏi khách cần tư vấn gì.)")
 
 

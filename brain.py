@@ -882,8 +882,11 @@ def _answer_sync(psid: str, text: str, images: list[tuple[bytes, str]] | None = 
         # Tra sẵn số liệu cho lượt này: bảng giá KHÔNG còn trong prompt, mà bot thì hay né gọi
         # tool để nhảy sang xin số điện thoại (mục tiêu ưu tiên trong persona) -> trả lời chay
         # không mẫu nào. Tra bằng code là đường chắc chắn có số thật, không phụ thuộc bot tự chọn.
-        if (pre := _prefetch(text)):
+        # Khách gửi ảnh -> KHÔNG tra sẵn mã: lượt này cấm nêu mẫu bên em (xem _ANH_KHACH_GUI).
+        if not images and (pre := _prefetch(text)):
             contents.append(types.Content(role="user", parts=[types.Part.from_text(text=pre)]))
+        if images:
+            contents.append(types.Content(role="user", parts=[types.Part.from_text(text=_ANH_KHACH_GUI)]))
         # Ảnh khách gửi: nhét bytes vào lượt hiện tại cho Gemini vision đọc (không lưu vào lịch sử).
         parts = [types.Part.from_text(text=text)]
         for data, ctype in (images or []):
@@ -918,8 +921,10 @@ def _answer_sync(psid: str, text: str, images: list[tuple[bytes, str]] | None = 
                 raise BrainError(f"API không trả nội dung. finish_reason={cand.finish_reason}")
             # Sản phẩm nhắc lần đầu trong hội thoại -> tự kèm marker ảnh (messenger bóc ra gửi).
             # Đọc <<ANH>> TRƯỚC khi bóc; sau đó reply sạch mới đem gửi + lưu lịch sử.
-            markers = _image_markers(full, reply, text, psid)
-            hua_anh_khong_co = _wants_image(reply) and not markers
+            # Lượt khách gửi ảnh: cấm dội ảnh mẫu bên em (kể cả khi khách gõ kèm mã) - khách
+            # đang đưa mẫu của họ, nhận lại một tràng mẫu khác là bị chặn.
+            markers = "" if images else _image_markers(full, reply, text, psid)
+            hua_anh_khong_co = not images and _wants_image(reply) and not markers
             reply = _bo_marker_anh(reply)
             # Lọc Markdown TRƯỚC khi gửi và trước khi lưu log: lưu bản còn '**' thì lượt sau
             # model đọc lại chính nó và học tiếp thói quen đó.
@@ -1043,6 +1048,18 @@ _GIA_LAN_2 = (
     "Lần này PHẢI báo giá thật: gọi suggest_products rồi nêu 1-2 MÃ kèm khoảng giá và kích thước "
     "tool trả về (hệ thống tự gửi ảnh báo giá theo mã). CẤM né bằng 'tuỳ công trình', CẤM đáp bằng "
     "xin số trơn.")
+
+
+_ANH_KHACH_GUI = (
+    "[KHÁCH VỪA GỬI ẢNH - mẫu / bản vẽ / công trình của RIÊNG khách]\n"
+    "Khách gửi mẫu là muốn làm ĐÚNG cái mẫu đó, không phải xin xem hàng bên em. Dội mẫu bên em "
+    "vào lúc này là phủ đầu ý khách - khách khó tính chặn luôn.\n"
+    "Tin này TUYỆT ĐỐI KHÔNG nêu mã mẫu bên em, KHÔNG gọi suggest_products, KHÔNG thêm <<ANH>>, "
+    "KHÔNG nêu con số tiền nào.\n"
+    "Làm đúng 3 việc, tối đa 3 câu: 1) nhận xét NGẮN 1 câu đúng thứ trong ảnh (hạng mục, kiểu "
+    "dáng) để khách biết em đã xem thật; 2) xin SĐT/Zalo - đã có số trong hồ sơ thì xác nhận lại "
+    "số đó, KHÔNG xin lại; 3) nói chuyên gia sẽ GỌI trao đổi đúng mẫu Bác gửi.\n"
+    "Kết tin bằng dòng <<HANDOFF:khách gửi mẫu riêng>>.")
 
 
 def _gia_prompt(hist: list, text: str, profile: dict) -> str:

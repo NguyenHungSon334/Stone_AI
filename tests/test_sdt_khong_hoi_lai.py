@@ -69,7 +69,8 @@ def test_cau_co_dinh_khong_xin_lai_so():
               messenger._cau_chuyen_nguoi_that("0912345678"),
               messenger._cau_khach_gui_anh("0912345678"))
     for cau in co_sdt:
-        assert "0912345678" in cau
+        assert "0912345678" not in cau, "Messenger gắn thẻ chuyển khoản khi thấy dãy 10 số"
+        assert "số của Bác" in cau, "vẫn phải cho khách biết là gọi vào số họ vừa cho"
         assert "xin" not in cau.lower() and "để lại" not in cau.lower(), cau
 
     for cau in (brain._cau_xin_lien_he(""), messenger._cau_chuyen_nguoi_that(""),

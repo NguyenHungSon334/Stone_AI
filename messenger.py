@@ -120,7 +120,7 @@ def _cau_chuyen_nguoi_that(sdt: str) -> str:
     'cho gặp nhân viên' là bị hỏi lại số ngay."""
     if sdt:
         return ("Dạ nội dung này em nhờ chuyên gia bên em trao đổi với Bác cho chính xác ạ. "
-                f"Chuyên gia sẽ gọi cho Bác theo số {sdt} ngay nhé!")
+                "Chuyên gia sẽ gọi cho Bác theo số của Bác ngay nhé!")
     return _HUMAN_HANDOFF_REPLY
 # Khách đang gắt: KHÔNG xin số, KHÔNG hỏi thêm, KHÔNG chào mời - chỉ nhận lỗi rồi nhường người thật.
 _XOA_DIU_REPLY = ("Dạ em xin ghi nhận phản ánh của Bác ạ. Em rất tiếc vì đã làm Bác không hài lòng. "
@@ -546,7 +546,7 @@ def _cau_khach_gui_anh(sdt: str) -> str:
     """Câu trả ảnh khách gửi (không đọc được). Đã có SĐT thì xác nhận số, không xin lại."""
     if sdt:
         return ("Dạ mẫu này bên em có khá nhiều biến thể về kích thước và loại đá ạ. "
-                f"Chuyên gia bên em sẽ liên hệ tư vấn cụ thể cho Bác theo số {sdt} ngay ạ!")
+                "Chuyên gia bên em sẽ liên hệ tư vấn cụ thể cho Bác theo số của Bác ngay ạ!")
     return _IMAGE_REPLY
 # Like/sticker lần đầu: chào hỏi mời tư vấn như bình thường (KHÔNG xin SĐT dồn).
 _STICKER_REPLY = ("Dạ em chào Bác ạ. Bác đang quan tâm hạng mục nào để em tư vấn giúp Bác ạ? "

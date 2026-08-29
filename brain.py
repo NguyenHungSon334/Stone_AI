@@ -929,6 +929,8 @@ def _answer_sync(psid: str, text: str, images: list[tuple[bytes, str]] | None = 
             # Lọc Markdown TRƯỚC khi gửi và trước khi lưu log: lưu bản còn '**' thì lượt sau
             # model đọc lại chính nó và học tiếp thói quen đó.
             reply = _sach_markdown(reply)
+            # Chốt chặn cuối cho SĐT: prompt cấm rồi model vẫn đọc lại số được. Xem util.che_sdt.
+            reply = util.che_sdt(reply)
             if hua_anh_khong_co:
                 # Khách hỏi ảnh mà Base chưa có: nói thật + xin liên hệ, thay vì để khách chờ hụt.
                 # Đã có SĐT trong hồ sơ thì KHÔNG xin lại - khách vừa cho số xong lại bị hỏi số
@@ -995,8 +997,8 @@ def ghi_sdt(psid: str, sdt: str) -> str:
 def _cau_xin_lien_he(sdt: str | None) -> str:
     """Câu chốt mời liên hệ. Có SĐT rồi thì XÁC NHẬN số đó, không xin lại."""
     if sdt:
-        return (f"Em gửi Bác bộ ảnh công trình thực tế và bản phối riêng qua Zalo {sdt} "
-                "ngay hôm nay ạ.")
+        return ("Em gửi Bác bộ ảnh công trình thực tế và bản phối riêng qua Zalo theo số của "
+                "Bác ngay hôm nay ạ.")
     return ("Bác để lại số điện thoại hoặc Zalo, em gửi Bác bộ ảnh công trình thực tế "
             "và bản phối riêng ngay hôm nay ạ.")
 
@@ -1100,7 +1102,9 @@ _CHUA_CO_SDT = ("SĐT/Zalo: CHƯA CÓ - khách chưa gõ số nào. CẤM tự n
 # -> ô SĐT phải là LỆNH CẤM, cân với _CHUA_CO_SDT ở nhánh ngược lại.
 _DA_CO_SDT = ("SĐT/Zalo: {sdt} - khách ĐÃ tự gõ số này rồi. CẤM xin số thêm lần nào nữa, dưới "
               "mọi cách nói ('cho em xin SĐT', 'Bác để lại số', 'xin số Zalo của Bác'). Cần "
-              "chuyên gia liên hệ thì nói thẳng 'em báo chuyên gia gọi lại Bác qua số {sdt}'.")
+              "chuyên gia liên hệ thì nói thẳng 'em báo chuyên gia gọi lại Bác qua số của Bác'. "
+              "CẤM viết lại chữ số của SĐT trong tin nhắn - Messenger thấy dãy 10 số "
+              "là gắn thẻ chuyển khoản ngân hàng, khách tưởng bên mình đòi tiền.")
 # Tin BỊA về SĐT: gửi phiếu hoặc khẳng định đã có số, trong khi hồ sơ chưa có số nào.
 _BIA_SDT_RE = re.compile(r"PHIẾU YÊU CẦU|đã nhận được (?:SĐT|số)|em đã có s(?:ố|đt)", re.I)
 _XIN_SO_THAY_PHIEU = (

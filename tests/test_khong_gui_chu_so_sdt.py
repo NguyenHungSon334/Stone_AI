@@ -24,3 +24,12 @@ def test_giu_nguyen_so_do_khong_phai_sdt():
 def test_cau_chot_moi_lien_he_khong_co_chu_so():
     import brain
     assert not any(c.isdigit() for c in brain._cau_xin_lien_he("0919019385"))
+
+
+def test_khong_lap_chu_so():
+    """Thay tran thi ra "goi qua so so cua Bac" -> nuot luon chu dan truoc."""
+    for cau, mong in (("Chuyên gia liên hệ Bác qua số 0919019385 ạ.",
+                       "Chuyên gia liên hệ Bác qua số của Bác ạ."),
+                      ("Em gửi qua Zalo 0919019385 nhé.", "Em gửi qua số của Bác nhé."),
+                      ("Bác cho SĐT 0919019385.", "Bác cho số của Bác.")):
+        assert util.che_sdt(cau) == mong

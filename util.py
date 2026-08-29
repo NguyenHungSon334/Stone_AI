@@ -12,7 +12,10 @@ def safe_psid(psid) -> str:
 _PHONE_RE = re.compile(r"(?<!\d)(?:\+?84|0)\d{9,10}(?!\d)")
 _PHONE_SEP_RE = re.compile(r"[\s.\-()]")
 # Cùng dạng SĐT nhưng GIỮ NGUYÊN vị trí (cho phép dấu cách/chấm/gạch ở giữa) -> thay tại chỗ.
-_PHONE_INLINE_RE = re.compile(r"(?<![\d+])(?:\+?84|0)[\s.\-]?\d(?:[\s.\-]?\d){8,9}(?!\d)")
+# Nuốt luôn chữ "số/sđt/zalo" đứng trước: thay trần thì ra "gọi qua số số của Bác".
+_PHONE_INLINE_RE = re.compile(
+    r'(?:\b(?:s(?:ố|o)|sđt|sdt|zalo)\s+)?(?<![\d+])(?:\+?84|0)[\s.\-]?\d(?:[\s.\-]?\d){8,9}(?!\d)',
+    re.I)
 
 
 def tim_sdt(text: str) -> str:

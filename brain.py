@@ -86,8 +86,9 @@ _TOOLS = [types.Tool(function_declarations=[types.FunctionDeclaration(
                  "ghi chú - danh sách trong system prompt CHỈ có mã/tên/danh mục. Gọi được nhiều "
                  "lần trong một lượt, và PHẢI gọi lại cho từng hạng mục khi khách hỏi cả công "
                  "trình (mộ, long đình, hàng rào, cổng...). Kết hợp tự do các bộ lọc: 'kind' "
-                 "(thể loại), 'q' (từ khoá tên, vd 'mộ tròn'), 'max'/'min' (tầm giá), 'stone', "
-                 "'category', hoặc 'product_ids' cho mẫu đã biết mã. Kết quả gồm mã, tên, danh "
+                 "(thể loại), 'q' (từ khoá tên, vd 'mộ tròn'), 'size' (kích thước khách nêu, "
+                 "vd '81x127'), 'max'/'min' (tầm giá), 'stone', 'category', hoặc 'product_ids' "
+                 "cho mẫu đã biết mã. Kết quả gồm mã, tên, danh "
                  "mục, kích thước, trọng lượng và giá THEO TỪNG LOẠI ĐÁ, sắp xếp giá tăng dần. "
                  "Trả TỐI ĐA 3 mẫu tiêu biểu - đừng liệt kê cả bảng, khách cần thêm thì gọi lại "
                  "với 'exclude_ids' là các mã đã gửi (cùng bộ lọc mà thiếu exclude_ids sẽ trả "
@@ -100,6 +101,11 @@ _TOOLS = [types.Tool(function_declarations=[types.FunctionDeclaration(
             "kind": {"type": "string", "enum": kinds_available(),
                      "description": "Thể loại sản phẩm - dùng khi khách hỏi cả một nhóm hàng"},
             "q": {"type": "string", "description": "Từ khoá tên sản phẩm, vd 'mộ tròn', 'mộ 3 cấp', 'cổng tứ trụ'. Mọi từ phải khớp"},
+            "size": {"type": "string",
+                     "description": "Kích thước khách nêu, nguyên văn: '81x127', '89 x 147', "
+                                    "'810x1270mm'. Số nhỏ hiểu là cm (thước Lỗ Ban) và tự quy "
+                                    "ra mm. BẮT BUỘC truyền khi khách nói kích thước - q chỉ dò "
+                                    "TÊN mẫu nên không lọc được theo cỡ"},
             "max": {"type": "string", "description": "Giá tối đa, vd '100tr', '1.5 tỷ', '100000000'"},
             "min": {"type": "string", "description": "Giá tối thiểu, mặc định 0"},
             "stone": {"type": "string", "description": "Loại đá: xanh đen, xanh rêu, xám BĐ, GRN, xanh Bình Định, trắng Yên Bái"},
@@ -343,15 +349,16 @@ def _run_tool(name: str, inp: dict, ngan_sach: dict | None = None) -> str:
         mx = parse_money(raw_max) if raw_max else None
         if mx is not None and mx <= 0:
             return f"Không đọc được tầm giá '{raw_max}'. Ghi kiểu '100tr' hoặc '1.5 tỷ'."
-        if mx is None and not (kind or q or inp.get("category") or inp.get("stone")):
-            return "Cần ít nhất một điều kiện: 'kind', 'q', 'max' hoặc 'product_ids'."
+        size = inp.get("size")
+        if mx is None and not (kind or q or size or inp.get("category") or inp.get("stone")):
+            return "Cần ít nhất một điều kiện: 'kind', 'q', 'size', 'max' hoặc 'product_ids'."
         mn = parse_money(inp.get("min", "0"))
         results = search(mx, mn if mn > 0 else 0.0, inp.get("stone"), inp.get("category"),
                          # Chốt trần _MAX_GOI_Y mẫu/lượt: khách hỏi "cho xem long đình" mà dội
                          # cả bảng thì tin dài, khách không chọn nổi. Muốn thêm thì gọi tool lại
                          # với exclude_ids.
                          min(int(inp.get("limit") or _MAX_GOI_Y), _MAX_GOI_Y), kind, q,
-                         inp.get("exclude_ids"))
+                         inp.get("exclude_ids"), size)
         results = _da_dua(ngan_sach, results)
         if not results and ngan_sach is not None and int(ngan_sach.get("con", 1)) <= 0:
             # Hết ngân sách chứ KHÔNG phải hết hàng - nói rõ để AI đừng đi tìm bộ lọc khác rồi
@@ -359,6 +366,14 @@ def _run_tool(name: str, inp: dict, ngan_sach: dict | None = None) -> str:
             return (f"Đã đưa đủ {_MAX_GOI_Y} mẫu cho lượt này - ĐỦ RỒI, không tra thêm. Viết tin "
                     "với đúng các mẫu đã có; khách muốn xem thêm thì lượt sau gọi lại tool.")
     if not results:
+        # Lọc theo kích thước mà rỗng = bảng hàng KHÔNG có mẫu đúng cỡ đó. Bỏ 'size' rồi tra lại
+        # là đưa mẫu lệch hạng kích thước cho khách (ca thật: khách xin 81x127, bot đưa 97x147,
+        # khách bỏ đi) -> cấm hẳn, chuyển sang lối hàng đặt riêng.
+        if not ids and inp.get("size"):
+            return (f"Bảng hàng không có mẫu nào đúng kích thước '{inp.get('size')}'. TUYỆT ĐỐI "
+                    "không tra lại bằng cách bỏ 'size' và không đưa mẫu cỡ khác: nói đây là hàng "
+                    "xưởng nhận ĐẶT LÀM RIÊNG theo đúng kích thước của khách, giá chuyên gia báo "
+                    "theo thực tế.")
         # Nói RÕ thiếu ở đâu + gợi ý bộ lọc hợp lệ: bot trượt 1 lần thì thử lại được, thay vì
         # bỏ cuộc trả lời chay không mẫu nào (lỗi cũ hay gặp nhất).
         return ("Không có mẫu nào khớp. Thử nới tầm giá, bỏ bớt điều kiện, hoặc lọc bằng "

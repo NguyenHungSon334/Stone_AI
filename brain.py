@@ -719,6 +719,32 @@ def _now_str() -> str:
 _RETRY_STATUS = {499, 500, 503, 504}
 
 
+# Model từ chối thinking_config (400) -> nhớ lại, lần sau khỏi tốn 1 request để biết.
+_KHONG_THINKING: set[str] = set()
+
+
+def _goi_1_lan(client, kw: dict):
+    """1 lần generate_content, có gỡ thinking_config nếu model không nhận.
+
+    gemini-3.5-flash-lite trả 400 INVALID_ARGUMENT cho thinking_budget=0 (2.5 và 3.1 thì nhận).
+    Tắt suy luận chỉ để tiết kiệm token - không đáng đánh đổi cả lượt khách - nên gặp 400 thì
+    bỏ thinking_config rồi gọi lại, và nhớ model đó để lần sau đi thẳng."""
+    cfg = kw.get("config")
+    co_think = getattr(cfg, "thinking_config", None) is not None
+    if co_think and kw.get("model") in _KHONG_THINKING:
+        kw = {**kw, "config": cfg.model_copy(update={"thinking_config": None})}
+        co_think = False
+    try:
+        return client.models.generate_content(**kw)
+    except genai_errors.APIError as e:
+        if getattr(e, "code", None) != 400 or not co_think:
+            raise
+        print(f"[gemini] {kw.get('model')} không nhận thinking_config -> gọi lại, để suy luận mặc định",
+              file=sys.stderr)
+        _KHONG_THINKING.add(kw.get("model"))
+        return client.models.generate_content(**{**kw, "config": cfg.model_copy(update={"thinking_config": None})})
+
+
 def _generate(client, tries: int = 4, **kw):
     """generate_content + retry lỗi tạm (499/500/503/504). 4 lần, backoff 2s/4s/8s.
 
@@ -729,7 +755,7 @@ def _generate(client, tries: int = 4, **kw):
     last = None
     for i in range(tries):
         try:
-            return client.models.generate_content(**kw)
+            return _goi_1_lan(client, kw)
         except genai_errors.APIError as e:          # gồm cả ClientError (499) lẫn ServerError (5xx)
             if getattr(e, "code", None) not in _RETRY_STATUS:
                 raise

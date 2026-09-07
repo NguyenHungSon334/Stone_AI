@@ -1331,13 +1331,17 @@ async def _process_inner(psid: str, text: str, user_at: str | None = None) -> No
                                 f"PSID: {psid}\nLý do: {noise.get('count')} tương tác nhiễu liên tiếp, gồm sticker.\n"
                                 "Bot sẽ tự mở lại khi khách gửi nội dung có ý nghĩa.")
             return
-        _STICKER_COUNT[psid] = 0
         # Like/sticker/icon: lần đầu chào hỏi mời tư vấn; lần 2 liên tiếp -> im + báo admin.
+        # (Trước đây có dòng gán _STICKER_COUNT[psid] = 0 ngay trên đây -> n LUÔN = 1: bot chào
+        #  lại mỗi lần khách thả tim và không bao giờ tới nhánh báo admin.)
         n = _STICKER_COUNT.get(psid, 0) + 1
         if len(_STICKER_COUNT) > _STICKER_COUNT_MAX:   # ponytail: chặn phình, xoá sạch (thô nhưng đủ)
             _STICKER_COUNT.clear()
         _STICKER_COUNT[psid] = n
-        if n == 1:
+        # Khách ĐÃ gõ chữ rồi thì câu chào "Bác đang quan tâm hạng mục nào" là bot quên sạch hội
+        # thoại: ca thật 37 lần/tuần, có ca bắn ngay sau PHIẾU YÊU CẦU đã chốt xong nhu cầu +
+        # SĐT. Thả tim giữa/cuối hội thoại là khách tán thành, không phải mở lời mới -> im.
+        if n == 1 and await _off(brain.is_new_customer, psid):
             await send_text(psid, _STICKER_REPLY)
             await brain.ghi_luot_async(psid, "", _STICKER_REPLY)
         elif n == 2:

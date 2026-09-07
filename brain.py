@@ -65,7 +65,11 @@ _MODEL_ALIAS = {"flash": "gemini-3.5-flash", "pro": "gemini-2.5-pro",
 # LƯU Ý bản preview làm model chính: gemini-3-flash-preview từng dính 504/503 liên tục kể cả
 # với tin "Xin chào" (commit 3a508ee phải quay về 2.5). Theo dõi cảnh báo "QUÁ TẢI" trên
 # dashboard; rơi dự phòng liên tục thì đổi BOT_MODEL về gemini-2.5-flash, KHÔNG cần deploy lại.
-_FALLBACK_MODEL = "gemini-2.5-flash-lite"
+# 07/09/2026: gemini-2.5-flash-lite bị Google gỡ dần, trả 404 NOT_FOUND kèm lời nhắn chuyển sang
+# 3.5-flash-lite (35 lần/tuần trong log). Model dự phòng chết là hỏng CẢ HAI đường dùng nó: nhịp
+# cứu khi model chính quá tải, và _comment_intent_sync - lỗi ở đó fail-open nên mọi comment đều
+# bị coi là có nhu cầu rồi nhắn riêng, kể cả khen suông.
+_FALLBACK_MODEL = "gemini-3.5-flash-lite"
 
 # Tắt thinking: tư vấn bán hàng theo kịch bản không cần suy luận sâu, mà thinking tính tiền như
 # output + kéo dài thời gian sinh -> chậm, đắt, dễ dính deadline 504 lúc Gemini tải cao.

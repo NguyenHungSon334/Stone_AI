@@ -126,6 +126,51 @@ def khoa_nhan(psid: str, ly_do: str, nguon: str, gio: float = 0.0) -> None:
           khoa_luc=time.time(), paused_until=(time.time() + gio * 3600) if gio else 0)
 
 
+def ghi_den_luc(psid: str, ts: float | None = None) -> None:
+    """Ghi mốc khách ĐẾN LẦN ĐẦU (chỉ ghi 1 lần, lần sau bỏ qua).
+
+    Dashboard lọc khách theo tháng bằng mốc này. Không thể lấy từ stats: bản ghi gộp theo ngày
+    bỏ psid; cũng không lấy được từ mtime file (đó là lần nhắn CUỐI). Khách cũ chưa có mốc thì
+    chạy `python bot_tools/backfill_den_luc.py` một lần để dò từ lịch sử chat."""
+    if get(psid).get("den_luc"):
+        return
+    patch(psid, den_luc=float(ts or time.time()))
+
+
+def thang_den_tat_ca() -> dict[str, str]:
+    """{psid: 'YYYY-MM'} theo mốc khách ĐẾN. Khách chưa có mốc thì không có mặt trong dict.
+
+    Một lần đọc cả node (fb.fetch_states có cache) - lọc khách theo tháng mà đọc từng khách là
+    vài trăm vòng mạng cho mỗi lần bấm."""
+    states = fb.fetch_states()
+    if states is None:                       # Firebase tắt/lỗi -> cache của riêng máy này
+        states = {}
+        for p in _DIR.glob("*.state.json"):
+            st = util.read_json(p, {})
+            if isinstance(st, dict):
+                states[p.name[: -len(".state.json")]] = st
+    out: dict[str, str] = {}
+    for psid, st in states.items():
+        if not isinstance(st, dict):
+            continue
+        ts = float(st.get("den_luc") or 0)
+        if ts > 0:
+            out[psid] = time.strftime("%Y-%m", time.localtime(ts))
+    return out
+
+
+def danh_dau_handoff(psid: str, kho_chiu: bool = False) -> None:
+    """Ghi lên CHÍNH KHÁCH rằng lượt này phải chuyển người thật.
+
+    Stats chỉ đếm được LƯỢT: bản ghi gộp theo ngày bỏ psid, sự kiện thô giữ 2 ngày. Muốn biết
+    "bao nhiêu KHÁCH từng cần chuyên gia" thì phải đánh dấu ở đây - cờ khách không bị dọn."""
+    st = get(psid)
+    them = {"handoff_lan": int(st.get("handoff_lan") or 0) + 1, "handoff_luc": time.time()}
+    if kho_chiu:
+        them["kho_chiu_lan"] = int(st.get("kho_chiu_lan") or 0) + 1
+    patch(psid, **them)
+
+
 def mo_khoa(psid: str, boi: str = "admin") -> None:
     """Mở khoá, cho bot nhắn lại khách này."""
     patch(psid, no_contact=False, stopped=False, paused_until=0, count=0, recent=[],

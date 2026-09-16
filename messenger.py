@@ -1278,6 +1278,7 @@ async def _process_inner(psid: str, text: str, user_at: str | None = None) -> No
     # từ nay các nhánh đó cũng ghi log (brain.ghi_luot) -> để sau là seed vĩnh viễn không chạy
     # nữa, khách cũ bấm quảng cáo bị tiếp như người lạ.
     # True = khách im >=24h rồi nhắn lại -> ép tóm tắt lại ô Ghi chú CRM ở cuối lượt.
+    await _off(state.ghi_den_luc, psid)       # mốc khách đến lần đầu (lọc khách theo tháng)
     quay_lai = await returning.xu_ly_khach_quay_lai(psid)
     if quay_lai and text in (_IMG_EVENT, _STICKER_EVENT, _REFERRAL_EVENT):
         # Ba nhánh sự kiện dưới đây thoát sớm ở NHIỀU chỗ và không nhánh nào chạm CRM: khách cũ
@@ -1391,6 +1392,7 @@ async def _process_inner(psid: str, text: str, user_at: str | None = None) -> No
             doi_ngung = forced == _LY_DO_DOI_NGUNG
             kho_chiu = forced in _LY_DO_KHO_CHIU
             stats.log_event("khach_kho_chiu" if kho_chiu else "handoff", psid)
+            await _off(state.danh_dau_handoff, psid, kho_chiu)
             # Khách đang gắt: câu mời để lại SĐT lúc này chỉ đổ thêm dầu -> xoa dịu rồi im.
             # force: tin xoa dịu là tin ĐẶT RA cái khoá, không được tự chặn chính nó.
             # Nhánh này THOÁT SỚM (không qua brain.answer): số khách gõ trong chính tin này phải
@@ -1439,6 +1441,7 @@ async def _process_inner(psid: str, text: str, user_at: str | None = None) -> No
         if pause_reason:
             # Khách khó chịu: gửi NỐT tin xoa dịu (im bặt giữa chừng còn khó chịu hơn), rồi im.
             stats.log_event("khach_kho_chiu", psid)
+            await _off(state.danh_dau_handoff, psid, True)
             await _off(_pause_bot, psid, pause_reason)
             if reply:
                 await send_text(psid, reply, force=True)   # tin cuối, gửi trước khi khoá có hiệu lực
@@ -1454,6 +1457,7 @@ async def _process_inner(psid: str, text: str, user_at: str | None = None) -> No
             # Ảnh phải gửi ở đây: bot vẫn giữ cuộc chat sau handoff, bỏ ảnh là khách hỏi mẫu
             # xong chỉ nhận chữ trơn đúng lúc đang quan tâm nhất.
             stats.log_event("handoff", psid, duration_s=time.monotonic() - t0)
+            await _off(state.danh_dau_handoff, psid)
             if reply:
                 await send_text(psid, reply)
             await _send_images(psid, imgs)

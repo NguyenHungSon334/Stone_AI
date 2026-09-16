@@ -54,10 +54,6 @@ _PROFILE_LABELS = {
 }
 # SĐT: dùng chung util.tim_sdt (xem util.py) - đừng dựng lại regex riêng ở đây.
 
-# BOT_MODEL: alias -> model id API. Có dấu '.' hoặc bắt đầu 'gemini' thì coi là id đầy đủ.
-_MODEL_ALIAS = {"flash": "gemini-3.5-flash", "pro": "gemini-2.5-pro",
-                "lite": "gemini-2.5-flash-lite"}
-
 # Model chính "high demand" (503) là quá tải của RIÊNG model đó -> đổi sang model khác thường
 # chạy được ngay. Chỉ dùng khi model chính đã thua hết lượt retry.
 # Phải KHÁC model chính mới có nghĩa; lấy bản lite (pool riêng, nhẹ nhất) - hợp vì nhịp dự
@@ -144,8 +140,7 @@ def _get_client() -> genai.Client:
 
 
 def _model_id() -> str:
-    m = config.MODEL
-    return _MODEL_ALIAS.get(m, m)
+    return config.model_id()      # alias + bảng giá dùng chung 1 chỗ, xem config.MODEL_ALIAS
 
 
 def _system_text() -> str:
@@ -185,7 +180,9 @@ def _code_pattern() -> re.Pattern:
     codes = set()
     for line in csv_text.splitlines()[1:]:
         code = line.split(",", 1)[0].strip().upper()
-        if re.fullmatch(r"[A-Z]{1,5}\d{1,4}", code):
+        # Chữ CÓ DẤU cũng là mã: bảng hàng mới có LĐ01, CĐ02, ĐĐ03 - [A-Z] cũ bỏ sạch,
+        # bot nhắc mã trong câu trả lời mà không nhận ra nên không gửi kèm ảnh.
+        if re.fullmatch(r"[^\W\d_]{1,5}\d{1,4}", code):
             codes.add(code)
     alts = "|".join(re.escape(c) for c in sorted(codes, key=len, reverse=True)) or r"(?!x)x"
     pat = re.compile(rf"\b({alts})(?:\.\d+)?\b", re.IGNORECASE)
@@ -939,13 +936,16 @@ def _answer_sync(psid: str, text: str, images: list[tuple[bytes, str]] | None = 
         contents.append(types.Content(role="user", parts=parts))
 
         handle = _cached_handle(client, model_id)     # None -> nhồi thẳng (fallback)
-        tok_in = tok_out = 0
+        tok_in = tok_out = tok_cache = 0
         ngan_sach = {"con": _MAX_GOI_Y}      # trần mẫu cho CẢ lượt, dùng chung mọi vòng gọi tool
         for _ in range(_MAX_TOOL_LOOPS):
             resp, handle = _gen_answer(client, model_id, contents, handle)
             u = resp.usage_metadata
             if u:
                 tok_in += u.prompt_token_count or 0
+                # Phần ĐÃ CACHE nằm TRONG prompt_token_count nhưng Google tính rẻ hơn nhiều.
+                # Tách ra để dashboard khỏi tính cả system prompt 12k/lượt theo giá input đầy đủ.
+                tok_cache += getattr(u, "cached_content_token_count", 0) or 0
                 # thinking tính giá như output -> gộp chung
                 tok_out += (u.candidates_token_count or 0) + (u.thoughts_token_count or 0)
             cand = (resp.candidates or [None])[0]
@@ -987,7 +987,7 @@ def _answer_sync(psid: str, text: str, images: list[tuple[bytes, str]] | None = 
             if not reply:
                 raise BrainError("API chỉ trả marker ảnh, không có chữ.")
             reply_out = f"{reply} {markers}" if markers else reply   # marker CHỈ để gửi, KHÔNG lưu history
-            stats.log_usage(psid, tok_in, tok_out)
+            stats.log_usage(psid, tok_in, tok_out, tok_cache)
             # Nối vào log SẠCH: chỉ text turn (bỏ vòng tool trung gian) -> không orphan tool block.
             # "at" = thời gian cụ thể: khách gửi lúc nào, bot trả lúc nào.
             # Ảnh không lưu bytes vào log -> ghi chú số ảnh để lượt sau còn biết khách từng gửi ảnh.

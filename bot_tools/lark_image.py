@@ -1,5 +1,5 @@
 """
-Lấy ảnh sản phẩm từ Lark Base (Bitable), cột Ảnh, theo Mã Sản Phẩm.
+Lấy ảnh sản phẩm từ Lark Base (Bitable), các cột ảnh (LARK_IMAGE_FIELDS), theo Mã sản phẩm.
 
 - Base quốc tế larksuite.com -> API domain open.larksuite.com (đổi qua LARK_DOMAIN nếu là feishu.cn).
 - Biến thể mã (M01.2, LD03.1) dùng CHUNG ảnh mã gốc -> cắt phần sau dấu chấm khi tra.
@@ -98,7 +98,7 @@ def get_image_tokens(product_id: str) -> list[str]:
     url = (f"{config.LARK_DOMAIN}/open-apis/bitable/v1/apps/{config.LARK_BASE_APP_TOKEN}"
            f"/tables/{config.LARK_TABLE_ID}/records/search")
     body = {
-        "field_names": [config.LARK_PRODUCT_FIELD, config.LARK_IMAGE_FIELD],
+        "field_names": [config.LARK_PRODUCT_FIELD, *config.LARK_IMAGE_FIELDS],
         "filter": {"conjunction": "and", "conditions": [
             {"field_name": config.LARK_PRODUCT_FIELD, "operator": "is", "value": [code]}]},
         "automatic_fields": False,
@@ -110,15 +110,18 @@ def get_image_tokens(product_id: str) -> list[str]:
     out: list[str] = []
     bo: list[str] = []
     for item in (d.get("data", {}).get("items") or []):
-        cell = (item.get("fields") or {}).get(config.LARK_IMAGE_FIELD)
-        for att in (cell or []):
-            ft = att.get("file_token")
-            if not ft:
-                continue
-            if _la_anh(att):
-                out.append(ft)
-            else:
-                bo.append(str(att.get("name") or "?"))
+        fields = item.get("fields") or {}
+        # Gộp nhiều cột ảnh theo THỨ TỰ khai báo (Ảnh chính trước, Ảnh phụ sau) -> ảnh đại
+        # diện luôn là ảnh đầu tiên khách thấy.
+        for cot in config.LARK_IMAGE_FIELDS:
+            for att in (fields.get(cot) or []):
+                ft = att.get("file_token")
+                if not ft or ft in out:
+                    continue
+                if _la_anh(att):
+                    out.append(ft)
+                else:
+                    bo.append(str(att.get("name") or "?"))
     if bo:
         print(f"[lark] mã {code}: bỏ {len(bo)} tệp không phải ảnh trong cột Ảnh: "
               + ", ".join(bo[:5]), file=sys.stderr)

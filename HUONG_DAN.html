@@ -688,9 +688,8 @@ pip install -r requirements.txt</code></pre>
 
     <div class="note crit">
       <b class="tag">Ô nhập không ghi được token và mật khẩu</b>
-      <p>Tab Cài đặt <b>chỉ ghi được 4 mục</b>: <code>BOT_MODEL</code>,
-      <code>BOT_ADMIN_UIDS</code>, <code>BOT_PER_PSID_RATE_S</code>,
-      <code>BOT_MAX_CONCURRENT</code>. Các ô bí mật vẫn hiện ra mời điền, nhưng giá trị bị
+      <p>Tab Cài đặt <b>chỉ ghi được 3 mục</b>: <code>BOT_MODEL</code>,
+      <code>BOT_ADMIN_UIDS</code>, <code>BOT_MAX_CONCURRENT</code>. Các ô bí mật vẫn hiện ra mời điền, nhưng giá trị bị
       <b>bỏ đi im lặng</b> mà giao diện vẫn báo lưu thành công. Muốn đổi token thì sửa
       <code>.env</code> qua SSH:</p>
 <pre><code>gcloud compute ssh hon-da-vps --zone=us-central1-a
@@ -987,7 +986,6 @@ gcloud compute ssh hon-da-vps --zone=us-central1-a \
           <tr><td><code>BOT_MODEL</code></td><td><code>flash</code></td><td><code>lite</code> / <code>flash</code> / <code>pro</code> hoặc model id đầy đủ</td><td><span class="chip on">ăn ngay</span></td></tr>
           <tr><td><code>BOT_ADMIN_UIDS</code></td><td>—</td><td>PSID người trực, cách nhau dấu phẩy</td><td><span class="chip on">ăn ngay</span></td></tr>
           <tr><td><code>BOT_DASH_TOKEN</code></td><td>—</td><td>Mật khẩu trang quản trị. Trống = tắt trang</td><td><span class="chip on">ăn ngay</span></td></tr>
-          <tr><td><code>BOT_PER_PSID_RATE_S</code></td><td><code>3</code></td><td>Giãn cách tối thiểu giữa 2 tin cùng một khách</td><td><span class="chip on">ăn ngay</span></td></tr>
           <tr><td><code>BOT_MAX_CONCURRENT</code></td><td><code>4</code></td><td>Số khách xử lý song song</td><td><span class="chip warn">restart</span></td></tr>
           <tr><td><code>PORT</code></td><td><code>7900</code></td><td>Cổng lắng nghe</td><td><span class="chip warn">restart</span></td></tr>
         </tbody>
@@ -1095,8 +1093,7 @@ gcloud compute ssh hon-da-vps --zone=us-central1-a \
         <b>Gom tin rồi mới trả lời</b>
         <p>Khách hay gõ 3–4 tin liền. Bot chờ khoảng 4 giây gom lại thành một lượt, để không
         trả lời cắt ngang câu đang gõ dở. Cùng lúc có tối đa <b>4</b> khách được xử lý
-        (<code>BOT_MAX_CONCURRENT</code>), và hai tin gửi cùng một khách cách nhau tối thiểu
-        <b>3 giây</b> (<code>BOT_PER_PSID_RATE_S</code>).</p>
+        (<code>BOT_MAX_CONCURRENT</code>).</p>
       </li>
       <li>
         <b>Dựng lại ngữ cảnh</b>

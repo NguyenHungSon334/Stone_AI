@@ -227,12 +227,24 @@ td .psid{color:var(--ink);font-weight:700}
     </div>
 
     <div class="band-title">
+      <h2>Từ trước tới nay</h2>
+    </div>
+    <p class="hint" id="tongNote" style="margin:8px 0 0">đang tải...</p>
+    <div class="specs" id="tongCells" style="margin-top:24px"></div>
+
+    <div class="band-title" style="margin-top:56px">
       <h2>Chỉ số vận hành</h2>
       <div class="range-picker">
         <button data-days="7" class="active">7 ngày</button>
         <button data-days="30">30 ngày</button>
+        <select id="thangPicker" title="Xem đúng một tháng"
+                style="padding:6px 8px;border:1px solid var(--hairline);border-radius:8px;
+                       background:var(--surface-soft);color:inherit;font:inherit">
+          <option value="">Theo tháng...</option>
+        </select>
       </div>
     </div>
+    <p class="hint" id="kyNote" style="margin:8px 0 0">đang tải...</p>
     <div class="specs" id="specCells" style="margin-top:24px"></div>
 
     <div class="chart-band">
@@ -288,10 +300,15 @@ td .psid{color:var(--ink);font-weight:700}
         <input id="custSearch" placeholder="Tìm theo tên hoặc PSID..." spellcheck="false"
                style="flex:1;min-width:220px;padding:10px 12px;border:1px solid var(--hairline);
                       border-radius:8px;background:var(--surface-soft);color:inherit;font:inherit">
+        <select id="custThang" title="Lọc theo tháng khách đến lần đầu"
+                style="padding:10px 12px;border:1px solid var(--hairline);border-radius:8px;
+                       background:var(--surface-soft);color:inherit;font:inherit">
+          <option value="">Mọi tháng</option>
+        </select>
         <span class="label" id="custCount" style="color:var(--muted)"></span>
       </div>
       <table>
-        <thead><tr><th>Tên khách</th><th>PSID</th><th>Số tin</th><th>Lần cuối</th><th>Tin gần nhất</th><th>Trạng thái</th><th></th></tr></thead>
+        <thead><tr><th>Tên khách</th><th>PSID</th><th>Số tin</th><th>Đến</th><th>Lần cuối</th><th>Tin gần nhất</th><th>Trạng thái</th><th></th></tr></thead>
         <tbody id="customerRows"></tbody>
       </table>
       <div style="margin-top:16px;text-align:center">
@@ -363,11 +380,6 @@ td .psid{color:var(--ink);font-weight:700}
           <label class="label">Admin PSID (nhận báo lỗi / handoff)</label>
           <input id="envAdmins" placeholder="123456,789012">
           <p class="hint">Nhiều admin cách nhau dấu phẩy.</p>
-        </div>
-        <div class="field">
-          <label class="label">Giãn tin mỗi khách (giây)</label>
-          <input id="envRate" type="number" min="0" step="0.5">
-          <p class="hint">Khách nhắn nhanh hơn mức này bị bỏ qua (chống spam).</p>
         </div>
         <div class="field">
           <label class="label">Số khách xử lý đồng thời</label>
@@ -455,16 +467,31 @@ document.querySelectorAll(".tab").forEach(b => b.onclick = () => {
 });
 
 /* ===== Tổng quan ===== */
-let days = 7;
+let days = 7, thang = "";
 document.querySelectorAll(".range-picker button").forEach(b => b.onclick = () => {
   document.querySelectorAll(".range-picker button").forEach(x => x.classList.remove("active"));
   b.classList.add("active");
   days = +b.dataset.days;
+  thang = "";                                   // chọn lại "N ngày" thì bỏ lọc tháng
+  document.getElementById("thangPicker").value = "";
   loadOverview();
 });
+document.getElementById("thangPicker").onchange = e => {
+  thang = e.target.value;
+  // Đang xem 1 tháng cụ thể thì 2 nút kỳ không còn đúng nữa -> bỏ trạng thái active.
+  document.querySelectorAll(".range-picker button").forEach(x =>
+    x.classList.toggle("active", !thang && +x.dataset.days === days));
+  loadOverview();
+};
 
-function cell(value, label, cls = "") {
-  return `<div class="spec"><div class="v ${cls}">${value}</div><div class="l label">${label}</div></div>`;
+function tenThang(m) {
+  const [y, t] = m.split("-");
+  return "Tháng " + Number(t) + "/" + y;
+}
+
+function cell(value, label, cls = "", title = "") {
+  const t = title ? ` title="${title}"` : "";
+  return `<div class="spec"${t}><div class="v ${cls}">${value}</div><div class="l label">${label}</div></div>`;
 }
 
 function fmtTokens(n) {
@@ -477,32 +504,88 @@ function fmtTokens(n) {
 function skeletonSpecs() {                          // ô số hiện shimmer trong lúc tải lần đầu
   const el = document.getElementById("specCells");
   if (!el.children.length)
-    el.innerHTML = Array(10).fill(0).map(() =>
+    el.innerHTML = Array(16).fill(0).map(() =>
       `<div class="spec skel" style="height:96px"></div>`).join("");
 }
 
 async function loadOverview(silent = false) {
   if (!silent) skeletonSpecs();
   try {
-    const d = await api("/admin/api/overview?days=" + days, silent);
+    const d = await api("/admin/api/overview?days=" + days
+                        + (thang ? "&thang=" + thang : ""), silent);
+    // Ô chọn tháng dựng theo tháng CÓ SỐ thật, không đoán trước.
+    const sel = document.getElementById("thangPicker");
+    const co = (d.thang_co || []).join(",");
+    if (sel.dataset.co !== co) {
+      sel.dataset.co = co;
+      sel.innerHTML = '<option value="">Theo tháng...</option>'
+        + (d.thang_co || []).map(m => `<option value="${m}">${tenThang(m)}</option>`).join("");
+      sel.value = thang;
+    }
     const s = d.stats, c = s.counts;
     document.getElementById("statusDot").className = "dot" + (d.configured ? "" : " off");
     document.getElementById("statusText").textContent =
       (d.configured ? "Bot đang cấu hình đủ" : "THIẾU cấu hình PAGE_TOKEN") + " · model: " + d.model;
 
+    // --- Khối "từ trước tới nay": đếm theo NGƯỜI (cờ khách), không bị prune dọn mất ---
+    const t = d.tong_the || {};
+    document.getElementById("tongNote").textContent =
+      "Khách tính từ lúc mở bot. Lượt + chi phí tính từ ngày bắt đầu ghi thống kê ("
+      + (t.tu_ngay || "?") + ")" + (t.nguon_khach === "local" ? " · CHƯA nối được Firebase, "
+      + "số khách chỉ tính máy này" : "") + ".";
+    document.getElementById("tongCells").innerHTML =
+      cell(t.khach_tong ?? "--", "Tổng khách") +
+      cell(t.khach_da_chot_crm ?? "--", "Khách đã vào CRM", "",
+           "Bot thu đủ thông tin và đã ghi lead sang Lark Base.") +
+      cell(t.khach_tung_handoff ?? "--", "Khách từng cần chuyên gia", "",
+           "Đếm theo NGƯỜI, chỉ tính từ " + (t.handoff_tu_ngay || "?")
+           + " (trước đó thống kê không lưu mã khách nên không dựng lại được).") +
+      cell(t.khach_kho_chiu ?? "--", "Khách bot ngưng nhắn", t.khach_kho_chiu ? "warn" : "",
+           "Khách khó chịu hoặc tự yêu cầu ngừng - bot không chủ động nhắn nữa.") +
+      cell(t.khach_bot_ngung_nhieu ?? "--", "Khách bot dừng vì nhiễu", "",
+           "Nhiều tin mơ hồ/sticker liên tiếp. Bot tự mở lại khi khách nhắn nội dung thật.") +
+      cell(fmtTokens(t.luot_ok || 0), "Lượt trả lời") +
+      cell(fmtTokens(t.luot_handoff || 0), "Lượt chuyển chuyên gia", "",
+           "LƯỢT, không phải người: một khách quay lại nhiều lần được tính nhiều lần.") +
+      cell("$" + (t.cost_usd || 0).toFixed(2), "Tổng chi phí AI");
+
+    document.getElementById("kyNote").textContent = s.thang
+      ? "Đang xem " + tenThang(s.thang) + " (" + s.days + " ngày có số). Các ô dưới đây đếm LƯỢT."
+      : "Các ô dưới đây đếm LƯỢT trong " + s.days + " ngày gần nhất - khách nhắn nhiều lần được "
+        + "tính nhiều lần. Số theo NGƯỜI xem ở khối trên.";
     const rate = s.success_rate;
     const rateCls = rate == null ? "" : rate >= 95 ? "good" : rate >= 80 ? "warn" : "bad";
+    const n = k => c[k] || 0;
+    // Nhiễu = mọi ca bot chủ động im (tin mơ hồ liên tiếp, sticker rác, spam bị chặn).
+    // Ô cũ đọc `rate_limited` - loại sự kiện KHÔNG chỗ nào ghi, nên vĩnh viễn hiện 0.
+    const nhieu = n("noise_blocked") + n("noise_stop") + n("sticker_blocked")
+                + n("sticker_stop") + n("rate_limited");
+    const gia = s.gia || {};
     document.getElementById("specCells").innerHTML =
-      cell(rate == null ? "--" : rate + "%", "Tỉ lệ thành công", rateCls) +
-      cell(s.total_handled, "Tin đã xử lý") +
-      cell(s.active_customers, "Khách hoạt động") +
-      cell(d.total_customers, "Tổng khách từ trước") +
-      cell(s.avg_reply_s == null ? "--" : s.avg_reply_s + "s", "Trả lời trung bình") +
-      cell(c.handoff, "Chuyển chuyên gia", c.handoff ? "warn" : "") +
-      cell(c.error, "Lỗi", c.error ? "bad" : "good") +
-      cell(c.rate_limited, "Chặn spam") +
-      cell(fmtTokens(s.tokens_in + s.tokens_out), "Token đã dùng") +
-      cell("$" + (s.cost_usd || 0).toFixed(s.cost_usd >= 1 ? 2 : 4), "Chi phí AI (USD)");
+      cell(rate == null ? "--" : rate + "%", "Tỉ lệ thành công", rateCls,
+           `(trả lời + chuyển chuyên gia) / (${s.total_handled} tin xử lý). Hỏng: ${s.failed} `
+           + `(lỗi ${n("error")}, khách khó chịu ${n("khach_kho_chiu")})`) +
+      cell(s.total_handled, "Lượt xử lý") +
+      cell(s.active_customers, "Lượt khách hoạt động",  "",
+           "Cộng theo TỪNG NGÀY - khách quay lại nhiều ngày được tính nhiều lần. Xem xu hướng, không dùng đối soát.") +
+      cell(s.avg_reply_s == null ? "--" : s.avg_reply_s + "s", "Trả lời trung bình",  "",
+           s.max_reply_s ? "Chậm nhất: " + s.max_reply_s + "s" : "") +
+      cell(n("handoff"), "Lượt chuyển chuyên gia", n("handoff") ? "warn" : "") +
+      cell(n("khach_kho_chiu"), "Lượt khách khó chịu", n("khach_kho_chiu") ? "bad" : "good",
+           "Bot tự ngưng nhắn, cần người thật gọi lại.") +
+      cell(n("error"), "Lỗi", n("error") ? "bad" : "good") +
+      cell(n("unclear"), "Tin mơ hồ (hỏi lại)", "", "Bot không hiểu ý khách nên hỏi lại.") +
+      cell(nhieu, "Chặn nhiễu / spam") +
+      cell(n("comment"), "Comment fanpage") +
+      cell(n("referral"), "Khách từ quảng cáo") +
+      cell(n("followup"), "Tin nhắc khách") +
+      cell(n("missed_autoreply"), "Tin rơi trả bù", n("missed_autoreply") ? "warn" : "",
+           "Khách bị bỏ sót, vòng quét phải trả lời bù.") +
+      cell(n("image"), "Khách gửi ảnh") +
+      cell(fmtTokens(s.tokens_in + s.tokens_out), "Token đã dùng",  "",
+           "Trong đó " + fmtTokens(s.tokens_cached || 0) + " token đã cache (tính giá rẻ hơn)") +
+      cell("$" + (s.cost_usd || 0).toFixed(s.cost_usd >= 1 ? 2 : 4), "Chi phí AI (USD)", "",
+           `Giá đang áp: ${gia.model || "?"} · vào $${gia.in}/1M · ra $${gia.out}/1M · cache $${gia.cached}/1M`);
 
     // Bar chart
     const daily = s.daily;
@@ -523,7 +606,7 @@ async function loadOverview(silent = false) {
    Phân trang: chỉ kéo 50 khách/lần. Kéo hết một lượt là backend đọc mọi file chat và
    trình duyệt dựng cả nghìn dòng -> tab đơ mỗi lần mở. */
 const CUST_PAGE = 50;
-let _custLoaded = 0, _custQ = "";
+let _custLoaded = 0, _custQ = "", _custThang = "";
 
 /* Nhãn trạng thái: bot có được nhắn khách này không. Đọc từ database (khach_state). */
 function custTrangThai(c) {
@@ -541,6 +624,7 @@ function custRow(c) {
   return `<tr class="row" onclick="openCustomer('${c.psid}')">
     <td><span class="psid">${escapeHtml(c.name) || "(không rõ tên)"}</span></td>
     <td style="color:var(--muted)">${c.psid}</td><td>${c.messages}</td>
+    <td style="white-space:nowrap">${c.den ? tenThang(c.den) : '<span style="color:var(--muted)">—</span>'}</td>
     <td>${c.last_at.replace("T", " ")}</td><td>${escapeHtml(c.last_text)}</td>
     <td>${custTrangThai(c)}</td>
     <td style="text-align:right">${moKhoa}<button class="btn small" title="Xoá hội thoại này"
@@ -560,18 +644,30 @@ async function loadCustomers(silent = false, more = false) {
   const rows = document.getElementById("customerRows");
   if (!silent && !more && !rows.children.length)
     rows.innerHTML = Array(4).fill(0).map(() =>
-      `<tr><td colspan="7" class="skel" style="height:20px"></td></tr>`).join("");
+      `<tr><td colspan="8" class="skel" style="height:20px"></td></tr>`).join("");
   // Không "more" = nạp lại đúng số dòng đang hiện (live refresh không được thu nhỏ danh sách).
   const offset = more ? _custLoaded : 0;
   const limit = more ? CUST_PAGE : Math.min(200, Math.max(CUST_PAGE, _custLoaded));
   try {
     const d = await api(`/admin/api/customers?offset=${offset}&limit=${limit}`
-                        + (_custQ ? "&q=" + encodeURIComponent(_custQ) : ""), silent);
+                        + (_custQ ? "&q=" + encodeURIComponent(_custQ) : "")
+                        + (_custThang ? "&thang=" + encodeURIComponent(_custThang) : ""), silent);
+    const sel = document.getElementById("custThang");
+    const co = (d.thang_co || []).map(x => x.join(":")).join(",");
+    if (sel.dataset.co !== co) {          // dựng lại ô chọn khi danh sách tháng đổi
+      sel.dataset.co = co;
+      sel.innerHTML = '<option value="">Mọi tháng</option>'
+        + (d.thang_co || []).map(([m, n]) => `<option value="${m}">${tenThang(m)} (${n})</option>`).join("")
+        + (d.chua_ro ? `<option value="chua_ro">Chưa rõ tháng (${d.chua_ro})</option>` : "");
+      sel.value = _custThang;
+    }
     const html = d.customers.map(custRow).join("");
     if (more) { rows.insertAdjacentHTML("beforeend", html); _custLoaded += d.customers.length; }
-    else { rows.innerHTML = html || `<tr><td colspan="7" style="color:var(--muted)">Chưa có hội thoại nào.</td></tr>`;
+    else { rows.innerHTML = html || `<tr><td colspan="8" style="color:var(--muted)">Không có khách nào khớp bộ lọc.</td></tr>`;
            _custLoaded = d.customers.length; }
-    document.getElementById("custCount").textContent = `${_custLoaded}/${d.total} khách`;
+    document.getElementById("custCount").textContent = `${_custLoaded}/${d.total} khách`
+      + (_custThang ? (_custThang === "chua_ro" ? " · chưa rõ tháng"
+                                                : " · đến trong " + tenThang(_custThang)) : "");
     document.getElementById("custMore").classList.toggle("hidden", _custLoaded >= d.total);
   } catch (e) { if (!silent) toast("Tải khách lỗi: " + e.message, false); }
 }
@@ -579,6 +675,9 @@ async function loadCustomers(silent = false, more = false) {
 function loadMoreCustomers() { loadCustomers(false, true); }
 
 let _custTimer = null;
+document.getElementById("custThang").onchange = e => {
+  _custThang = e.target.value; _custLoaded = 0; loadCustomers();
+};
 document.getElementById("custSearch").oninput = e => {
   clearTimeout(_custTimer);
   const v = e.target.value;
@@ -632,7 +731,6 @@ async function loadSettings() {
     document.getElementById("persona").value = d.persona;
     document.getElementById("envModel").value = d.env.BOT_MODEL;
     document.getElementById("envAdmins").value = d.env.BOT_ADMIN_UIDS;
-    document.getElementById("envRate").value = d.env.BOT_PER_PSID_RATE_S;
     document.getElementById("envConcurrent").value = d.env.BOT_MAX_CONCURRENT;
     const names = {PAGE_TOKEN:"FB Page Token", APP_SECRET:"FB App Secret",
                    GEMINI_API_KEY:"Gemini Key", LARK_APP_ID:"Lark (ảnh SP)",
@@ -674,7 +772,6 @@ async function saveSettings() {
       env: {
         BOT_MODEL: document.getElementById("envModel").value,
         BOT_ADMIN_UIDS: document.getElementById("envAdmins").value,
-        BOT_PER_PSID_RATE_S: document.getElementById("envRate").value,
         BOT_MAX_CONCURRENT: document.getElementById("envConcurrent").value,
       },
     };
@@ -859,8 +956,15 @@ function renderControl(d) {
     + '<span>' + esc(days[0] ? days[0].date : "") + '</span><span>cao nhất ' + usd(max) + '/ngày</span>'
     + '<span>' + esc(days.length ? days[days.length - 1].date : "") + '</span></div>';
 
+  // Phạm vi THẬT của bảng này = số ngày còn giữ sự kiện thô (ngày đã gộp không còn psid),
+  // không phải cả kỳ 30 ngày như tiêu đề khung dễ khiến người đọc tưởng.
+  const topEl = document.getElementById("ctrlTopCustomers");
+  const topNote = topEl.previousElementSibling;
+  if (topNote && topNote.classList.contains("hint") && c.top_days)
+    topNote.textContent = "Chỉ tính trong " + c.top_days + " ngày gần nhất (ngày cũ đã gộp, "
+      + "không còn mã khách). 1 khách hỏi lan man có thể ăn hết ngân sách trong khi tổng vẫn nhìn \"ổn\".";
   const top = c.top_customers || [];
-  document.getElementById("ctrlTopCustomers").innerHTML = top.length
+  topEl.innerHTML = top.length
     ? top.map(r => '<div class="trow"><span>' + esc(r.psid) + '</span><span>' + r.replies
         + ' câu</span><b>' + usd(r.usd) + '</b></div>').join("")
     : '<div class="okbox" style="color:var(--muted)">Chưa có dữ liệu chi phí.</div>';

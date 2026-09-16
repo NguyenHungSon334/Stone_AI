@@ -5,6 +5,7 @@ Bảo vệ bằng BOT_DASH_TOKEN (.env): mọi request cần ?token=... hoặc h
 Token trống = toàn bộ trang admin trả 403 (an toàn mặc định).
 """
 import asyncio
+import collections
 import hmac
 import json
 import os
@@ -43,7 +44,6 @@ _DASHBOARD_HTML = config.ROOT / "dashboard.html"
 _ENV_EDITABLE = {
     "BOT_MODEL": r"^[a-z0-9.-]+$",
     "BOT_ADMIN_UIDS": r"^[0-9, ]*$",
-    "BOT_PER_PSID_RATE_S": r"^\d+(\.\d+)?$",
     "BOT_MAX_CONCURRENT": r"^\d+$",
 }
 
@@ -62,27 +62,24 @@ async def dashboard_page(request: Request):
     return FileResponse(_DASHBOARD_HTML, media_type="text/html")
 
 
-def _dem_khach() -> int:
-    """Số khách của cả hệ thống. Firebase là nguồn chính; tắt thì đếm cache local.
-
-    glob("*.json") thô sẽ đếm cả file phụ (.crm/.sum/.profile/.state...) thành khách -> phồng số."""
-    tren_cloud = fb.list_psids()
-    if tren_cloud is not None:
-        return len(tren_cloud)
-    if not _HIST_DIR.exists():
-        return 0
-    return len([p for p in _HIST_DIR.glob("*.json")
-                if not p.name.endswith(brain.SIDECAR_SUFFIXES)])
+_THANG_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 
 
 @router.get("/api/overview")
-def overview(request: Request, days: int = 7):
+def overview(request: Request, days: int = 7, thang: str = ""):
+    """`thang=YYYY-MM` -> số của đúng tháng đó; không có thì N ngày gần nhất như cũ."""
     _check_token(request)
     days = max(1, min(days, 90))
-    total_customers = _dem_khach()
+    thang = thang.strip()
+    if thang and not _THANG_RE.match(thang):
+        raise HTTPException(400, "tháng phải dạng YYYY-MM")
+    # tong_the() có cache 5 phút và đã tự đếm khách -> khỏi gọi _dem_khach() thêm lần nữa.
+    tong = stats.tong_the()
     return {
-        "stats": stats.summary(days),
-        "total_customers": total_customers,
+        "stats": stats.summary(days, thang or None),
+        "thang_co": stats.thang_co_du_lieu(),
+        "tong_the": tong,
+        "total_customers": tong["khach_tong"],
         "model": config.MODEL,
         "configured": bool(config.PAGE_TOKEN),
     }
@@ -118,7 +115,8 @@ def mo_khoa_khach(request: Request, psid: str):
 
 
 @router.get("/api/customers")
-async def customers(request: Request, limit: int = 50, offset: int = 0, q: str = ""):
+async def customers(request: Request, limit: int = 50, offset: int = 0, q: str = "",
+                    thang: str = ""):
     """Khách của CẢ HỆ THỐNG: gộp psid trên Firebase (nguồn chính) với cache local.
 
     PHÂN TRANG. Bản cũ đọc nội dung chat của MỌI khách mỗi lần mở tab -> vài trăm khách là
@@ -127,6 +125,9 @@ async def customers(request: Request, limit: int = 50, offset: int = 0, q: str =
     _check_token(request)
     limit = max(1, min(limit, 200))
     offset = max(0, offset)
+    thang = thang.strip()
+    if thang and not _THANG_RE.match(thang) and thang != "chua_ro":
+        raise HTTPException(400, "tháng phải dạng YYYY-MM")
 
     # Hàm này PHẢI async (_profile_name gọi Graph API) nên phần chạm đĩa/Firebase đẩy hết
     # sang thread - xem chú thích ở đầu file.
@@ -154,9 +155,16 @@ async def customers(request: Request, limit: int = 50, offset: int = 0, q: str =
         last_at = (datetime.fromtimestamp(mtime).isoformat(timespec="minutes")
                    if mtime else (msgs[-1].get("at") or "")[:16])
         return {"psid": psid, "messages": len(msgs), "last_at": last_at,
-                "last_text": _last_text(msgs)[:120], **_trang_thai(psid)}
+                "den": thang_den.get(psid, ""), "last_text": _last_text(msgs)[:120],
+                **_trang_thai(psid)}
 
     xep = await asyncio.to_thread(_liet_ke)
+    # Tháng khách ĐẾN (tin đầu tiên), đọc 1 lần cho cả trang. Khách cũ chưa có mốc -> "chua_ro"
+    # cho tới khi chạy bot_tools/backfill_den_luc.py.
+    thang_den = await asyncio.to_thread(state.thang_den_tat_ca)
+    if thang:
+        xep = [(p, mt) for p, mt in xep
+               if (thang_den.get(p, "") == thang if thang != "chua_ro" else p not in thang_den)]
 
     q = q.strip().lower()
     if q:
@@ -178,7 +186,10 @@ async def customers(request: Request, limit: int = 50, offset: int = 0, q: str =
         except Exception as e:
             print(f"[admin] đọc khách {psid} lỗi: {type(e).__name__}: {e}", file=sys.stderr)
     return {"customers": out, "total": total, "offset": offset, "limit": limit,
-            "has_more": offset + limit < total}
+            "has_more": offset + limit < total, "thang": thang,
+            # Tháng nào CÓ khách -> dựng ô chọn; kèm số khách mỗi tháng để nhìn phát biết ngay.
+            "thang_co": sorted(collections.Counter(thang_den.values()).items(), reverse=True),
+            "chua_ro": sum(1 for p, _ in xep if p not in thang_den) if not thang else None}
 
 
 @router.get("/api/customers/{psid}")
@@ -233,7 +244,6 @@ def get_settings(request: Request):
         "env": {
             "BOT_MODEL": config.MODEL,
             "BOT_ADMIN_UIDS": ",".join(config.ADMIN_UIDS),
-            "BOT_PER_PSID_RATE_S": str(config.PER_PSID_RATE_S),
             "BOT_MAX_CONCURRENT": str(config.MAX_CONCURRENT),
         },
         # Trạng thái secrets: chỉ báo có/chưa, không lộ giá trị.
@@ -328,9 +338,14 @@ _CONFIG_FIELDS = [
     # option nào, ô rỗng, bấm Lưu là 400 "sai định dạng" và chặn luôn cả các ô khác.
     _F("BOT_MODEL", "Model", "AI", mau=r"^[a-z0-9.-]+$", restart=False,
        goi_y="Alias lite/flash/pro, hoặc mã đầy đủ vd gemini-2.5-flash, gemini-3-flash-preview."),
+    # 3 ô giá: BỎ TRỐNG là tự lấy theo model đang chạy (config._GIA). Chỉ điền khi Google đổi
+    # giá mà bảng trong config chưa kịp sửa.
     _F("GEMINI_PRICE_IN_USD", "Giá token VÀO (USD/1 triệu)", "AI", kieu="so",
-       goi_y="Chỉ để tính tiền trên dashboard. Google đổi giá thì sửa ở đây."),
+       goi_y="Chỉ để tính tiền trên dashboard. Bỏ trống = theo model đang chạy."),
     _F("GEMINI_PRICE_OUT_USD", "Giá token RA (USD/1 triệu)", "AI", kieu="so"),
+    _F("GEMINI_PRICE_CACHED_IN_USD", "Giá token ĐÃ CACHE (USD/1 triệu)", "AI", kieu="so",
+       goi_y="System prompt ~12k token gửi lại mỗi lượt nằm trong phần này. Tính bằng giá input "
+             "thường là dashboard báo đắt gấp nhiều lần số Google thật sự thu."),
 
     _F("BOT_ADMIN_UIDS", "PSID admin", "Cảnh báo", mau=r"^[0-9, ]*$",
        goi_y="Nhiều admin cách nhau dấu phẩy."),
@@ -361,8 +376,13 @@ _CONFIG_FIELDS = [
        goi_y="Bật: bot tự trả lời khách bị bỏ sót (đọc lại lịch sử nên khớp ngữ cảnh). "
              "Không áp dụng cho khách đã handoff và tin quá 24h - những ca đó chỉ báo admin."),
 
-    _F("BOT_PER_PSID_RATE_S", "Giãn tin mỗi khách (giây)", "Vận hành", kieu="so"),
+    _F("BOT_MISSED_CHECK_MIN", "Chu kỳ quét tin rơi (phút)", "Chăm khách", kieu="so"),
+
     _F("BOT_MAX_CONCURRENT", "Số khách xử lý cùng lúc", "Vận hành", kieu="so", restart=True),
+    _F("BOT_STATS_KEEP_DAYS", "Giữ sự kiện thô (ngày)", "Vận hành", kieu="so",
+       goi_y="Cũ hơn thì gộp thành 1 bản ghi/ngày. Nới lên nếu cần biểu đồ + top khách dài hơn "
+             "- TOP khách tốn nhất chỉ dựng được trong ngần này ngày."),
+    _F("BOT_STATS_PRUNE_H", "Chu kỳ dọn sự kiện (giờ)", "Vận hành", kieu="so"),
     _F("BOT_TUNNEL_WATCH", "Canh tunnel chết", "Vận hành", kieu="bat_tat"),
     _F("BOT_TUNNEL_CHECK_MIN", "Chu kỳ canh tunnel (phút)", "Vận hành", kieu="so"),
     _F("BOT_DASH_TOKEN", "Token trang quản trị", "Vận hành", bi_mat=True,
@@ -375,7 +395,14 @@ _CONFIG_FIELDS = [
 _CONFIG_BY_KEY = {f["key"]: f for f in _CONFIG_FIELDS}
 
 
-_MAC_DINH = {'MSGR_GRAPH_VER': 'v21.0', 'BOT_MODEL': 'flash', 'GEMINI_PRICE_IN_USD': '1.5', 'GEMINI_PRICE_OUT_USD': '9.0', 'BOT_FOLLOWUP_ENABLED': '1', 'BOT_FOLLOWUP_AFTER_H': '4', 'BOT_FOLLOWUP_CHECK_MIN': '15', 'BOT_MISSED_AFTER_MIN': '10', 'BOT_MISSED_AUTOREPLY': '1', 'BOT_PER_PSID_RATE_S': '3', 'BOT_MAX_CONCURRENT': '4', 'BOT_TUNNEL_WATCH': '1', 'BOT_TUNNEL_CHECK_MIN': '3', 'LARK_DOMAIN': 'https://open.larksuite.com', 'LARK_PRODUCT_FIELD': 'Mã Sản Phẩm', 'LARK_IMAGE_FIELD': 'Ảnh báo giá(1 ảnh rõ sản phẩm)'}
+# Mặc định lấy THẲNG từ config (nguồn duy nhất) + giá token tính theo model đang chạy.
+# Bản chép tay cũ ở đây đã lệch khỏi config.py: UI hiện "nhắc sau 4 giờ"/"tin rơi 10 phút"
+# trong khi bot chạy 23 giờ/2 phút.
+_g = config.gia_model()
+_MAC_DINH = {**config.MAC_DINH,
+             "GEMINI_PRICE_IN_USD": str(_g[0]),
+             "GEMINI_PRICE_OUT_USD": str(_g[1]),
+             "GEMINI_PRICE_CACHED_IN_USD": str(_g[2])}
 
 
 def _read_env_file() -> dict[str, str]:

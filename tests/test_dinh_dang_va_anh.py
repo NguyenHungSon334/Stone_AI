@@ -46,43 +46,43 @@ def _hist(*cap):
 
 
 def test_nhac_lai_ma_o_luot_sau_van_gui_anh(monkeypatch):
-    """Ca thật: khách hỏi 'long đình' hôm sau, LD01/LD05 đã nhắc hôm trước -> luật cũ im lặng
+    """Ca thật: khách hỏi 'long đình' hôm sau, LĐ01/LĐ05 đã nhắc hôm trước -> luật cũ im lặng
     không gửi ảnh, khách kêu 'đâu có thấy mẫu nào'."""
     monkeypatch.setattr(brain.lark_image, "get_image_tokens", lambda code: [f"tok-{code}"])
-    hist = _hist(("user", "long đình"), ("assistant", "LD01 và LD05 ạ"),
+    hist = _hist(("user", "long đình"), ("assistant", "LĐ01 và LĐ05 ạ"),
                  ("user", "mộ đôi"), ("assistant", "MD01 ạ"),
-                 ("user", "cái LD01 ấy"), ("assistant", "dạ vâng"),
+                 ("user", "cái LĐ01 ấy"), ("assistant", "dạ vâng"),
                  ("user", "long đình"))
 
-    markers = brain._image_markers(hist, "LD01 và LD05 giá khoảng...", "long đình")
-    assert "tok-LD01" in markers and "tok-LD05" in markers
+    markers = brain._image_markers(hist, "LĐ01 và LĐ05 giá khoảng...", "long đình")
+    assert "tok-LĐ01" in markers and "tok-LĐ05" in markers
 
 
 def test_hoi_don_ve_mot_mau_van_co_anh_nhung_la_anh_khac(monkeypatch):
     """Nhắc lại cùng mã -> vẫn gửi, và _next_image_token xoay vòng nên là ẢNH GÓC KHÁC."""
     monkeypatch.setattr(brain.lark_image, "get_image_tokens",
                         lambda code: [f"{code}-a1", f"{code}-a2", f"{code}-a3"])
-    hist = _hist(("user", "long đình"), ("assistant", "LD01 giá khoảng 77 triệu ạ"),
+    hist = _hist(("user", "long đình"), ("assistant", "LĐ01 giá khoảng 77 triệu ạ"),
                  ("user", "nặng bao nhiêu tấn"))
 
-    lan1 = brain._image_markers(hist, "LD01 nặng 5.4 tấn ạ", "nặng bao nhiêu tấn", "p-xoay")
-    lan2 = brain._image_markers(hist, "LD01 cao 2.75m ạ", "cao bao nhiêu", "p-xoay")
+    lan1 = brain._image_markers(hist, "LĐ01 nặng 5.4 tấn ạ", "nặng bao nhiêu tấn", "p-xoay")
+    lan2 = brain._image_markers(hist, "LĐ01 cao 2.75m ạ", "cao bao nhiêu", "p-xoay")
 
-    assert "LD01-a1" in lan1 and "LD01-a2" in lan2, "phải xoay sang ảnh khác, không lặp ảnh cũ"
+    assert "LĐ01-a1" in lan1 and "LĐ01-a2" in lan2, "phải xoay sang ảnh khác, không lặp ảnh cũ"
 
 
 def test_khach_doi_anh_thi_gui_ke_ca_vua_gui(monkeypatch):
     """Khách gõ thẳng mã kèm đòi ảnh -> gửi cả mã trong tin của khách."""
     monkeypatch.setattr(brain.lark_image, "get_image_tokens", lambda code: [f"tok-{code}"])
-    hist = _hist(("user", "long đình"), ("assistant", "LD01 giá khoảng 77 triệu ạ"),
-                 ("user", "cho xem ảnh LD01"))
+    hist = _hist(("user", "long đình"), ("assistant", "LĐ01 giá khoảng 77 triệu ạ"),
+                 ("user", "cho xem ảnh LĐ01"))
 
-    assert "tok-LD01" in brain._image_markers(hist, "Dạ ảnh LD01 đây ạ", "cho xem ảnh LD01")
+    assert "tok-LĐ01" in brain._image_markers(hist, "Dạ ảnh LĐ01 đây ạ", "cho xem ảnh LĐ01")
 
 
 def test_ma_khach_go_lan_dau_van_duoc_gui_anh(monkeypatch):
     """Bot nhắc lại mã khách hỏi -> vẫn kèm ảnh ngay lượt đầu."""
     monkeypatch.setattr(brain.lark_image, "get_image_tokens", lambda code: [f"tok-{code}"])
-    hist = _hist(("user", "cho hỏi mẫu LD07"))
+    hist = _hist(("user", "cho hỏi mẫu LĐ07"))
 
-    assert "tok-LD07" in brain._image_markers(hist, "Dạ LD07 giá khoảng... ạ", "cho hỏi mẫu LD07")
+    assert "tok-LĐ07" in brain._image_markers(hist, "Dạ LĐ07 giá khoảng... ạ", "cho hỏi mẫu LĐ07")

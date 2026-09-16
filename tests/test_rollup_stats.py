@@ -76,9 +76,9 @@ def test_gop_xong_thi_su_kien_tho_bien_mat(monkeypatch, tmp_path):
     gop = util.read_json(tmp_path / "daily.json", {})
     ngay3 = (datetime.now() - timedelta(days=3)).date().isoformat()
     assert kq["ngay_da_gop"] == [ngay3]
-    assert gop[ngay3] == {"date": ngay3, "tin": 4000, "tout": 300, "ok": 2, "error": 1,
-                          "handoff": 0, "rate_limited": 0, "dur_sum": 10.0, "dur_n": 2,
-                          "dur_max": 6.0, "psids": 3}
+    assert gop[ngay3] == {"date": ngay3, "tin": 4000, "tout": 300, "tcache": 0, "ok": 2,
+                          "error": 1, "handoff": 0, "rate_limited": 0, "dur_sum": 10.0,
+                          "dur_n": 2, "dur_max": 6.0, "psids": 3}
 
 
 def test_chay_prune_nhieu_lan_khong_cong_doi(monkeypatch, tmp_path):

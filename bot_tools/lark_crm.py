@@ -22,7 +22,8 @@ import config
 import util
 from bot_tools.lark_image import _tenant_token, request_retry   # tái dùng token + retry transient
 
-_NGUON_LEAD = "Facebook"          # bot chạy trên Messenger -> nguồn cố định
+_NGUON_LEAD = "Facebook"          # bot chạy trên Messenger: khách tự nhắn Page
+_NGUON_QUANG_CAO = "Quảng cáo Facebook"   # khách bấm quảng cáo Click-to-Messenger
 _OPT_CACHE: dict[str, tuple[float, set[str]]] = {}   # field_name -> (ts, {option})
 _OPT_TTL_S = 3600
 _OPT_LOCK = threading.Lock()
@@ -120,8 +121,17 @@ def _build_fields(lead: dict) -> dict:
     for key, col in (("khu_vuc", "Khu vực"), ("tinh", "Tỉnh/Thành phố")):
         if (v := _match_option(lead.get(key) or "", col)):
             fields[col] = v
-    if _NGUON_LEAD in _select_options("Nguồn lead"):
-        fields["Nguồn lead"] = _NGUON_LEAD
+    opts = _select_options("Nguồn lead")
+    nguon = _NGUON_QUANG_CAO if lead.get("tu_quang_cao") else _NGUON_LEAD
+    if nguon not in opts and nguon == _NGUON_QUANG_CAO:
+        # Bảng chưa có option -> ghi tạm "Facebook" (còn hơn bỏ trống) và kêu admin thêm option.
+        alerts.alert("crm:option:nguon_quang_cao",
+                     f"⚠️ Lead từ QUẢNG CÁO đang bị ghi thành '{_NGUON_LEAD}' - cột 'Nguồn lead' "
+                     f"của bảng CRM chưa có option '{_NGUON_QUANG_CAO}'.\n"
+                     f"➡️ Thêm option '{_NGUON_QUANG_CAO}' vào cột này (đúng chính tả).")
+        nguon = _NGUON_LEAD
+    if nguon in opts:
+        fields["Nguồn lead"] = nguon
     return fields
 
 

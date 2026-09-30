@@ -27,9 +27,9 @@ import fb
 import state
 import stats
 import util
-from bot_tools import lark_image
-from bot_tools.find_by_price import (catalog_index, kinds_available, parse_money, render,
-                                     rows_by_ids, search)
+from bot_tools import kiem_so_lieu, lark_image
+from bot_tools.find_by_price import (_cell, _col, catalog_index, kinds_available, load_rows,
+                                     parse_money, render, rows_by_ids, search)
 
 # 1 file/khách, GIỮ TOÀN BỘ log (admin xem đủ). AI đọc NHẸ = tóm tắt phần cũ + đuôi verbatim:
 # token/lượt bị chặn, KHÔNG phình theo độ dài chat. Tóm tắt = sidecar <psid>.sum.json (local,
@@ -328,12 +328,48 @@ def _da_dua(ngan_sach: dict | None, results) -> list:
 
     Trần 2 mẫu áp cho MỖI LẦN gọi tool là chưa đủ: AI gọi tool nhiều vòng trong cùng một lượt
     (cho phép tới _MAX_TOOL_LOOPS) rồi gộp kết quả - ca thật khách hỏi "các mẫu Long đình" nhận
-    đúng 3 mẫu vì AI gọi 2 lần. Ngân sách đếm theo LƯỢT nên gọi mấy vòng cũng vẫn 2 mẫu."""
+    đúng 3 mẫu vì AI gọi 2 lần. Ngân sách đếm theo LƯỢT nên gọi mấy vòng cũng vẫn 2 mẫu.
+
+    Đếm RIÊNG từng THỂ LOẠI (ngan_sach = {thể loại: số mẫu đã đưa}). Bản cũ chung 1 suất cho cả
+    lượt: khách Trần Long (28/09) hỏi báo giá cả khu -> 2 long đình ăn hết suất, lần tra hàng rào
+    trả rỗng, bot vẫn nêu HR01 rồi tự bịa giá 1.8tr/md (thật 4tr)."""
     if ngan_sach is None:
         return results
-    con = max(0, int(ngan_sach.get("con", _MAX_GOI_Y)))
-    ngan_sach["con"] = con - len(results[:con])
-    return results[:con]
+    header, _, _ = load_rows()
+    i_tl = _col(header, "Thể Loại")
+    out = []
+    for item in results:
+        kind = _cell(item[2], i_tl)
+        if ngan_sach.get(kind, 0) < _MAX_GOI_Y:
+            ngan_sach[kind] = ngan_sach.get(kind, 0) + 1
+            out.append(item)
+    return out
+
+
+_CAU_HEN_BAO_GIA = "Giá và kích thước chính xác phần này em xin gửi chuyên gia xác nhận lại cho mình ạ."
+
+
+def _yeu_cau_viet_lai(reply: str, loi: list[str]) -> str:
+    """Lệnh viết lại khi tin nháp có số liệu lệch bảng hàng - kèm luôn số THẬT của các mã."""
+    ma = sorted(_codes_in(reply) | {m for x in loi for m in re.findall(r"đúng là '([^']+)'", x)})
+    that = render(rows_by_ids(ma)) if ma else "(tin không nêu mã hợp lệ nào)"
+    return ("[Hệ thống - KIỂM TRA SỐ LIỆU] Tin em vừa soạn CHƯA gửi vì có số liệu KHÔNG khớp "
+            "bảng hàng:\n- " + "\n- ".join(loi) + "\n\nSố liệu THẬT từ bảng hàng:\n" + that +
+            "\n\nViết lại TOÀN BỘ tin: chỉ dùng đúng mã, tên, đơn vị, giá của ĐÚNG loại đá, kích "
+            "thước, trọng lượng ở trên. Mã nào không có số liệu thì KHÔNG nêu giá/kích thước/đặc "
+            "điểm của nó (hoặc gọi suggest_products để tra). CẤM tự thêm chiều, tự đổi số, tự gán "
+            "số mái/số cột/nhãn bán chạy mà tên mẫu không ghi, tự cộng tổng nhiều mẫu.")
+
+
+def _cat_so_bia(psid: str, reply: str, loi: list[str], loi_khach: list[str]) -> str:
+    """Model viết lại vẫn bịa -> bỏ câu sai, thêm câu hẹn chuyên gia, báo admin.
+    Gửi thiếu 1 câu còn hơn gửi 1 con số sai: khách cầm giá bịa đi so là mất uy tín."""
+    sach = kiem_so_lieu.cat_cau_sai(reply, loi_khach)
+    alerts.alert(f"bia:so_lieu:{psid}",
+                 f"🟠 BOT BỊA SỐ LIỆU - đã cắt câu sai trước khi gửi.\npsid: {psid}\n"
+                 f"Lỗi: {'; '.join(loi)}\nTin gốc: {reply[:500]}")
+    print(f"[bia] cắt số liệu bịa psid={psid}: {'; '.join(loi)}", file=sys.stderr)
+    return f"{sach} {_CAU_HEN_BAO_GIA}".strip()
 
 
 def _run_tool(name: str, inp: dict, ngan_sach: dict | None = None) -> str:
@@ -360,12 +396,14 @@ def _run_tool(name: str, inp: dict, ngan_sach: dict | None = None) -> str:
                          # với exclude_ids.
                          min(int(inp.get("limit") or _MAX_GOI_Y), _MAX_GOI_Y), kind, q,
                          inp.get("exclude_ids"), size)
+        het_suat = bool(results) and ngan_sach is not None
         results = _da_dua(ngan_sach, results)
-        if not results and ngan_sach is not None and int(ngan_sach.get("con", 1)) <= 0:
+        if not results and het_suat:
             # Hết ngân sách chứ KHÔNG phải hết hàng - nói rõ để AI đừng đi tìm bộ lọc khác rồi
             # nhồi thêm mẫu, cũng đừng bịa "bên em hết mẫu".
-            return (f"Đã đưa đủ {_MAX_GOI_Y} mẫu cho lượt này - ĐỦ RỒI, không tra thêm. Viết tin "
-                    "với đúng các mẫu đã có; khách muốn xem thêm thì lượt sau gọi lại tool.")
+            return (f"Đã đưa đủ {_MAX_GOI_Y} mẫu thể loại này cho lượt này - ĐỦ RỒI, không tra thêm. "
+                    "Viết tin với đúng các mẫu đã có, KHÔNG nêu thêm mã nào của thể loại này; "
+                    "khách muốn xem thêm thì lượt sau gọi lại tool.")
     if not results:
         # Lọc theo kích thước mà rỗng = bảng hàng KHÔNG có mẫu đúng cỡ đó. Bỏ 'size' rồi tra lại
         # là đưa mẫu lệch hạng kích thước cho khách (ca thật: khách xin 81x127, bot đưa 97x147,
@@ -937,8 +975,9 @@ def _answer_sync(psid: str, text: str, images: list[tuple[bytes, str]] | None = 
 
         handle = _cached_handle(client, model_id)     # None -> nhồi thẳng (fallback)
         tok_in = tok_out = tok_cache = 0
-        ngan_sach = {"con": _MAX_GOI_Y}      # trần mẫu cho CẢ lượt, dùng chung mọi vòng gọi tool
-        for _ in range(_MAX_TOOL_LOOPS):
+        ngan_sach: dict = {}      # {thể loại: số mẫu đã đưa} cả lượt, dùng chung mọi vòng gọi tool
+        da_bat_viet_lai = False
+        for _ in range(_MAX_TOOL_LOOPS + 1):      # +1: chừa 1 vòng cho lần bắt viết lại số liệu
             resp, handle = _gen_answer(client, model_id, contents, handle)
             u = resp.usage_metadata
             if u:
@@ -964,6 +1003,18 @@ def _answer_sync(psid: str, text: str, images: list[tuple[bytes, str]] | None = 
             reply = "".join(p.text for p in parts if p.text).strip()
             if not reply:
                 raise BrainError(f"API không trả nội dung. finish_reason={cand.finish_reason}")
+            # Chốt chặn số liệu: giá/kích thước/trọng lượng/mã phải khớp bảng hàng. Sai -> bắt
+            # viết lại 1 lần kèm số thật; vẫn sai -> cắt câu sai (xem _cat_so_bia).
+            loi_khach = [text] + [m["content"] for m in full if m.get("role") == "user"
+                                  and isinstance(m.get("content"), str)]
+            if loi := kiem_so_lieu.kiem(reply, loi_khach):
+                if not da_bat_viet_lai:
+                    da_bat_viet_lai = True
+                    contents.append(cand.content)
+                    contents.append(types.Content(role="user", parts=[
+                        types.Part.from_text(text=_yeu_cau_viet_lai(reply, loi))]))
+                    continue
+                reply = _cat_so_bia(psid, reply, loi, loi_khach)
             # Sản phẩm nhắc lần đầu trong hội thoại -> tự kèm marker ảnh (messenger bóc ra gửi).
             # Đọc <<ANH>> TRƯỚC khi bóc; sau đó reply sạch mới đem gửi + lưu lịch sử.
             # Lượt khách gửi ảnh: cấm dội ảnh mẫu bên em (kể cả khi khách gõ kèm mã) - khách

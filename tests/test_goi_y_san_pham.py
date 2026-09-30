@@ -54,7 +54,7 @@ def test_uu_tien_ban_chay_va_co_anh():
 def test_goi_tool_nhieu_vong_trong_1_luot_van_chi_duoc_2_mau():
     """Ca thật đã lọt lên prod: AI gọi tool 2 vòng trong CÙNG một lượt rồi gộp -> khách hỏi
     'các mẫu Long đình' nhận 3 mẫu. Ngân sách đếm theo LƯỢT, không theo từng lần gọi."""
-    ngan_sach = {"con": brain._MAX_GOI_Y}
+    ngan_sach = {}
     vong1 = brain._run_tool("suggest_products", {"kind": "Long đình"}, ngan_sach)
     vong2 = brain._run_tool("suggest_products", {"q": "long đình"}, ngan_sach)
 
@@ -65,17 +65,17 @@ def test_goi_tool_nhieu_vong_trong_1_luot_van_chi_duoc_2_mau():
 
 def test_luot_moi_thi_ngan_sach_reset():
     """Khách nói 'xem thêm' ở lượt sau -> lại được 2 mẫu, không bị khoá vĩnh viễn."""
-    assert _so_ma(brain._run_tool("suggest_products", {"kind": "Mộ"}, {"con": 2})) == 2
-    assert _so_ma(brain._run_tool("suggest_products", {"kind": "Mộ"}, {"con": 2})) == 2
+    assert _so_ma(brain._run_tool("suggest_products", {"kind": "Mộ"}, {})) == 2
+    assert _so_ma(brain._run_tool("suggest_products", {"kind": "Mộ"}, {})) == 2
 
 
 def test_ma_khach_hoi_dich_danh_khong_bi_tru_ngan_sach():
     """product_ids = mã khách chỉ tên -> trả đủ, và không ăn vào ngân sách mẫu tự đề xuất."""
-    ngan_sach = {"con": brain._MAX_GOI_Y}
+    ngan_sach = {}
     got = brain._run_tool("suggest_products", {"product_ids": ["M01", "M04", "LĐ03"]}, ngan_sach)
 
     assert _so_ma(got) == 3
-    assert ngan_sach["con"] == brain._MAX_GOI_Y
+    assert ngan_sach == {}
 
 
 def test_khach_doi_anh_thi_gui_lai_du_ma_da_nhac_truoc_do():
@@ -135,3 +135,14 @@ def test_thiet_ke_rieng_khong_tron_vao_ngan_sach_khach_neu():
 
     got = search(1e9, kind=kind, limit=500)
     assert got and all(p > 0 for p, _, _ in got), f"mẫu chưa có giá lọt vào tầm giá: {kind}"
+
+
+def test_nhieu_hang_muc_1_luot_moi_hang_muc_deu_co_mau():
+    """Ca thật khách Trần Long 28/09: hỏi báo giá cả khu -> 2 long đình ăn hết suất chung, tra
+    hàng rào ra rỗng, bot tự bịa HR01 1.8tr/md (thật 4tr). Suất phải tính RIÊNG từng thể loại."""
+    ngan_sach = {}
+    long_dinh = brain._run_tool("suggest_products", {"kind": "Long đình"}, ngan_sach)
+    hang_rao = brain._run_tool("suggest_products", {"kind": "Hàng rào"}, ngan_sach)
+
+    assert _so_ma(long_dinh) == 2
+    assert _so_ma(hang_rao) == 2, "hàng rào phải có giá thật, không bị long đình ăn mất suất"

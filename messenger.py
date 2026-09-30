@@ -613,6 +613,19 @@ async def _fetch_customer_images(urls: list[str]) -> list[tuple[bytes, str]]:
     return out
 
 
+def _ghi_nguon_quang_cao(psid: str, ev: dict, msg: dict) -> None:
+    """Khách đến từ QUẢNG CÁO (referral.source = ADS) -> lưu cờ + ad_id vào state.
+
+    Trước đây referral chỉ dùng để chào rồi vứt, CRM ghi cứng "Facebook" cho mọi khách nên không
+    biết lead nào do quảng cáo mang về (ca Trần Long 28/09: bấm ad linh vật đá, CRM vẫn ghi
+    "Facebook"). Meta gửi referral ở 3 chỗ tuỳ luồng: sự kiện referral riêng (thread cũ), trong
+    postback nút Bắt đầu, và kèm tin nhắn đầu tiên -> dò cả ba."""
+    for ref in (ev.get("referral"), (ev.get("postback") or {}).get("referral"), msg.get("referral")):
+        if isinstance(ref, dict) and str(ref.get("source") or "").upper() == "ADS":
+            state.patch(psid, tu_quang_cao=True, ad_id=str(ref.get("ad_id") or ""))
+            return
+
+
 def parse_events(payload: dict):
     """[(psid, text)] từ webhook body. Bỏ echo của page.
 
@@ -628,6 +641,7 @@ def parse_events(payload: dict):
             psid = (ev.get("sender") or {}).get("id")
             if not psid:
                 continue
+            _ghi_nguon_quang_cao(str(psid), ev, msg)
             text = msg.get("text")
             if text:
                 out.append((str(psid), str(text)))
@@ -1188,6 +1202,7 @@ async def _save_lead_to_crm(psid: str, deep: bool = True) -> None:
     name = await profile_name(psid)          # tên tài khoản FB - không xin tên khách nữa
     if name:
         lead["ten"] = name
+    lead["tu_quang_cao"] = bool((await _off(state.get, psid)).get("tu_quang_cao"))
     result = await asyncio.to_thread(lark_crm.upsert_lead, psid, lead)
     tag = {"created": "✅ Đã tạo lead CRM", "updated": "♻️ Đã cập nhật lead CRM"}.get(result)
     if tag:

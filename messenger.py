@@ -16,6 +16,7 @@ import httpx
 
 import alerts
 import brain
+import comment_mau
 import config
 import returning
 import state
@@ -397,11 +398,11 @@ def verify_signature(raw_body: bytes, header_sig: str) -> bool:
     return hmac.compare_digest(expected, header_sig.split("=", 1)[1].strip())
 
 
-# Tin public + private khi khách comment (giới thiệu + hỏi nhu cầu, mời vào inbox).
-_PUBLIC_REPLY = "Dạ em cảm ơn Bác đã quan tâm tới Hồn Đá ạ!"
-_PRIVATE_REPLY = ("Dạ em chào Bác ạ. Em là Thảo Vân, trợ lý bên Đá mỹ nghệ Hồn Đá. "
-                  "Em thấy Bác quan tâm tới sản phẩm bên em. Bác đang tìm hiểu mẫu nào ạ - "
-                  "Mộ đá, Long đình, Cổng hay Lan can đá? Em tư vấn chi tiết cho Bác nhé!")
+# Tin nhắn riêng khi khách comment có nhu cầu (mẫu I1 bộ trả lời 09/10/2026). Câu công khai
+# lấy theo nhóm ở comment_mau - trước đây dán một câu cảm ơn cho MỌI comment, kể cả câu chửi.
+_PRIVATE_REPLY = ("Dạ em chào bác ạ. Bác đang tính làm khu lăng cho cả họ, mộ cho ông bà bố mẹ, "
+                  "hay làm lại một phần khu cũ ạ? Bác có kích thước đất thì gửi em luôn, em gửi "
+                  "mẫu cỡ vừa với nhà mình.")
 
 # comment_id -> epoch, chống xử lý trùng khi FB gửi lại.
 # GHI XUỐNG ĐĨA (không chỉ RAM): FB gửi lại event sau khi bot restart/deploy thì dedupe trong
@@ -486,12 +487,20 @@ def parse_comment_events(payload: dict):
     return out
 
 
-async def reply_public(comment_id: str) -> bool:
-    """Trả lời công khai dưới comment: cảm ơn. True = FB nhận."""
+async def reply_public(comment_id: str, message: str) -> bool:
+    """Trả lời công khai dưới comment. True = FB nhận."""
     if not (config.PAGE_TOKEN and comment_id):
         return False
     url = f"https://graph.facebook.com/{config.GRAPH_VER}/{comment_id}/comments"
-    return await _fb_post(url, payload={"message": _PUBLIC_REPLY}, tag="comment-public")
+    return await _fb_post(url, payload={"message": message}, tag="comment-public")
+
+
+async def hide_comment(comment_id: str) -> bool:
+    """Ẩn comment (người viết + bạn bè họ vẫn thấy, người khác không). Cần pages_manage_engagement."""
+    if not (config.PAGE_TOKEN and comment_id):
+        return False
+    url = f"https://graph.facebook.com/{config.GRAPH_VER}/{comment_id}"
+    return await _fb_post(url, payload={"is_hidden": True}, tag="comment-hide")
 
 
 async def reply_private(comment_id: str) -> bool:
@@ -504,19 +513,32 @@ async def reply_private(comment_id: str) -> bool:
 
 
 async def handle_comment(comment_id: str, from_id: str, text: str = "") -> None:
-    """1 comment: LUÔN cảm ơn công khai; chỉ nhắn riêng khi comment có dấu hiệu nhu cầu.
+    """1 comment: xếp nhóm theo bộ mẫu (comment_mau), nhắn riêng nhóm A/B, trả lời công khai
+    đúng mẫu, ẩn comment lộ SĐT/chửi/đối thủ.
 
-    Khen đẹp/chào hỏi mà nhắn riêng là làm phiền, và đốt mất quyền private reply (FB chỉ cho
-    1 lần/comment). Lỗi 1 kênh không chặn kênh kia; 2 kênh hỏng theo cách KHÁC nhau (public cần
+    Nhắn riêng TRƯỚC: mẫu A1/A2/A5 nói "Hồn Đá đã nhắn riêng cho bác" - chỉ được nói khi đã nhắn
+    thật. Khen đẹp mà nhắn riêng là làm phiền và đốt quyền private reply (FB cho 1 lần/comment).
+    Lỗi 1 kênh không chặn kênh kia; 2 kênh hỏng theo cách KHÁC nhau (public cần
     pages_manage_engagement; private chỉ 1 lần/comment và hết hạn sau 7 ngày) -> ghi rõ kênh nào."""
-    pub = await reply_public(comment_id)
-    want_private = await brain.comment_has_intent(text)
+    ma = await brain.comment_ma(text)
+    want_private = ma in comment_mau.NHAN_RIENG
     priv = await reply_private(comment_id) if want_private else False
-    priv_log = ("OK" if priv else "HỎNG") if want_private else "BỎ QUA (không có nhu cầu)"
-    print(f"[comment] {comment_id}: công khai={'OK' if pub else 'HỎNG'} | riêng={priv_log}",
+    if ma in comment_mau.BAO_ADMIN:
+        # Mẫu A4/A6 hứa "đã chuyển tư vấn viên" -> phải có người thật nhận việc TRƯỚC khi đăng.
+        await notify_admins(f"💬 Comment cần tư vấn viên liên hệ ({ma}): {text[:300]}\n"
+                            f"comment_id: {comment_id}")
+    cau = comment_mau.cau_tra_loi(ma, da_nhan_rieng=priv)
+    pub = await reply_public(comment_id, cau) if cau else False
+    an = await hide_comment(comment_id) if ma in comment_mau.AN else False
+    priv_log = ("OK" if priv else "HỎNG") if want_private else "BỎ QUA"
+    pub_log = ("OK" if pub else "HỎNG") if cau else "BỎ QUA"
+    print(f"[comment] {comment_id}: mã={ma} | công khai={pub_log} | riêng={priv_log} | ẩn={an}",
           file=sys.stderr)
     stats.log_event("comment", from_id,
-                    note=f"public={pub} private={priv if want_private else 'skip'}")
+                    note=f"ma={ma} public={pub if cau else 'skip'} "
+                         f"private={priv if want_private else 'skip'} hidden={an}")
+    if not (cau or want_private):
+        return                            # chủ ý im (chửi, đối thủ, chỉ gắn tên) - không phải sự cố
     if not (pub or want_private):
         # Chủ ý không nhắn riêng -> chỉ còn public là kênh duy nhất, hỏng là khách không thấy gì.
         await alert_admins("comment:dead",
@@ -542,8 +564,12 @@ _IMAGE_REPLY = ("Dạ mẫu này bên em có khá nhiều biến thể về kíc
                 "chuyên gia bên em sẽ liên hệ tư vấn cụ thể cho Bác ngay ạ!")
 
 
-def _cau_khach_gui_anh(sdt: str) -> str:
-    """Câu trả ảnh khách gửi (không đọc được). Đã có SĐT thì xác nhận số, không xin lại."""
+def _cau_khach_gui_anh(sdt: str, da_xin_so: bool = False) -> str:
+    """Câu trả ảnh khách gửi (không đọc được). Đã có SĐT thì xác nhận số, không xin lại.
+    Đã xin số 1 lần rồi (trần 1 lần, bộ trả lời 09/10/2026) thì không xin nữa."""
+    if da_xin_so and not sdt:
+        return ("Dạ mẫu này bên em có khá nhiều biến thể về kích thước và loại đá ạ. "
+                "Bác cho em biết kích thước khu đất, em tư vấn cỡ vừa với nhà mình ạ.")
     if sdt:
         return ("Dạ mẫu này bên em có khá nhiều biến thể về kích thước và loại đá ạ. "
                 "Chuyên gia bên em sẽ liên hệ tư vấn cụ thể cho Bác theo số của Bác ngay ạ!")
@@ -1311,7 +1337,7 @@ async def _process_inner(psid: str, text: str, user_at: str | None = None) -> No
         stats.log_event("image", psid)
         if not images:
             # Tải ảnh hỏng hoặc attachment không phải ảnh (file/video) -> câu cố định cũ.
-            cau = _cau_khach_gui_anh(await _off(brain.sdt_da_luu, psid))
+            cau = _cau_khach_gui_anh(await _off(brain.sdt_da_luu, psid), await _off(brain.da_xin_so, psid))
             await send_text(psid, cau)
             # Câu này XIN SĐT -> phải vào log, không thì khách gõ số xong bot hỏi lại y hệt.
             await brain.ghi_luot_async(psid, "[khách gửi ảnh/file]", cau, user_at)

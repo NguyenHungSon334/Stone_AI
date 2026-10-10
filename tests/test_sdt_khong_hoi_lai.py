@@ -110,6 +110,22 @@ def test_o_sdt_co_so_la_lenh_cam_xin_lai():
     assert "CHƯA CÓ" in brain._profile_prompt({"sdt": "", "tinh": "Hà Nội"})
 
 
+def test_xin_so_toi_da_mot_lan():
+    """Bộ trả lời 09/10/2026: 76% cuộc bị xin số từ 2 lần -> trần 1 lần, đếm bằng code."""
+    chua = [{"role": "user", "content": "cho xem mẫu mộ đơn"},
+            {"role": "assistant", "content": "Dạ em gửi Bác mẫu M04 ạ."}]
+    da = chua + [{"role": "assistant", "content": "Bác cho em xin số Zalo để gửi bảng giá ạ."}]
+    assert not brain._da_xin_so(chua)
+    assert brain._da_xin_so(da)
+    # khách tự nhắc "xin số" không tính là bot xin
+    assert not brain._da_xin_so([{"role": "user", "content": "em xin số công ty"}])
+    assert "ĐÃ xin số" in brain._profile_prompt({}, da_xin_so=True)
+    assert "ĐÃ xin số" not in brain._profile_prompt({}, da_xin_so=False)
+    # câu cố định cũng giữ trần
+    assert brain._cau_xin_lien_he("", da_xin_so=True) == ""
+    assert "số" not in messenger._cau_khach_gui_anh("", da_xin_so=True)
+
+
 if __name__ == "__main__":
     import tempfile
     from pathlib import Path
@@ -122,6 +138,7 @@ if __name__ == "__main__":
     test_cau_co_dinh_khong_xin_lai_so()
     test_chao_quang_cao_giu_dau_vet_da_xin_so()
     test_o_sdt_co_so_la_lenh_cam_xin_lai()
+    test_xin_so_toi_da_mot_lan()
     with tempfile.TemporaryDirectory() as tmp:
         goc = state._DIR
         try:

@@ -22,6 +22,7 @@ from google.genai import errors as genai_errors
 from google.genai import types
 
 import alerts
+import comment_mau
 import config
 import fb
 import state
@@ -63,8 +64,8 @@ _PROFILE_LABELS = {
 # dashboard; rơi dự phòng liên tục thì đổi BOT_MODEL về gemini-2.5-flash, KHÔNG cần deploy lại.
 # 07/09/2026: gemini-2.5-flash-lite bị Google gỡ dần, trả 404 NOT_FOUND kèm lời nhắn chuyển sang
 # 3.5-flash-lite (35 lần/tuần trong log). Model dự phòng chết là hỏng CẢ HAI đường dùng nó: nhịp
-# cứu khi model chính quá tải, và _comment_intent_sync - lỗi ở đó fail-open nên mọi comment đều
-# bị coi là có nhu cầu rồi nhắn riêng, kể cả khen suông.
+# cứu khi model chính quá tải, và _comment_ma_sync - lỗi ở đó rơi về mã dự phòng nên mọi comment
+# chỉ còn A1/C1, mất hết mẫu trả lời đúng câu hỏi.
 _FALLBACK_MODEL = "gemini-3.5-flash-lite"
 
 # Tắt thinking: tư vấn bán hàng theo kịch bản không cần suy luận sâu, mà thinking tính tiền như
@@ -946,7 +947,7 @@ def _answer_sync(psid: str, text: str, images: list[tuple[bytes, str]] | None = 
         profile = _profile_luot_nay(psid, _profile_from_history_sync(psid, full), text)
         # thời gian thực nhét ĐẦU contents (tách khỏi cache tĩnh)
         contents = [types.Content(role="user", parts=[types.Part.from_text(text=_time_note_text())])]
-        if profile_context := _profile_prompt(profile):
+        if profile_context := _profile_prompt(profile, _da_xin_so(full)):
             contents.append(types.Content(role="user", parts=[types.Part.from_text(text=profile_context)]))
         if gia_context := _gia_prompt(full, text, profile):
             contents.append(types.Content(role="user", parts=[types.Part.from_text(text=gia_context)]))
@@ -1032,7 +1033,7 @@ def _answer_sync(psid: str, text: str, images: list[tuple[bytes, str]] | None = 
                 # Đã có SĐT trong hồ sơ thì KHÔNG xin lại - khách vừa cho số xong lại bị hỏi số
                 # là dấu hiệu rõ nhất của bot không nhớ gì.
                 reply = (reply + " Mẫu này bên em làm thiết kế riêng theo khuôn viên từng nhà "
-                         "nên chưa có sẵn ảnh dựng ạ. " + _cau_xin_lien_he(profile.get("sdt"))).strip()
+                         "nên chưa có sẵn ảnh dựng ạ. " + _cau_xin_lien_he(profile.get("sdt"), _da_xin_so(full))).strip()
             if (thay := _chan_bia_sdt(psid, reply, profile)):
                 reply, markers = thay, ""    # thay CẢ tin -> không sót marker ảnh/handoff nào
             if not reply:
@@ -1069,6 +1070,11 @@ def _doc_profile(psid: str) -> dict:
     return _clean_profile(state.get(psid).get("profile"))
 
 
+def da_xin_so(psid: str) -> bool:
+    """Bot đã xin SĐT khách này lần nào chưa (đọc log). Cho câu cố định giữ trần 1 lần xin."""
+    return _da_xin_so(_load_hist(psid))
+
+
 def sdt_da_luu(psid: str) -> str:
     """SĐT đã lưu trong hồ sơ khách. "" nếu chưa có. Đọc state, KHÔNG gọi AI.
 
@@ -1090,8 +1096,10 @@ def ghi_sdt(psid: str, sdt: str) -> str:
     return profile.get("sdt", "")
 
 
-def _cau_xin_lien_he(sdt: str | None) -> str:
-    """Câu chốt mời liên hệ. Có SĐT rồi thì XÁC NHẬN số đó, không xin lại."""
+def _cau_xin_lien_he(sdt: str | None, da_xin_so: bool = False) -> str:
+    """Câu chốt mời liên hệ. Có SĐT rồi thì XÁC NHẬN số đó; đã xin 1 lần rồi thì thôi."""
+    if da_xin_so and not sdt:
+        return ""
     if sdt:
         return ("Em gửi Bác bộ ảnh công trình thực tế và bản phối riêng qua Zalo theo số của "
                 "Bác ngay hôm nay ạ.")
@@ -1139,8 +1147,10 @@ def _dem_hoi_gia(hist: list, text: str) -> int:
 _GIA_LAN_1 = (
     "[NHỊP GIÁ - khách hỏi giá LẦN ĐẦU trong cả cuộc trò chuyện]\n"
     "Tin này TUYỆT ĐỐI KHÔNG nêu con số tiền nào, KHÔNG nêu mã mẫu, KHÔNG gọi suggest_products.\n"
-    "Nói đúng ý này: giá tuỳ từng công trình, kích thước, loại đá và nhu cầu của khách nên mỗi "
-    "nhà một khác - rồi xin SĐT/Zalo để báo giá đúng phần khách cần. Tối đa 3 câu, không hỏi thêm ý nào khác.")
+    "Nói đúng ý này: giá tuỳ kích thước đất, dòng đá và các hạng mục nhà mình làm - rồi xin "
+    "kích thước khu đất và mấy ngôi để gửi bảng giá bóc tách từng hạng mục. Khách đã đưa kích "
+    "thước rồi thì xin SĐT/Zalo để gửi bảng bóc tách - CHỈ KHI dòng SĐT trong hồ sơ còn cho xin. "
+    "Tối đa 3 câu, không hỏi thêm ý nào khác.")
 _GIA_LAN_2 = (
     "[NHỊP GIÁ - khách đã hỏi giá {n} lần]\n"
     "Lần này PHẢI báo giá thật: gọi suggest_products rồi nêu 1-2 MÃ kèm khoảng giá và kích thước "
@@ -1155,8 +1165,9 @@ _ANH_KHACH_GUI = (
     "Tin này TUYỆT ĐỐI KHÔNG nêu mã mẫu bên em, KHÔNG gọi suggest_products, KHÔNG thêm <<ANH>>, "
     "KHÔNG nêu con số tiền nào.\n"
     "Làm đúng 3 việc, tối đa 3 câu: 1) nhận xét NGẮN 1 câu đúng thứ trong ảnh (hạng mục, kiểu "
-    "dáng) để khách biết em đã xem thật; 2) xin SĐT/Zalo - đã có số trong hồ sơ thì xác nhận lại "
-    "số đó, KHÔNG xin lại; 3) nói chuyên gia sẽ GỌI trao đổi đúng mẫu Bác gửi.\n"
+    "dáng) để khách biết em đã xem thật; 2) xin SĐT/Zalo nếu dòng SĐT trong hồ sơ còn cho xin - "
+    "đã có số thì xác nhận lại số đó, đã xin rồi thì KHÔNG xin lại; 3) nói chuyên gia sẽ GỌI "
+    "(chưa có số thì: chuyên gia trao đổi) đúng mẫu Bác gửi.\n"
     "Kết tin bằng dòng <<HANDOFF:khách gửi mẫu riêng>>.")
 
 
@@ -1191,7 +1202,21 @@ def _profile_luot_nay(psid: str, profile: dict, text: str) -> dict:
 
 
 _CHUA_CO_SDT = ("SĐT/Zalo: CHƯA CÓ - khách chưa gõ số nào. CẤM tự nghĩ ra chữ số, CẤM nói "
-                "'em đã nhận được SĐT của Bác', CẤM gửi PHIẾU YÊU CẦU. Xin số trước đã.")
+                "'em đã nhận được SĐT của Bác', CẤM gửi PHIẾU YÊU CẦU. Cả cuộc chưa xin số lần nào: "
+                "trả lời xong câu khách hỏi thì được xin 1 lần, nói rõ xin để làm gì.")
+# Bộ trả lời mẫu 09/10/2026: máy xin số 1.696 lần, 76% cuộc bị xin từ 2 lần -> khách bực.
+# Luật mới: xin TỐI ĐA 1 lần cả cuộc. Đếm bằng CODE như nhịp giá, không để model tự đếm.
+_CHUA_CO_SDT_DA_XIN = ("SĐT/Zalo: CHƯA CÓ - khách chưa gõ số nào. Em ĐÃ xin số rồi - CẤM xin lại "
+                       "dưới mọi cách nói, cứ tư vấn tiếp trên Messenger. CẤM tự nghĩ ra chữ số, CẤM "
+                       "nói 'em đã nhận được SĐT của Bác', CẤM gửi PHIẾU YÊU CẦU.")
+_XIN_SO_RE = re.compile(r"(?:xin|để lại|cho em)[^.?!\n()]{0,25}(?:số\s*(?:điện thoại|đt|máy|zalo)|sđt|zalo)"
+                        r"|xin\s+số\s*(?:của|nhé|với|ạ|[.?!,]|$)", re.I)
+
+
+def _da_xin_so(hist: list) -> bool:
+    """Bot đã có tin nào xin SĐT/Zalo trong lịch sử chưa."""
+    return any(m.get("role") == "assistant" and isinstance(m.get("content"), str)
+               and _XIN_SO_RE.search(m["content"]) for m in hist)
 # Ô SĐT có giá trị mà chỉ in trơ "SĐT/Zalo: 09..." thì model vẫn xin lại: persona nhắc xin số
 # ở chục chỗ, một dòng dữ kiện không đủ sức cãi. Đã xảy ra thật: khách 27234963929538234
 # (28/07 10:23) và 25803381659296922 (28/07 15:30) đều gõ số rồi bị hỏi lại ngay tin sau.
@@ -1229,7 +1254,7 @@ def _chan_bia_sdt(psid: str, reply: str, profile: dict) -> str:
     return _XIN_SO_THAY_PHIEU
 
 
-def _profile_prompt(profile: dict) -> str:
+def _profile_prompt(profile: dict, da_xin_so: bool = False) -> str:
     """Khối hồ sơ nhét vào prompt mỗi lượt.
 
     SĐT trống phải nói THẲNG là chưa có. Bản cũ chỉ in trường CÓ giá trị nên ô SĐT trống biến
@@ -1239,7 +1264,8 @@ def _profile_prompt(profile: dict) -> str:
     lines = [f"{_PROFILE_LABELS[field]}: {profile[field]}"
              for field in _PROFILE_FIELDS if field != "sdt" and profile.get(field)]
     sdt = profile.get("sdt")
-    lines.insert(0, _DA_CO_SDT.format(sdt=sdt) if sdt else _CHUA_CO_SDT)
+    lines.insert(0, _DA_CO_SDT.format(sdt=sdt) if sdt
+                 else _CHUA_CO_SDT_DA_XIN if da_xin_so else _CHUA_CO_SDT)
     if not lines:
         return ""
     return ("[Hồ sơ khách đã xác nhận - coi là dữ kiện; KHÔNG hỏi lại bất kỳ mục nào có giá trị.\n"
@@ -1416,8 +1442,7 @@ def _extract_lead_sync(psid: str, deep: bool = True, tom_tat_toi: int = 0) -> di
     return lead
 
 
-# Comment có nhu cầu -> mới nhắn riêng vào inbox. Comment khen/chào/spam thì chỉ cảm ơn công khai,
-# nhắn riêng mấy người này là làm phiền và đốt luôn quyền private reply (FB chỉ cho 1 lần/comment).
+# Từ khoá nhu cầu: chỉ còn dùng làm mã dự phòng khi model phân loại comment lỗi.
 _INTENT_RE = re.compile(
     r"\d{9,}"                                        # SĐT trong comment
     r"|\b(gia|giá|bao nhieu|bao nhiêu|bn|inbox|ib|tu van|tư vấn|bao gia|báo giá|quan tam|quan tâm"
@@ -1427,35 +1452,40 @@ _INTENT_RE = re.compile(
 _WORD_RE = re.compile(r"[0-9A-Za-zÀ-ỹ]")
 
 
-def _comment_intent_sync(text: str) -> bool:
-    """True = comment có dấu hiệu nhu cầu -> đáng nhắn riêng.
+_MA_RE = re.compile(r"\b([A-E]\d{1,2})\b")
 
-    3 tầng, dừng ở tầng rẻ nhất: không có chữ -> False; khớp từ khoá -> True; còn lại hỏi model lite.
-    Model lỗi -> True (fail-open): thà nhắn thừa 1 người còn hơn bỏ lọt khách thật."""
+
+def _comment_ma_sync(text: str) -> str:
+    """Xếp comment vào 1 mã của bộ mẫu bình luận (comment_mau.NHOM).
+
+    Không có chữ -> E4 (không gọi API). Còn lại hỏi model lite, chỉ lấy MÃ - chữ trả lời là mẫu
+    cố định nên model không có chỗ bịa. Model lỗi/trả mã lạ -> có từ khoá nhu cầu thì A1
+    (fail-open: thà nhắn thừa hơn bỏ lọt khách), không thì C1 (cảm ơn)."""
     text = (text or "").strip()
     if not _WORD_RE.search(text):
-        return False
-    if _INTENT_RE.search(text):
-        return True
-    prompt = ("Đây là bình luận dưới bài đăng của xưởng đá mỹ nghệ (mộ đá, lăng mộ, long đình, cổng đá). "
-              "Người này có dấu hiệu MUỐN MUA / hỏi giá / hỏi sản phẩm / nhờ tư vấn không? "
-              "Chỉ khen đẹp, chào hỏi, cảm thán, tag bạn bè, spam thì KHÔNG. "
-              "Trả lời đúng một từ: CO hoặc KHONG.\n\nBình luận: " + text)
+        return "E4"
+    du_phong = "A1" if _INTENT_RE.search(text) else "C1"
+    nhom = "\n".join(f"{ma}: {mo_ta}" for ma, mo_ta in comment_mau.NHOM.items())
+    prompt = ("Đây là bình luận dưới bài quảng cáo của Hồn Đá (lăng mộ, khu lăng đá). Xếp nó vào "
+              "ĐÚNG MỘT mã dưới đây. Có nhiều ý thì chọn ý cần trả lời nhất (câu hỏi > khen). "
+              "Số điện thoại của chính khách -> A4; số/đường dẫn của bên bán khác -> E2.\n"
+              f"{nhom}\n\nChỉ trả lời đúng mã, ví dụ: B1\n\nBình luận: {text}")
     try:
         resp = _generate(_get_client(), tries=2, model=_FALLBACK_MODEL,
                          contents=[types.Content(role="user", parts=[types.Part.from_text(text=prompt)])],
                          config=types.GenerateContentConfig(max_output_tokens=8, thinking_config=_NO_THINK))
         cand = (resp.candidates or [None])[0]
         out = "".join(p.text for p in (cand.content.parts or []) if p.text).strip().upper() if cand and cand.content else ""
-        return not out.startswith("KHONG")
+        m = _MA_RE.search(out)
+        return m.group(1) if m and m.group(1) in comment_mau.NHOM else du_phong
     except Exception as e:
         print(f"[comment] phân loại lỗi: {type(e).__name__}: {e}", file=sys.stderr)
-        return True
+        return du_phong
 
 
-async def comment_has_intent(text: str) -> bool:
+async def comment_ma(text: str) -> str:
     """Phân loại comment (async wrapper)."""
-    return await asyncio.to_thread(_comment_intent_sync, text)
+    return await asyncio.to_thread(_comment_ma_sync, text)
 
 
 async def answer(psid: str, text: str, images: list[tuple[bytes, str]] | None = None,

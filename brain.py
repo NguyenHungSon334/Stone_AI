@@ -1114,6 +1114,9 @@ def _ghi_profile(psid: str, profile: dict) -> None:
 def _clean_profile(raw: object) -> dict:
     raw = raw if isinstance(raw, dict) else {}
     out = {field: str(raw.get(field) or "").strip() for field in _PROFILE_FIELDS}
+    # Ô SĐT do AI trích có thể là rác ("Zalo", "chưa cho", "0979655XXX") -> chỉ giữ số VN thật.
+    # Không lọc thì _sdt_khach coi rác là SĐT và khách chưa cho số vẫn thành lead CRM.
+    out["sdt"] = util.tim_sdt(out["sdt"])
     out["upto"] = int(raw.get("upto") or 0)
     return out
 

@@ -22,14 +22,15 @@ from google.genai import errors as genai_errors
 from google.genai import types
 
 import alerts
+import comment_mau
 import config
 import fb
 import state
 import stats
 import util
-from bot_tools import lark_image
-from bot_tools.find_by_price import (catalog_index, kinds_available, parse_money, render,
-                                     rows_by_ids, search)
+from bot_tools import kiem_so_lieu, lark_image
+from bot_tools.find_by_price import (_cell, _col, catalog_index, kinds_available, load_rows,
+                                     parse_money, render, rows_by_ids, search)
 
 # 1 file/khách, GIỮ TOÀN BỘ log (admin xem đủ). AI đọc NHẸ = tóm tắt phần cũ + đuôi verbatim:
 # token/lượt bị chặn, KHÔNG phình theo độ dài chat. Tóm tắt = sidecar <psid>.sum.json (local,
@@ -54,10 +55,6 @@ _PROFILE_LABELS = {
 }
 # SĐT: dùng chung util.tim_sdt (xem util.py) - đừng dựng lại regex riêng ở đây.
 
-# BOT_MODEL: alias -> model id API. Có dấu '.' hoặc bắt đầu 'gemini' thì coi là id đầy đủ.
-_MODEL_ALIAS = {"flash": "gemini-3.5-flash", "pro": "gemini-2.5-pro",
-                "lite": "gemini-2.5-flash-lite"}
-
 # Model chính "high demand" (503) là quá tải của RIÊNG model đó -> đổi sang model khác thường
 # chạy được ngay. Chỉ dùng khi model chính đã thua hết lượt retry.
 # Phải KHÁC model chính mới có nghĩa; lấy bản lite (pool riêng, nhẹ nhất) - hợp vì nhịp dự
@@ -65,7 +62,11 @@ _MODEL_ALIAS = {"flash": "gemini-3.5-flash", "pro": "gemini-2.5-pro",
 # LƯU Ý bản preview làm model chính: gemini-3-flash-preview từng dính 504/503 liên tục kể cả
 # với tin "Xin chào" (commit 3a508ee phải quay về 2.5). Theo dõi cảnh báo "QUÁ TẢI" trên
 # dashboard; rơi dự phòng liên tục thì đổi BOT_MODEL về gemini-2.5-flash, KHÔNG cần deploy lại.
-_FALLBACK_MODEL = "gemini-2.5-flash-lite"
+# 07/09/2026: gemini-2.5-flash-lite bị Google gỡ dần, trả 404 NOT_FOUND kèm lời nhắn chuyển sang
+# 3.5-flash-lite (35 lần/tuần trong log). Model dự phòng chết là hỏng CẢ HAI đường dùng nó: nhịp
+# cứu khi model chính quá tải, và _comment_ma_sync - lỗi ở đó rơi về mã dự phòng nên mọi comment
+# chỉ còn A1/C1, mất hết mẫu trả lời đúng câu hỏi.
+_FALLBACK_MODEL = "gemini-3.5-flash-lite"
 
 # Tắt thinking: tư vấn bán hàng theo kịch bản không cần suy luận sâu, mà thinking tính tiền như
 # output + kéo dài thời gian sinh -> chậm, đắt, dễ dính deadline 504 lúc Gemini tải cao.
@@ -86,8 +87,9 @@ _TOOLS = [types.Tool(function_declarations=[types.FunctionDeclaration(
                  "ghi chú - danh sách trong system prompt CHỈ có mã/tên/danh mục. Gọi được nhiều "
                  "lần trong một lượt, và PHẢI gọi lại cho từng hạng mục khi khách hỏi cả công "
                  "trình (mộ, long đình, hàng rào, cổng...). Kết hợp tự do các bộ lọc: 'kind' "
-                 "(thể loại), 'q' (từ khoá tên, vd 'mộ tròn'), 'max'/'min' (tầm giá), 'stone', "
-                 "'category', hoặc 'product_ids' cho mẫu đã biết mã. Kết quả gồm mã, tên, danh "
+                 "(thể loại), 'q' (từ khoá tên, vd 'mộ tròn'), 'size' (kích thước khách nêu, "
+                 "vd '81x127'), 'max'/'min' (tầm giá), 'stone', 'category', hoặc 'product_ids' "
+                 "cho mẫu đã biết mã. Kết quả gồm mã, tên, danh "
                  "mục, kích thước, trọng lượng và giá THEO TỪNG LOẠI ĐÁ, sắp xếp giá tăng dần. "
                  "Trả TỐI ĐA 3 mẫu tiêu biểu - đừng liệt kê cả bảng, khách cần thêm thì gọi lại "
                  "với 'exclude_ids' là các mã đã gửi (cùng bộ lọc mà thiếu exclude_ids sẽ trả "
@@ -100,6 +102,11 @@ _TOOLS = [types.Tool(function_declarations=[types.FunctionDeclaration(
             "kind": {"type": "string", "enum": kinds_available(),
                      "description": "Thể loại sản phẩm - dùng khi khách hỏi cả một nhóm hàng"},
             "q": {"type": "string", "description": "Từ khoá tên sản phẩm, vd 'mộ tròn', 'mộ 3 cấp', 'cổng tứ trụ'. Mọi từ phải khớp"},
+            "size": {"type": "string",
+                     "description": "Kích thước khách nêu, nguyên văn: '81x127', '89 x 147', "
+                                    "'810x1270mm'. Số nhỏ hiểu là cm (thước Lỗ Ban) và tự quy "
+                                    "ra mm. BẮT BUỘC truyền khi khách nói kích thước - q chỉ dò "
+                                    "TÊN mẫu nên không lọc được theo cỡ"},
             "max": {"type": "string", "description": "Giá tối đa, vd '100tr', '1.5 tỷ', '100000000'"},
             "min": {"type": "string", "description": "Giá tối thiểu, mặc định 0"},
             "stone": {"type": "string", "description": "Loại đá: xanh đen, xanh rêu, xám BĐ, GRN, xanh Bình Định, trắng Yên Bái"},
@@ -134,8 +141,7 @@ def _get_client() -> genai.Client:
 
 
 def _model_id() -> str:
-    m = config.MODEL
-    return _MODEL_ALIAS.get(m, m)
+    return config.model_id()      # alias + bảng giá dùng chung 1 chỗ, xem config.MODEL_ALIAS
 
 
 def _system_text() -> str:
@@ -175,7 +181,9 @@ def _code_pattern() -> re.Pattern:
     codes = set()
     for line in csv_text.splitlines()[1:]:
         code = line.split(",", 1)[0].strip().upper()
-        if re.fullmatch(r"[A-Z]{1,5}\d{1,4}", code):
+        # Chữ CÓ DẤU cũng là mã: bảng hàng mới có LĐ01, CĐ02, ĐĐ03 - [A-Z] cũ bỏ sạch,
+        # bot nhắc mã trong câu trả lời mà không nhận ra nên không gửi kèm ảnh.
+        if re.fullmatch(r"[^\W\d_]{1,5}\d{1,4}", code):
             codes.add(code)
     alts = "|".join(re.escape(c) for c in sorted(codes, key=len, reverse=True)) or r"(?!x)x"
     pat = re.compile(rf"\b({alts})(?:\.\d+)?\b", re.IGNORECASE)
@@ -321,12 +329,48 @@ def _da_dua(ngan_sach: dict | None, results) -> list:
 
     Trần 2 mẫu áp cho MỖI LẦN gọi tool là chưa đủ: AI gọi tool nhiều vòng trong cùng một lượt
     (cho phép tới _MAX_TOOL_LOOPS) rồi gộp kết quả - ca thật khách hỏi "các mẫu Long đình" nhận
-    đúng 3 mẫu vì AI gọi 2 lần. Ngân sách đếm theo LƯỢT nên gọi mấy vòng cũng vẫn 2 mẫu."""
+    đúng 3 mẫu vì AI gọi 2 lần. Ngân sách đếm theo LƯỢT nên gọi mấy vòng cũng vẫn 2 mẫu.
+
+    Đếm RIÊNG từng THỂ LOẠI (ngan_sach = {thể loại: số mẫu đã đưa}). Bản cũ chung 1 suất cho cả
+    lượt: khách Trần Long (28/09) hỏi báo giá cả khu -> 2 long đình ăn hết suất, lần tra hàng rào
+    trả rỗng, bot vẫn nêu HR01 rồi tự bịa giá 1.8tr/md (thật 4tr)."""
     if ngan_sach is None:
         return results
-    con = max(0, int(ngan_sach.get("con", _MAX_GOI_Y)))
-    ngan_sach["con"] = con - len(results[:con])
-    return results[:con]
+    header, _, _ = load_rows()
+    i_tl = _col(header, "Thể Loại")
+    out = []
+    for item in results:
+        kind = _cell(item[2], i_tl)
+        if ngan_sach.get(kind, 0) < _MAX_GOI_Y:
+            ngan_sach[kind] = ngan_sach.get(kind, 0) + 1
+            out.append(item)
+    return out
+
+
+_CAU_HEN_BAO_GIA = "Giá và kích thước chính xác phần này em xin gửi chuyên gia xác nhận lại cho mình ạ."
+
+
+def _yeu_cau_viet_lai(reply: str, loi: list[str]) -> str:
+    """Lệnh viết lại khi tin nháp có số liệu lệch bảng hàng - kèm luôn số THẬT của các mã."""
+    ma = sorted(_codes_in(reply) | {m for x in loi for m in re.findall(r"đúng là '([^']+)'", x)})
+    that = render(rows_by_ids(ma)) if ma else "(tin không nêu mã hợp lệ nào)"
+    return ("[Hệ thống - KIỂM TRA SỐ LIỆU] Tin em vừa soạn CHƯA gửi vì có số liệu KHÔNG khớp "
+            "bảng hàng:\n- " + "\n- ".join(loi) + "\n\nSố liệu THẬT từ bảng hàng:\n" + that +
+            "\n\nViết lại TOÀN BỘ tin: chỉ dùng đúng mã, tên, đơn vị, giá của ĐÚNG loại đá, kích "
+            "thước, trọng lượng ở trên. Mã nào không có số liệu thì KHÔNG nêu giá/kích thước/đặc "
+            "điểm của nó (hoặc gọi suggest_products để tra). CẤM tự thêm chiều, tự đổi số, tự gán "
+            "số mái/số cột/nhãn bán chạy mà tên mẫu không ghi, tự cộng tổng nhiều mẫu.")
+
+
+def _cat_so_bia(psid: str, reply: str, loi: list[str], loi_khach: list[str]) -> str:
+    """Model viết lại vẫn bịa -> bỏ câu sai, thêm câu hẹn chuyên gia, báo admin.
+    Gửi thiếu 1 câu còn hơn gửi 1 con số sai: khách cầm giá bịa đi so là mất uy tín."""
+    sach = kiem_so_lieu.cat_cau_sai(reply, loi_khach)
+    alerts.alert(f"bia:so_lieu:{psid}",
+                 f"🟠 BOT BỊA SỐ LIỆU - đã cắt câu sai trước khi gửi.\npsid: {psid}\n"
+                 f"Lỗi: {'; '.join(loi)}\nTin gốc: {reply[:500]}")
+    print(f"[bia] cắt số liệu bịa psid={psid}: {'; '.join(loi)}", file=sys.stderr)
+    return f"{sach} {_CAU_HEN_BAO_GIA}".strip()
 
 
 def _run_tool(name: str, inp: dict, ngan_sach: dict | None = None) -> str:
@@ -343,22 +387,33 @@ def _run_tool(name: str, inp: dict, ngan_sach: dict | None = None) -> str:
         mx = parse_money(raw_max) if raw_max else None
         if mx is not None and mx <= 0:
             return f"Không đọc được tầm giá '{raw_max}'. Ghi kiểu '100tr' hoặc '1.5 tỷ'."
-        if mx is None and not (kind or q or inp.get("category") or inp.get("stone")):
-            return "Cần ít nhất một điều kiện: 'kind', 'q', 'max' hoặc 'product_ids'."
+        size = inp.get("size")
+        if mx is None and not (kind or q or size or inp.get("category") or inp.get("stone")):
+            return "Cần ít nhất một điều kiện: 'kind', 'q', 'size', 'max' hoặc 'product_ids'."
         mn = parse_money(inp.get("min", "0"))
         results = search(mx, mn if mn > 0 else 0.0, inp.get("stone"), inp.get("category"),
                          # Chốt trần _MAX_GOI_Y mẫu/lượt: khách hỏi "cho xem long đình" mà dội
                          # cả bảng thì tin dài, khách không chọn nổi. Muốn thêm thì gọi tool lại
                          # với exclude_ids.
                          min(int(inp.get("limit") or _MAX_GOI_Y), _MAX_GOI_Y), kind, q,
-                         inp.get("exclude_ids"))
+                         inp.get("exclude_ids"), size)
+        het_suat = bool(results) and ngan_sach is not None
         results = _da_dua(ngan_sach, results)
-        if not results and ngan_sach is not None and int(ngan_sach.get("con", 1)) <= 0:
+        if not results and het_suat:
             # Hết ngân sách chứ KHÔNG phải hết hàng - nói rõ để AI đừng đi tìm bộ lọc khác rồi
             # nhồi thêm mẫu, cũng đừng bịa "bên em hết mẫu".
-            return (f"Đã đưa đủ {_MAX_GOI_Y} mẫu cho lượt này - ĐỦ RỒI, không tra thêm. Viết tin "
-                    "với đúng các mẫu đã có; khách muốn xem thêm thì lượt sau gọi lại tool.")
+            return (f"Đã đưa đủ {_MAX_GOI_Y} mẫu thể loại này cho lượt này - ĐỦ RỒI, không tra thêm. "
+                    "Viết tin với đúng các mẫu đã có, KHÔNG nêu thêm mã nào của thể loại này; "
+                    "khách muốn xem thêm thì lượt sau gọi lại tool.")
     if not results:
+        # Lọc theo kích thước mà rỗng = bảng hàng KHÔNG có mẫu đúng cỡ đó. Bỏ 'size' rồi tra lại
+        # là đưa mẫu lệch hạng kích thước cho khách (ca thật: khách xin 81x127, bot đưa 97x147,
+        # khách bỏ đi) -> cấm hẳn, chuyển sang lối hàng đặt riêng.
+        if not ids and inp.get("size"):
+            return (f"Bảng hàng không có mẫu nào đúng kích thước '{inp.get('size')}'. TUYỆT ĐỐI "
+                    "không tra lại bằng cách bỏ 'size' và không đưa mẫu cỡ khác: nói đây là hàng "
+                    "xưởng nhận ĐẶT LÀM RIÊNG theo đúng kích thước của khách, giá chuyên gia báo "
+                    "theo thực tế.")
         # Nói RÕ thiếu ở đâu + gợi ý bộ lọc hợp lệ: bot trượt 1 lần thì thử lại được, thay vì
         # bỏ cuộc trả lời chay không mẫu nào (lỗi cũ hay gặp nhất).
         return ("Không có mẫu nào khớp. Thử nới tầm giá, bỏ bớt điều kiện, hoặc lọc bằng "
@@ -700,6 +755,32 @@ def _now_str() -> str:
 _RETRY_STATUS = {499, 500, 503, 504}
 
 
+# Model từ chối thinking_config (400) -> nhớ lại, lần sau khỏi tốn 1 request để biết.
+_KHONG_THINKING: set[str] = set()
+
+
+def _goi_1_lan(client, kw: dict):
+    """1 lần generate_content, có gỡ thinking_config nếu model không nhận.
+
+    gemini-3.5-flash-lite trả 400 INVALID_ARGUMENT cho thinking_budget=0 (2.5 và 3.1 thì nhận).
+    Tắt suy luận chỉ để tiết kiệm token - không đáng đánh đổi cả lượt khách - nên gặp 400 thì
+    bỏ thinking_config rồi gọi lại, và nhớ model đó để lần sau đi thẳng."""
+    cfg = kw.get("config")
+    co_think = getattr(cfg, "thinking_config", None) is not None
+    if co_think and kw.get("model") in _KHONG_THINKING:
+        kw = {**kw, "config": cfg.model_copy(update={"thinking_config": None})}
+        co_think = False
+    try:
+        return client.models.generate_content(**kw)
+    except genai_errors.APIError as e:
+        if getattr(e, "code", None) != 400 or not co_think:
+            raise
+        print(f"[gemini] {kw.get('model')} không nhận thinking_config -> gọi lại, để suy luận mặc định",
+              file=sys.stderr)
+        _KHONG_THINKING.add(kw.get("model"))
+        return client.models.generate_content(**{**kw, "config": cfg.model_copy(update={"thinking_config": None})})
+
+
 def _generate(client, tries: int = 4, **kw):
     """generate_content + retry lỗi tạm (499/500/503/504). 4 lần, backoff 2s/4s/8s.
 
@@ -710,7 +791,7 @@ def _generate(client, tries: int = 4, **kw):
     last = None
     for i in range(tries):
         try:
-            return client.models.generate_content(**kw)
+            return _goi_1_lan(client, kw)
         except genai_errors.APIError as e:          # gồm cả ClientError (499) lẫn ServerError (5xx)
             if getattr(e, "code", None) not in _RETRY_STATUS:
                 raise
@@ -866,7 +947,7 @@ def _answer_sync(psid: str, text: str, images: list[tuple[bytes, str]] | None = 
         profile = _profile_luot_nay(psid, _profile_from_history_sync(psid, full), text)
         # thời gian thực nhét ĐẦU contents (tách khỏi cache tĩnh)
         contents = [types.Content(role="user", parts=[types.Part.from_text(text=_time_note_text())])]
-        if profile_context := _profile_prompt(profile):
+        if profile_context := _profile_prompt(profile, _da_xin_so(full)):
             contents.append(types.Content(role="user", parts=[types.Part.from_text(text=profile_context)]))
         if gia_context := _gia_prompt(full, text, profile):
             contents.append(types.Content(role="user", parts=[types.Part.from_text(text=gia_context)]))
@@ -894,13 +975,17 @@ def _answer_sync(psid: str, text: str, images: list[tuple[bytes, str]] | None = 
         contents.append(types.Content(role="user", parts=parts))
 
         handle = _cached_handle(client, model_id)     # None -> nhồi thẳng (fallback)
-        tok_in = tok_out = 0
-        ngan_sach = {"con": _MAX_GOI_Y}      # trần mẫu cho CẢ lượt, dùng chung mọi vòng gọi tool
-        for _ in range(_MAX_TOOL_LOOPS):
+        tok_in = tok_out = tok_cache = 0
+        ngan_sach: dict = {}      # {thể loại: số mẫu đã đưa} cả lượt, dùng chung mọi vòng gọi tool
+        da_bat_viet_lai = False
+        for _ in range(_MAX_TOOL_LOOPS + 1):      # +1: chừa 1 vòng cho lần bắt viết lại số liệu
             resp, handle = _gen_answer(client, model_id, contents, handle)
             u = resp.usage_metadata
             if u:
                 tok_in += u.prompt_token_count or 0
+                # Phần ĐÃ CACHE nằm TRONG prompt_token_count nhưng Google tính rẻ hơn nhiều.
+                # Tách ra để dashboard khỏi tính cả system prompt 12k/lượt theo giá input đầy đủ.
+                tok_cache += getattr(u, "cached_content_token_count", 0) or 0
                 # thinking tính giá như output -> gộp chung
                 tok_out += (u.candidates_token_count or 0) + (u.thoughts_token_count or 0)
             cand = (resp.candidates or [None])[0]
@@ -919,6 +1004,18 @@ def _answer_sync(psid: str, text: str, images: list[tuple[bytes, str]] | None = 
             reply = "".join(p.text for p in parts if p.text).strip()
             if not reply:
                 raise BrainError(f"API không trả nội dung. finish_reason={cand.finish_reason}")
+            # Chốt chặn số liệu: giá/kích thước/trọng lượng/mã phải khớp bảng hàng. Sai -> bắt
+            # viết lại 1 lần kèm số thật; vẫn sai -> cắt câu sai (xem _cat_so_bia).
+            loi_khach = [text] + [m["content"] for m in full if m.get("role") == "user"
+                                  and isinstance(m.get("content"), str)]
+            if loi := kiem_so_lieu.kiem(reply, loi_khach):
+                if not da_bat_viet_lai:
+                    da_bat_viet_lai = True
+                    contents.append(cand.content)
+                    contents.append(types.Content(role="user", parts=[
+                        types.Part.from_text(text=_yeu_cau_viet_lai(reply, loi))]))
+                    continue
+                reply = _cat_so_bia(psid, reply, loi, loi_khach)
             # Sản phẩm nhắc lần đầu trong hội thoại -> tự kèm marker ảnh (messenger bóc ra gửi).
             # Đọc <<ANH>> TRƯỚC khi bóc; sau đó reply sạch mới đem gửi + lưu lịch sử.
             # Lượt khách gửi ảnh: cấm dội ảnh mẫu bên em (kể cả khi khách gõ kèm mã) - khách
@@ -929,18 +1026,20 @@ def _answer_sync(psid: str, text: str, images: list[tuple[bytes, str]] | None = 
             # Lọc Markdown TRƯỚC khi gửi và trước khi lưu log: lưu bản còn '**' thì lượt sau
             # model đọc lại chính nó và học tiếp thói quen đó.
             reply = _sach_markdown(reply)
+            # Chốt chặn cuối cho SĐT: prompt cấm rồi model vẫn đọc lại số được. Xem util.che_sdt.
+            reply = util.che_sdt(reply)
             if hua_anh_khong_co:
                 # Khách hỏi ảnh mà Base chưa có: nói thật + xin liên hệ, thay vì để khách chờ hụt.
                 # Đã có SĐT trong hồ sơ thì KHÔNG xin lại - khách vừa cho số xong lại bị hỏi số
                 # là dấu hiệu rõ nhất của bot không nhớ gì.
                 reply = (reply + " Mẫu này bên em làm thiết kế riêng theo khuôn viên từng nhà "
-                         "nên chưa có sẵn ảnh dựng ạ. " + _cau_xin_lien_he(profile.get("sdt"))).strip()
+                         "nên chưa có sẵn ảnh dựng ạ. " + _cau_xin_lien_he(profile.get("sdt"), _da_xin_so(full))).strip()
             if (thay := _chan_bia_sdt(psid, reply, profile)):
                 reply, markers = thay, ""    # thay CẢ tin -> không sót marker ảnh/handoff nào
             if not reply:
                 raise BrainError("API chỉ trả marker ảnh, không có chữ.")
             reply_out = f"{reply} {markers}" if markers else reply   # marker CHỈ để gửi, KHÔNG lưu history
-            stats.log_usage(psid, tok_in, tok_out)
+            stats.log_usage(psid, tok_in, tok_out, tok_cache)
             # Nối vào log SẠCH: chỉ text turn (bỏ vòng tool trung gian) -> không orphan tool block.
             # "at" = thời gian cụ thể: khách gửi lúc nào, bot trả lúc nào.
             # Ảnh không lưu bytes vào log -> ghi chú số ảnh để lượt sau còn biết khách từng gửi ảnh.
@@ -971,6 +1070,11 @@ def _doc_profile(psid: str) -> dict:
     return _clean_profile(state.get(psid).get("profile"))
 
 
+def da_xin_so(psid: str) -> bool:
+    """Bot đã xin SĐT khách này lần nào chưa (đọc log). Cho câu cố định giữ trần 1 lần xin."""
+    return _da_xin_so(_load_hist(psid))
+
+
 def sdt_da_luu(psid: str) -> str:
     """SĐT đã lưu trong hồ sơ khách. "" nếu chưa có. Đọc state, KHÔNG gọi AI.
 
@@ -992,11 +1096,13 @@ def ghi_sdt(psid: str, sdt: str) -> str:
     return profile.get("sdt", "")
 
 
-def _cau_xin_lien_he(sdt: str | None) -> str:
-    """Câu chốt mời liên hệ. Có SĐT rồi thì XÁC NHẬN số đó, không xin lại."""
+def _cau_xin_lien_he(sdt: str | None, da_xin_so: bool = False) -> str:
+    """Câu chốt mời liên hệ. Có SĐT rồi thì XÁC NHẬN số đó; đã xin 1 lần rồi thì thôi."""
+    if da_xin_so and not sdt:
+        return ""
     if sdt:
-        return (f"Em gửi Bác bộ ảnh công trình thực tế và bản phối riêng qua Zalo {sdt} "
-                "ngay hôm nay ạ.")
+        return ("Em gửi Bác bộ ảnh công trình thực tế và bản phối riêng qua Zalo theo số của "
+                "Bác ngay hôm nay ạ.")
     return ("Bác để lại số điện thoại hoặc Zalo, em gửi Bác bộ ảnh công trình thực tế "
             "và bản phối riêng ngay hôm nay ạ.")
 
@@ -1008,6 +1114,9 @@ def _ghi_profile(psid: str, profile: dict) -> None:
 def _clean_profile(raw: object) -> dict:
     raw = raw if isinstance(raw, dict) else {}
     out = {field: str(raw.get(field) or "").strip() for field in _PROFILE_FIELDS}
+    # Ô SĐT do AI trích có thể là rác ("Zalo", "chưa cho", "0979655XXX") -> chỉ giữ số VN thật.
+    # Không lọc thì _sdt_khach coi rác là SĐT và khách chưa cho số vẫn thành lead CRM.
+    out["sdt"] = util.tim_sdt(out["sdt"])
     out["upto"] = int(raw.get("upto") or 0)
     return out
 
@@ -1041,8 +1150,10 @@ def _dem_hoi_gia(hist: list, text: str) -> int:
 _GIA_LAN_1 = (
     "[NHỊP GIÁ - khách hỏi giá LẦN ĐẦU trong cả cuộc trò chuyện]\n"
     "Tin này TUYỆT ĐỐI KHÔNG nêu con số tiền nào, KHÔNG nêu mã mẫu, KHÔNG gọi suggest_products.\n"
-    "Nói đúng ý này: giá tuỳ từng công trình, kích thước, loại đá và nhu cầu của khách nên mỗi "
-    "nhà một khác - rồi xin SĐT/Zalo để báo giá đúng phần khách cần. Tối đa 3 câu, không hỏi thêm ý nào khác.")
+    "Nói đúng ý này: giá tuỳ kích thước đất, dòng đá và các hạng mục nhà mình làm - rồi xin "
+    "kích thước khu đất và mấy ngôi để gửi bảng giá bóc tách từng hạng mục. Khách đã đưa kích "
+    "thước rồi thì xin SĐT/Zalo để gửi bảng bóc tách - CHỈ KHI dòng SĐT trong hồ sơ còn cho xin. "
+    "Tối đa 3 câu, không hỏi thêm ý nào khác.")
 _GIA_LAN_2 = (
     "[NHỊP GIÁ - khách đã hỏi giá {n} lần]\n"
     "Lần này PHẢI báo giá thật: gọi suggest_products rồi nêu 1-2 MÃ kèm khoảng giá và kích thước "
@@ -1057,8 +1168,9 @@ _ANH_KHACH_GUI = (
     "Tin này TUYỆT ĐỐI KHÔNG nêu mã mẫu bên em, KHÔNG gọi suggest_products, KHÔNG thêm <<ANH>>, "
     "KHÔNG nêu con số tiền nào.\n"
     "Làm đúng 3 việc, tối đa 3 câu: 1) nhận xét NGẮN 1 câu đúng thứ trong ảnh (hạng mục, kiểu "
-    "dáng) để khách biết em đã xem thật; 2) xin SĐT/Zalo - đã có số trong hồ sơ thì xác nhận lại "
-    "số đó, KHÔNG xin lại; 3) nói chuyên gia sẽ GỌI trao đổi đúng mẫu Bác gửi.\n"
+    "dáng) để khách biết em đã xem thật; 2) xin SĐT/Zalo nếu dòng SĐT trong hồ sơ còn cho xin - "
+    "đã có số thì xác nhận lại số đó, đã xin rồi thì KHÔNG xin lại; 3) nói chuyên gia sẽ GỌI "
+    "(chưa có số thì: chuyên gia trao đổi) đúng mẫu Bác gửi.\n"
     "Kết tin bằng dòng <<HANDOFF:khách gửi mẫu riêng>>.")
 
 
@@ -1093,14 +1205,30 @@ def _profile_luot_nay(psid: str, profile: dict, text: str) -> dict:
 
 
 _CHUA_CO_SDT = ("SĐT/Zalo: CHƯA CÓ - khách chưa gõ số nào. CẤM tự nghĩ ra chữ số, CẤM nói "
-                "'em đã nhận được SĐT của Bác', CẤM gửi PHIẾU YÊU CẦU. Xin số trước đã.")
+                "'em đã nhận được SĐT của Bác', CẤM gửi PHIẾU YÊU CẦU. Cả cuộc chưa xin số lần nào: "
+                "trả lời xong câu khách hỏi thì được xin 1 lần, nói rõ xin để làm gì.")
+# Bộ trả lời mẫu 09/10/2026: máy xin số 1.696 lần, 76% cuộc bị xin từ 2 lần -> khách bực.
+# Luật mới: xin TỐI ĐA 1 lần cả cuộc. Đếm bằng CODE như nhịp giá, không để model tự đếm.
+_CHUA_CO_SDT_DA_XIN = ("SĐT/Zalo: CHƯA CÓ - khách chưa gõ số nào. Em ĐÃ xin số rồi - CẤM xin lại "
+                       "dưới mọi cách nói, cứ tư vấn tiếp trên Messenger. CẤM tự nghĩ ra chữ số, CẤM "
+                       "nói 'em đã nhận được SĐT của Bác', CẤM gửi PHIẾU YÊU CẦU.")
+_XIN_SO_RE = re.compile(r"(?:xin|để lại|cho em)[^.?!\n()]{0,25}(?:số\s*(?:điện thoại|đt|máy|zalo)|sđt|zalo)"
+                        r"|xin\s+số\s*(?:của|nhé|với|ạ|[.?!,]|$)", re.I)
+
+
+def _da_xin_so(hist: list) -> bool:
+    """Bot đã có tin nào xin SĐT/Zalo trong lịch sử chưa."""
+    return any(m.get("role") == "assistant" and isinstance(m.get("content"), str)
+               and _XIN_SO_RE.search(m["content"]) for m in hist)
 # Ô SĐT có giá trị mà chỉ in trơ "SĐT/Zalo: 09..." thì model vẫn xin lại: persona nhắc xin số
 # ở chục chỗ, một dòng dữ kiện không đủ sức cãi. Đã xảy ra thật: khách 27234963929538234
 # (28/07 10:23) và 25803381659296922 (28/07 15:30) đều gõ số rồi bị hỏi lại ngay tin sau.
 # -> ô SĐT phải là LỆNH CẤM, cân với _CHUA_CO_SDT ở nhánh ngược lại.
 _DA_CO_SDT = ("SĐT/Zalo: {sdt} - khách ĐÃ tự gõ số này rồi. CẤM xin số thêm lần nào nữa, dưới "
               "mọi cách nói ('cho em xin SĐT', 'Bác để lại số', 'xin số Zalo của Bác'). Cần "
-              "chuyên gia liên hệ thì nói thẳng 'em báo chuyên gia gọi lại Bác qua số {sdt}'.")
+              "chuyên gia liên hệ thì nói thẳng 'em báo chuyên gia gọi lại Bác qua số của Bác'. "
+              "CẤM viết lại chữ số của SĐT trong tin nhắn - Messenger thấy dãy 10 số "
+              "là gắn thẻ chuyển khoản ngân hàng, khách tưởng bên mình đòi tiền.")
 # Tin BỊA về SĐT: gửi phiếu hoặc khẳng định đã có số, trong khi hồ sơ chưa có số nào.
 _BIA_SDT_RE = re.compile(r"PHIẾU YÊU CẦU|đã nhận được (?:SĐT|số)|em đã có s(?:ố|đt)", re.I)
 _XIN_SO_THAY_PHIEU = (
@@ -1129,7 +1257,7 @@ def _chan_bia_sdt(psid: str, reply: str, profile: dict) -> str:
     return _XIN_SO_THAY_PHIEU
 
 
-def _profile_prompt(profile: dict) -> str:
+def _profile_prompt(profile: dict, da_xin_so: bool = False) -> str:
     """Khối hồ sơ nhét vào prompt mỗi lượt.
 
     SĐT trống phải nói THẲNG là chưa có. Bản cũ chỉ in trường CÓ giá trị nên ô SĐT trống biến
@@ -1139,7 +1267,8 @@ def _profile_prompt(profile: dict) -> str:
     lines = [f"{_PROFILE_LABELS[field]}: {profile[field]}"
              for field in _PROFILE_FIELDS if field != "sdt" and profile.get(field)]
     sdt = profile.get("sdt")
-    lines.insert(0, _DA_CO_SDT.format(sdt=sdt) if sdt else _CHUA_CO_SDT)
+    lines.insert(0, _DA_CO_SDT.format(sdt=sdt) if sdt
+                 else _CHUA_CO_SDT_DA_XIN if da_xin_so else _CHUA_CO_SDT)
     if not lines:
         return ""
     return ("[Hồ sơ khách đã xác nhận - coi là dữ kiện; KHÔNG hỏi lại bất kỳ mục nào có giá trị.\n"
@@ -1316,8 +1445,7 @@ def _extract_lead_sync(psid: str, deep: bool = True, tom_tat_toi: int = 0) -> di
     return lead
 
 
-# Comment có nhu cầu -> mới nhắn riêng vào inbox. Comment khen/chào/spam thì chỉ cảm ơn công khai,
-# nhắn riêng mấy người này là làm phiền và đốt luôn quyền private reply (FB chỉ cho 1 lần/comment).
+# Từ khoá nhu cầu: chỉ còn dùng làm mã dự phòng khi model phân loại comment lỗi.
 _INTENT_RE = re.compile(
     r"\d{9,}"                                        # SĐT trong comment
     r"|\b(gia|giá|bao nhieu|bao nhiêu|bn|inbox|ib|tu van|tư vấn|bao gia|báo giá|quan tam|quan tâm"
@@ -1327,35 +1455,40 @@ _INTENT_RE = re.compile(
 _WORD_RE = re.compile(r"[0-9A-Za-zÀ-ỹ]")
 
 
-def _comment_intent_sync(text: str) -> bool:
-    """True = comment có dấu hiệu nhu cầu -> đáng nhắn riêng.
+_MA_RE = re.compile(r"\b([A-E]\d{1,2})\b")
 
-    3 tầng, dừng ở tầng rẻ nhất: không có chữ -> False; khớp từ khoá -> True; còn lại hỏi model lite.
-    Model lỗi -> True (fail-open): thà nhắn thừa 1 người còn hơn bỏ lọt khách thật."""
+
+def _comment_ma_sync(text: str) -> str:
+    """Xếp comment vào 1 mã của bộ mẫu bình luận (comment_mau.NHOM).
+
+    Không có chữ -> E4 (không gọi API). Còn lại hỏi model lite, chỉ lấy MÃ - chữ trả lời là mẫu
+    cố định nên model không có chỗ bịa. Model lỗi/trả mã lạ -> có từ khoá nhu cầu thì A1
+    (fail-open: thà nhắn thừa hơn bỏ lọt khách), không thì C1 (cảm ơn)."""
     text = (text or "").strip()
     if not _WORD_RE.search(text):
-        return False
-    if _INTENT_RE.search(text):
-        return True
-    prompt = ("Đây là bình luận dưới bài đăng của xưởng đá mỹ nghệ (mộ đá, lăng mộ, long đình, cổng đá). "
-              "Người này có dấu hiệu MUỐN MUA / hỏi giá / hỏi sản phẩm / nhờ tư vấn không? "
-              "Chỉ khen đẹp, chào hỏi, cảm thán, tag bạn bè, spam thì KHÔNG. "
-              "Trả lời đúng một từ: CO hoặc KHONG.\n\nBình luận: " + text)
+        return "E4"
+    du_phong = "A1" if _INTENT_RE.search(text) else "C1"
+    nhom = "\n".join(f"{ma}: {mo_ta}" for ma, mo_ta in comment_mau.NHOM.items())
+    prompt = ("Đây là bình luận dưới bài quảng cáo của Hồn Đá (lăng mộ, khu lăng đá). Xếp nó vào "
+              "ĐÚNG MỘT mã dưới đây. Có nhiều ý thì chọn ý cần trả lời nhất (câu hỏi > khen). "
+              "Số điện thoại của chính khách -> A4; số/đường dẫn của bên bán khác -> E2.\n"
+              f"{nhom}\n\nChỉ trả lời đúng mã, ví dụ: B1\n\nBình luận: {text}")
     try:
         resp = _generate(_get_client(), tries=2, model=_FALLBACK_MODEL,
                          contents=[types.Content(role="user", parts=[types.Part.from_text(text=prompt)])],
                          config=types.GenerateContentConfig(max_output_tokens=8, thinking_config=_NO_THINK))
         cand = (resp.candidates or [None])[0]
         out = "".join(p.text for p in (cand.content.parts or []) if p.text).strip().upper() if cand and cand.content else ""
-        return not out.startswith("KHONG")
+        m = _MA_RE.search(out)
+        return m.group(1) if m and m.group(1) in comment_mau.NHOM else du_phong
     except Exception as e:
         print(f"[comment] phân loại lỗi: {type(e).__name__}: {e}", file=sys.stderr)
-        return True
+        return du_phong
 
 
-async def comment_has_intent(text: str) -> bool:
+async def comment_ma(text: str) -> str:
     """Phân loại comment (async wrapper)."""
-    return await asyncio.to_thread(_comment_intent_sync, text)
+    return await asyncio.to_thread(_comment_ma_sync, text)
 
 
 async def answer(psid: str, text: str, images: list[tuple[bytes, str]] | None = None,

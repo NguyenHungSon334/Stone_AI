@@ -1,4 +1,4 @@
-"""Self-check: chỉ nhắn RIÊNG khi comment có nhu cầu, còn lại chỉ cảm ơn công khai.
+"""Self-check: comment xếp nhóm theo bộ mẫu, trả lời/nhắn riêng/ẩn đúng nhóm.
 Chạy: python tests/test_comment_intent.py"""
 import asyncio
 import os
@@ -40,89 +40,104 @@ def test_parse_kem_noi_dung():
         messenger._SEEN_COMMENTS.update(seen)
 
 
-def test_intent_khong_goi_api():
-    """Tầng rẻ: rỗng/icon -> False, từ khoá/SĐT -> True. Gọi API ở 2 ca này là phí tiền."""
+def test_ma_khong_goi_api_khi_khong_co_chu():
+    """Rỗng/chỉ icon -> E4 (im), không tốn lượt gọi model."""
     def _no_api(*a, **kw):
-        raise AssertionError("không được gọi model ở tầng từ khoá")
+        raise AssertionError("không được gọi model khi comment không có chữ")
     orig = brain._generate
     brain._generate = _no_api
     try:
-        assert brain._comment_intent_sync("") is False
-        assert brain._comment_intent_sync("👍👍❤️") is False
-        assert brain._comment_intent_sync("giá bao nhiêu ạ") is True
-        assert brain._comment_intent_sync("0912345678") is True
-        assert brain._comment_intent_sync("ib mình với") is True
+        assert brain._comment_ma_sync("") == "E4"
+        assert brain._comment_ma_sync("👍👍❤️") == "E4"
     finally:
         brain._generate = orig
 
 
-def test_intent_hoi_model_va_fail_open():
-    """Không khớp từ khoá -> hỏi model. Model lỗi -> True (thà nhắn thừa hơn mất khách)."""
+def test_ma_hoi_model_va_du_phong():
+    """Model trả mã -> dùng mã. Mã lạ / lỗi -> A1 nếu có từ khoá nhu cầu, không thì C1."""
     orig = brain._generate
     try:
-        brain._generate = lambda *a, **kw: _fake_resp("KHONG")
-        assert brain._comment_intent_sync("Công trình trông bề thế thật") is False
-
-        brain._generate = lambda *a, **kw: _fake_resp("CO")
-        assert brain._comment_intent_sync("Nhà mình ở Nam Định có nhận không") is True
+        brain._generate = lambda *a, **kw: _fake_resp("B1")
+        assert brain._comment_ma_sync("Xưởng ở đâu vậy") == "B1"
+        brain._generate = lambda *a, **kw: _fake_resp("Z9")
+        assert brain._comment_ma_sync("Công trình trông bề thế thật") == "C1"
 
         def _boom(*a, **kw):
             raise RuntimeError("API sập")
         brain._generate = _boom
-        assert brain._comment_intent_sync("Công trình trông bề thế thật") is True
+        assert brain._comment_ma_sync("giá bao nhiêu ạ") == "A1"
+        assert brain._comment_ma_sync("Công trình trông bề thế thật") == "C1"
     finally:
         brain._generate = orig
 
 
-def test_handle_comment_bo_qua_private_khi_khong_co_nhu_cau():
-    """Comment khen suông: cảm ơn công khai, KHÔNG nhắn riêng (đỡ làm phiền + giữ quyền
-    private reply, FB chỉ cho 1 lần/comment). Và không được báo động 'comment chết'."""
-    calls = {"pub": 0, "priv": 0, "alert": 0}
+def _chay_comment(ma: str, pub_ok: bool = True, priv_ok: bool = True) -> dict:
+    """Chạy handle_comment với mã cố định, ghi lại kênh nào được gọi + câu công khai."""
+    calls = {"pub": [], "priv": 0, "hide": 0, "alert": 0, "notify": 0}
 
-    async def _pub(cid):
-        calls["pub"] += 1
-        return True
+    async def _pub(cid, msg):
+        calls["pub"].append(msg)
+        return pub_ok
 
     async def _priv(cid):
         calls["priv"] += 1
+        return priv_ok
+
+    async def _hide(cid):
+        calls["hide"] += 1
         return True
 
     async def _alert(key, msg):
         calls["alert"] += 1
 
-    orig = (messenger.reply_public, messenger.reply_private, messenger.alert_admins,
-            messenger.stats.log_event, brain.comment_has_intent)
-    messenger.reply_public, messenger.reply_private = _pub, _priv
-    messenger.alert_admins = _alert
+    async def _notify(msg):
+        calls["notify"] += 1
+
+    async def _ma(text):
+        return ma
+
+    names = ("reply_public", "reply_private", "hide_comment", "alert_admins", "notify_admins")
+    orig = [getattr(messenger, n) for n in names] + [messenger.stats.log_event, brain.comment_ma]
+    for n, f in zip(names, (_pub, _priv, _hide, _alert, _notify)):
+        setattr(messenger, n, f)
     messenger.stats.log_event = lambda *a, **kw: None
+    brain.comment_ma = _ma
     try:
-        async def _no_intent(text):
-            return False
-        brain.comment_has_intent = _no_intent
-        asyncio.run(messenger.handle_comment("C1", "U1", "Đẹp quá"))
-        assert calls == {"pub": 1, "priv": 0, "alert": 0}, calls
-
-        async def _intent(text):
-            return True
-        brain.comment_has_intent = _intent
-        asyncio.run(messenger.handle_comment("C2", "U1", "giá bao nhiêu"))
-        assert calls == {"pub": 2, "priv": 1, "alert": 0}, calls
-
-        # Public hỏng + không nhắn riêng = khách không nhận được gì -> phải cảnh báo.
-        async def _pub_fail(cid):
-            return False
-        messenger.reply_public = _pub_fail
-        brain.comment_has_intent = _no_intent
-        asyncio.run(messenger.handle_comment("C3", "U1", "Đẹp quá"))
-        assert calls["alert"] == 1, calls
+        asyncio.run(messenger.handle_comment("C1", "U1", "x"))
     finally:
-        (messenger.reply_public, messenger.reply_private, messenger.alert_admins,
-         messenger.stats.log_event, brain.comment_has_intent) = orig
+        for n, f in zip(names, orig):
+            setattr(messenger, n, f)
+        messenger.stats.log_event, brain.comment_ma = orig[-2], orig[-1]
+    return calls
+
+
+def test_handle_comment_theo_nhom():
+    # Khen: trả lời công khai, KHÔNG nhắn riêng (đỡ làm phiền + giữ quyền private reply).
+    c = _chay_comment("C1")
+    assert len(c["pub"]) == 1 and c["priv"] == 0 and c["alert"] == 0, c
+    # Hỏi giá: nhắn riêng + câu "đã nhắn riêng".
+    c = _chay_comment("A5")
+    assert c["priv"] == 1 and "đã nhắn tin" in c["pub"][0], c
+    # Nhắn riêng hỏng -> KHÔNG được nói "đã nhắn riêng", đổi sang mời nhắn trang.
+    c = _chay_comment("A5", priv_ok=False)
+    assert "nhắn trang" in c["pub"][0] and "đã nhắn" not in c["pub"][0], c
+    # Lộ SĐT: báo người thật, trả lời A4, rồi ẩn.
+    c = _chay_comment("A4")
+    assert c["notify"] == 1 and c["hide"] == 1 and len(c["pub"]) == 1, c
+    # Chửi: ẩn, không trả lời, không phải sự cố.
+    c = _chay_comment("E1")
+    assert c["pub"] == [] and c["priv"] == 0 and c["hide"] == 1 and c["alert"] == 0, c
+    # Chỉ gắn tên: im hẳn.
+    c = _chay_comment("E4")
+    assert c["pub"] == [] and c["hide"] == 0 and c["alert"] == 0, c
+    # Public hỏng + không nhắn riêng = khách không nhận được gì -> phải cảnh báo.
+    c = _chay_comment("C1", pub_ok=False)
+    assert c["alert"] == 1, c
 
 
 if __name__ == "__main__":
     test_parse_kem_noi_dung()
-    test_intent_khong_goi_api()
-    test_intent_hoi_model_va_fail_open()
-    test_handle_comment_bo_qua_private_khi_khong_co_nhu_cau()
-    print("OK - comment intent")
+    test_ma_khong_goi_api_khi_khong_co_chu()
+    test_ma_hoi_model_va_du_phong()
+    test_handle_comment_theo_nhom()
+    print("OK - comment theo nhóm")

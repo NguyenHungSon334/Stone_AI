@@ -106,8 +106,8 @@ Dashboard **ghi được** secret: tab Cài đặt > ô `Page Access Token` > L�
 cũ** (không thể vô tình xoá token bằng cách bỏ trống ô).
 
 > Đừng nhầm với `_ENV_EDITABLE` cũng trong `admin.py`: đó là đường `POST /api/settings` đời
-> đầu, chỉ nhận 4 key thường (`BOT_MODEL`, `BOT_ADMIN_UIDS`, `BOT_PER_PSID_RATE_S`,
-> `BOT_MAX_CONCURRENT`) và KHÔNG đụng tới secret.
+> đầu, chỉ nhận 3 key thường (`BOT_MODEL`, `BOT_ADMIN_UIDS`, `BOT_MAX_CONCURRENT`) và KHÔNG
+> đụng tới secret.
 
 Sửa tay trên VPS khi không vào được dashboard:
 
@@ -181,7 +181,7 @@ App: Develop) > Generate New Token > **Token expiration: Never** + tick 5 quyề
 | `admin.py` | Router `/admin`: dashboard, xem khách, ô nhập cấu hình (ghi `.env`), test Lark, xoá data, restart |
 | `dashboard.html` | Giao diện trang admin |
 | `config.py` | Đọc `.env` + persona + bảng sản phẩm (cache theo mtime) |
-| `stats.py` | Đếm token, chi phí, sự kiện |
+| `stats.py` | Đếm token, chi phí, sự kiện (LƯỢT) + `tong_the()` gộp số theo NGƯỜI |
 | `returning.py` | Khách cũ quay lại: dựng lại lịch sử từ Graph API + báo Lark khi khách im >24h nhắn lại |
 | `fb.py` | Mirror hội thoại + stats lên Firebase Realtime DB |
 | `util.py` | psid an toàn, ghi JSON atomic |
@@ -325,8 +325,8 @@ nhập, test webhook Lark, xoá toàn bộ data (local + Firebase, KHÔNG hoàn 
 Cấu hình chỉ sửa qua **ô nhập** (`/api/config`); editor `.env` thô đã bỏ - hai đường ghi cùng
 một file mà đường kia không validate được, dán nhầm là hỏng file và mất luôn token dashboard.
 
-> **Ô nhập KHÔNG ghi được token/secret.** `_ENV_EDITABLE` (`admin.py:36`) chỉ whitelist 4 key
-> `BOT_MODEL`, `BOT_ADMIN_UIDS`, `BOT_PER_PSID_RATE_S`, `BOT_MAX_CONCURRENT`. Các ô bí mật vẫn
+> **Ô nhập KHÔNG ghi được token/secret.** `_ENV_EDITABLE` (`admin.py:36`) chỉ whitelist 3 key
+> `BOT_MODEL`, `BOT_ADMIN_UIDS`, `BOT_MAX_CONCURRENT`. Các ô bí mật vẫn
 > hiện ra mời điền nhưng vòng ghi (`admin.py:202`) chỉ duyệt whitelist nên giá trị bị **vứt im
 > lặng**, API vẫn trả `{"ok": true}`. Đây là bug thật đã tốn hàng giờ debug. Muốn đổi secret:
 > sửa `.env` tay qua SSH (xem mục Token Facebook). Muốn sửa hẳn thì hoặc thêm key vào
@@ -336,11 +336,35 @@ một file mà đường kia không validate được, dán nhầm là hỏng fi
 trị che hiện ở dòng riêng bên dưới - đổ vào `value` thì bấm Lưu sẽ ghi đè chính chuỗi che lên
 token thật.
 
-`reload_env()` nạp nóng được: `BOT_MODEL`, `BOT_ADMIN_UIDS`, `BOT_PER_PSID_RATE_S`,
-`BOT_DASH_TOKEN`, 2 biến giá. `BOT_MAX_CONCURRENT` đổi phải **restart** (semaphore tạo lúc import).
+`reload_env()` nạp nóng MỌI khoá chỉnh được từ dashboard trừ `BOT_MAX_CONCURRENT` (semaphore
+tạo lúc import -> phải **restart**). Thêm khoá mới vào ô nhập thì nhớ nạp lại ở đây: giao diện
+chỉ hiện "cần khởi động lại" cho ô có cờ `restart`, ô không nạp lại mà không có cờ là nói dối.
 
-Giá tính tiền dashboard lấy từ `GEMINI_PRICE_IN_USD` / `GEMINI_PRICE_OUT_USD` (USD / 1 triệu
-token, mặc định 1.5 / 9.0). Google đổi giá thì phải tự sửa, không thì số tiền hiển thị sai.
+Mặc định của mọi khoá nằm ở `config.MAC_DINH` - **nguồn duy nhất**, trang Cấu hình đọc thẳng
+dict đó (trước đây `admin.py` giữ bản chép tay riêng rồi lệch dần: UI hiện "nhắc sau 4 giờ"
+trong khi bot chạy 23 giờ).
+
+**Lọc theo tháng.** Tổng quan có ô "Theo tháng..." (`GET /api/overview?thang=YYYY-MM`) - dựng
+từ bản ghi gộp nên xem lại được mọi tháng đã qua. Tab Khách lọc theo THÁNG KHÁCH ĐẾN
+(`?thang=YYYY-MM`, hoặc `chua_ro`), lấy từ cờ `den_luc` trên từng khách. Khách mới thì
+`state.ghi_den_luc()` tự ghi; khách CÓ TỪ TRƯỚC phải chạy một lần:
+
+```bash
+python bot_tools/backfill_den_luc.py --thu   # xem trước, không ghi
+python bot_tools/backfill_den_luc.py         # ghi thật (chạy lại bao nhiêu lần cũng được)
+```
+
+**Lượt vs khách.** `stats.*` chỉ đếm được LƯỢT: bản ghi gộp theo ngày bỏ psid, sự kiện thô
+giữ `BOT_STATS_KEEP_DAYS` ngày. Số theo NGƯỜI (tổng khách, khách từng cần chuyên gia, khách bị
+khoá) đọc từ `khach_state` - cờ sống theo khách, không bị dọn - qua `stats.tong_the()` (cache
+5 phút). Handoff đánh dấu lên khách bằng `state.danh_dau_handoff()`, bắt đầu từ
+`stats.MOC_CO_HANDOFF`; khách chuyển chuyên gia TRƯỚC mốc đó không dựng lại được.
+
+Giá tính tiền dashboard theo ĐÚNG model đang chạy: bảng `config._GIA` (input / output / input
+đã cache, USD trên 1 triệu token), tra bằng `config.gia_model()`. Ghi đè bằng
+`GEMINI_PRICE_IN_USD` / `GEMINI_PRICE_OUT_USD` / `GEMINI_PRICE_CACHED_IN_USD` khi Google đổi
+giá mà bảng chưa kịp sửa. Token đã cache (system prompt ~12k gửi lại mỗi lượt) tính theo cột
+thứ 3 - gộp vào giá input thường là dashboard báo đắt gấp nhiều lần số Google thật sự thu.
 
 ## Ghép vào Javis OS sau
 

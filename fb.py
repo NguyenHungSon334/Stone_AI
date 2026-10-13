@@ -150,6 +150,34 @@ def fetch_state(psid: str) -> dict | None:
         return None
 
 
+_STATES_CACHE: tuple[float, dict] | None = None
+_STATES_TTL_S = 300.0     # số "từ trước tới nay" đổi chậm; đừng kéo cả node mỗi lần F5
+
+
+def fetch_states(force: bool = False) -> dict | None:
+    """TOÀN BỘ khach_state (1 lần đọc) - để đếm theo NGƯỜI, không phải theo lượt.
+
+    Bản ghi gộp theo ngày không giữ psid (xem stats.gop_theo_ngay) nên số khách của cả kỳ
+    không dựng lại được từ stats. Cờ trạng thái thì sống mãi theo từng khách -> đếm ở đây.
+
+    None = Firebase tắt/lỗi -> caller đếm file .state.json local (chỉ khách máy này có cache).
+    """
+    global _STATES_CACHE
+    if not force and _STATES_CACHE and time.time() - _STATES_CACHE[0] < _STATES_TTL_S:
+        return _STATES_CACHE[1]
+
+    def fn():
+        if not _init():
+            return None
+        from firebase_admin import db
+        data = db.reference("khach_state").get()
+        return data if isinstance(data, dict) else {}
+    out = _doc(fn, "đọc cờ trạng thái toàn bộ khách")
+    if out is not None:
+        _STATES_CACHE = (time.time(), out)
+    return out
+
+
 def delete_state(psid: str) -> bool:
     """Xoá cờ trạng thái 1 khách (đi kèm xoá hội thoại). False = Firebase tắt/lỗi."""
     if not _init():

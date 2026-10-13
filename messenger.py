@@ -16,6 +16,7 @@ import httpx
 
 import alerts
 import brain
+import comment_mau
 import config
 import returning
 import state
@@ -120,7 +121,7 @@ def _cau_chuyen_nguoi_that(sdt: str) -> str:
     'cho gặp nhân viên' là bị hỏi lại số ngay."""
     if sdt:
         return ("Dạ nội dung này em nhờ chuyên gia bên em trao đổi với Bác cho chính xác ạ. "
-                f"Chuyên gia sẽ gọi cho Bác theo số {sdt} ngay nhé!")
+                "Chuyên gia sẽ gọi cho Bác theo số của Bác ngay nhé!")
     return _HUMAN_HANDOFF_REPLY
 # Khách đang gắt: KHÔNG xin số, KHÔNG hỏi thêm, KHÔNG chào mời - chỉ nhận lỗi rồi nhường người thật.
 _XOA_DIU_REPLY = ("Dạ em xin ghi nhận phản ánh của Bác ạ. Em rất tiếc vì đã làm Bác không hài lòng. "
@@ -397,11 +398,11 @@ def verify_signature(raw_body: bytes, header_sig: str) -> bool:
     return hmac.compare_digest(expected, header_sig.split("=", 1)[1].strip())
 
 
-# Tin public + private khi khách comment (giới thiệu + hỏi nhu cầu, mời vào inbox).
-_PUBLIC_REPLY = "Dạ em cảm ơn Bác đã quan tâm tới Hồn Đá ạ!"
-_PRIVATE_REPLY = ("Dạ em chào Bác ạ. Em là Thảo Vân, trợ lý bên Đá mỹ nghệ Hồn Đá. "
-                  "Em thấy Bác quan tâm tới sản phẩm bên em. Bác đang tìm hiểu mẫu nào ạ - "
-                  "Mộ đá, Long đình, Cổng hay Lan can đá? Em tư vấn chi tiết cho Bác nhé!")
+# Tin nhắn riêng khi khách comment có nhu cầu (mẫu I1 bộ trả lời 09/10/2026). Câu công khai
+# lấy theo nhóm ở comment_mau - trước đây dán một câu cảm ơn cho MỌI comment, kể cả câu chửi.
+_PRIVATE_REPLY = ("Dạ em chào bác ạ. Bác đang tính làm khu lăng cho cả họ, mộ cho ông bà bố mẹ, "
+                  "hay làm lại một phần khu cũ ạ? Bác có kích thước đất thì gửi em luôn, em gửi "
+                  "mẫu cỡ vừa với nhà mình.")
 
 # comment_id -> epoch, chống xử lý trùng khi FB gửi lại.
 # GHI XUỐNG ĐĨA (không chỉ RAM): FB gửi lại event sau khi bot restart/deploy thì dedupe trong
@@ -486,12 +487,20 @@ def parse_comment_events(payload: dict):
     return out
 
 
-async def reply_public(comment_id: str) -> bool:
-    """Trả lời công khai dưới comment: cảm ơn. True = FB nhận."""
+async def reply_public(comment_id: str, message: str) -> bool:
+    """Trả lời công khai dưới comment. True = FB nhận."""
     if not (config.PAGE_TOKEN and comment_id):
         return False
     url = f"https://graph.facebook.com/{config.GRAPH_VER}/{comment_id}/comments"
-    return await _fb_post(url, payload={"message": _PUBLIC_REPLY}, tag="comment-public")
+    return await _fb_post(url, payload={"message": message}, tag="comment-public")
+
+
+async def hide_comment(comment_id: str) -> bool:
+    """Ẩn comment (người viết + bạn bè họ vẫn thấy, người khác không). Cần pages_manage_engagement."""
+    if not (config.PAGE_TOKEN and comment_id):
+        return False
+    url = f"https://graph.facebook.com/{config.GRAPH_VER}/{comment_id}"
+    return await _fb_post(url, payload={"is_hidden": True}, tag="comment-hide")
 
 
 async def reply_private(comment_id: str) -> bool:
@@ -504,19 +513,32 @@ async def reply_private(comment_id: str) -> bool:
 
 
 async def handle_comment(comment_id: str, from_id: str, text: str = "") -> None:
-    """1 comment: LUÔN cảm ơn công khai; chỉ nhắn riêng khi comment có dấu hiệu nhu cầu.
+    """1 comment: xếp nhóm theo bộ mẫu (comment_mau), nhắn riêng nhóm A/B, trả lời công khai
+    đúng mẫu, ẩn comment lộ SĐT/chửi/đối thủ.
 
-    Khen đẹp/chào hỏi mà nhắn riêng là làm phiền, và đốt mất quyền private reply (FB chỉ cho
-    1 lần/comment). Lỗi 1 kênh không chặn kênh kia; 2 kênh hỏng theo cách KHÁC nhau (public cần
+    Nhắn riêng TRƯỚC: mẫu A1/A2/A5 nói "Hồn Đá đã nhắn riêng cho bác" - chỉ được nói khi đã nhắn
+    thật. Khen đẹp mà nhắn riêng là làm phiền và đốt quyền private reply (FB cho 1 lần/comment).
+    Lỗi 1 kênh không chặn kênh kia; 2 kênh hỏng theo cách KHÁC nhau (public cần
     pages_manage_engagement; private chỉ 1 lần/comment và hết hạn sau 7 ngày) -> ghi rõ kênh nào."""
-    pub = await reply_public(comment_id)
-    want_private = await brain.comment_has_intent(text)
+    ma = await brain.comment_ma(text)
+    want_private = ma in comment_mau.NHAN_RIENG
     priv = await reply_private(comment_id) if want_private else False
-    priv_log = ("OK" if priv else "HỎNG") if want_private else "BỎ QUA (không có nhu cầu)"
-    print(f"[comment] {comment_id}: công khai={'OK' if pub else 'HỎNG'} | riêng={priv_log}",
+    if ma in comment_mau.BAO_ADMIN:
+        # Mẫu A4/A6 hứa "đã chuyển tư vấn viên" -> phải có người thật nhận việc TRƯỚC khi đăng.
+        await notify_admins(f"💬 Comment cần tư vấn viên liên hệ ({ma}): {text[:300]}\n"
+                            f"comment_id: {comment_id}")
+    cau = comment_mau.cau_tra_loi(ma, da_nhan_rieng=priv)
+    pub = await reply_public(comment_id, cau) if cau else False
+    an = await hide_comment(comment_id) if ma in comment_mau.AN else False
+    priv_log = ("OK" if priv else "HỎNG") if want_private else "BỎ QUA"
+    pub_log = ("OK" if pub else "HỎNG") if cau else "BỎ QUA"
+    print(f"[comment] {comment_id}: mã={ma} | công khai={pub_log} | riêng={priv_log} | ẩn={an}",
           file=sys.stderr)
     stats.log_event("comment", from_id,
-                    note=f"public={pub} private={priv if want_private else 'skip'}")
+                    note=f"ma={ma} public={pub if cau else 'skip'} "
+                         f"private={priv if want_private else 'skip'} hidden={an}")
+    if not (cau or want_private):
+        return                            # chủ ý im (chửi, đối thủ, chỉ gắn tên) - không phải sự cố
     if not (pub or want_private):
         # Chủ ý không nhắn riêng -> chỉ còn public là kênh duy nhất, hỏng là khách không thấy gì.
         await alert_admins("comment:dead",
@@ -542,11 +564,15 @@ _IMAGE_REPLY = ("Dạ mẫu này bên em có khá nhiều biến thể về kíc
                 "chuyên gia bên em sẽ liên hệ tư vấn cụ thể cho Bác ngay ạ!")
 
 
-def _cau_khach_gui_anh(sdt: str) -> str:
-    """Câu trả ảnh khách gửi (không đọc được). Đã có SĐT thì xác nhận số, không xin lại."""
+def _cau_khach_gui_anh(sdt: str, da_xin_so: bool = False) -> str:
+    """Câu trả ảnh khách gửi (không đọc được). Đã có SĐT thì xác nhận số, không xin lại.
+    Đã xin số 1 lần rồi (trần 1 lần, bộ trả lời 09/10/2026) thì không xin nữa."""
+    if da_xin_so and not sdt:
+        return ("Dạ mẫu này bên em có khá nhiều biến thể về kích thước và loại đá ạ. "
+                "Bác cho em biết kích thước khu đất, em tư vấn cỡ vừa với nhà mình ạ.")
     if sdt:
         return ("Dạ mẫu này bên em có khá nhiều biến thể về kích thước và loại đá ạ. "
-                f"Chuyên gia bên em sẽ liên hệ tư vấn cụ thể cho Bác theo số {sdt} ngay ạ!")
+                "Chuyên gia bên em sẽ liên hệ tư vấn cụ thể cho Bác theo số của Bác ngay ạ!")
     return _IMAGE_REPLY
 # Like/sticker lần đầu: chào hỏi mời tư vấn như bình thường (KHÔNG xin SĐT dồn).
 _STICKER_REPLY = ("Dạ em chào Bác ạ. Bác đang quan tâm hạng mục nào để em tư vấn giúp Bác ạ? "
@@ -613,6 +639,19 @@ async def _fetch_customer_images(urls: list[str]) -> list[tuple[bytes, str]]:
     return out
 
 
+def _ghi_nguon_quang_cao(psid: str, ev: dict, msg: dict) -> None:
+    """Khách đến từ QUẢNG CÁO (referral.source = ADS) -> lưu cờ + ad_id vào state.
+
+    Trước đây referral chỉ dùng để chào rồi vứt, CRM ghi cứng "Facebook" cho mọi khách nên không
+    biết lead nào do quảng cáo mang về (ca Trần Long 28/09: bấm ad linh vật đá, CRM vẫn ghi
+    "Facebook"). Meta gửi referral ở 3 chỗ tuỳ luồng: sự kiện referral riêng (thread cũ), trong
+    postback nút Bắt đầu, và kèm tin nhắn đầu tiên -> dò cả ba."""
+    for ref in (ev.get("referral"), (ev.get("postback") or {}).get("referral"), msg.get("referral")):
+        if isinstance(ref, dict) and str(ref.get("source") or "").upper() == "ADS":
+            state.patch(psid, tu_quang_cao=True, ad_id=str(ref.get("ad_id") or ""))
+            return
+
+
 def parse_events(payload: dict):
     """[(psid, text)] từ webhook body. Bỏ echo của page.
 
@@ -628,6 +667,7 @@ def parse_events(payload: dict):
             psid = (ev.get("sender") or {}).get("id")
             if not psid:
                 continue
+            _ghi_nguon_quang_cao(str(psid), ev, msg)
             text = msg.get("text")
             if text:
                 out.append((str(psid), str(text)))
@@ -1188,6 +1228,7 @@ async def _save_lead_to_crm(psid: str, deep: bool = True) -> None:
     name = await profile_name(psid)          # tên tài khoản FB - không xin tên khách nữa
     if name:
         lead["ten"] = name
+    lead["tu_quang_cao"] = bool((await _off(state.get, psid)).get("tu_quang_cao"))
     result = await asyncio.to_thread(lark_crm.upsert_lead, psid, lead)
     tag = {"created": "✅ Đã tạo lead CRM", "updated": "♻️ Đã cập nhật lead CRM"}.get(result)
     if tag:
@@ -1278,6 +1319,7 @@ async def _process_inner(psid: str, text: str, user_at: str | None = None) -> No
     # từ nay các nhánh đó cũng ghi log (brain.ghi_luot) -> để sau là seed vĩnh viễn không chạy
     # nữa, khách cũ bấm quảng cáo bị tiếp như người lạ.
     # True = khách im >=24h rồi nhắn lại -> ép tóm tắt lại ô Ghi chú CRM ở cuối lượt.
+    await _off(state.ghi_den_luc, psid)       # mốc khách đến lần đầu (lọc khách theo tháng)
     quay_lai = await returning.xu_ly_khach_quay_lai(psid)
     if quay_lai and text in (_IMG_EVENT, _STICKER_EVENT, _REFERRAL_EVENT):
         # Ba nhánh sự kiện dưới đây thoát sớm ở NHIỀU chỗ và không nhánh nào chạm CRM: khách cũ
@@ -1295,7 +1337,7 @@ async def _process_inner(psid: str, text: str, user_at: str | None = None) -> No
         stats.log_event("image", psid)
         if not images:
             # Tải ảnh hỏng hoặc attachment không phải ảnh (file/video) -> câu cố định cũ.
-            cau = _cau_khach_gui_anh(await _off(brain.sdt_da_luu, psid))
+            cau = _cau_khach_gui_anh(await _off(brain.sdt_da_luu, psid), await _off(brain.da_xin_so, psid))
             await send_text(psid, cau)
             # Câu này XIN SĐT -> phải vào log, không thì khách gõ số xong bot hỏi lại y hệt.
             await brain.ghi_luot_async(psid, "[khách gửi ảnh/file]", cau, user_at)
@@ -1331,13 +1373,17 @@ async def _process_inner(psid: str, text: str, user_at: str | None = None) -> No
                                 f"PSID: {psid}\nLý do: {noise.get('count')} tương tác nhiễu liên tiếp, gồm sticker.\n"
                                 "Bot sẽ tự mở lại khi khách gửi nội dung có ý nghĩa.")
             return
-        _STICKER_COUNT[psid] = 0
         # Like/sticker/icon: lần đầu chào hỏi mời tư vấn; lần 2 liên tiếp -> im + báo admin.
+        # (Trước đây có dòng gán _STICKER_COUNT[psid] = 0 ngay trên đây -> n LUÔN = 1: bot chào
+        #  lại mỗi lần khách thả tim và không bao giờ tới nhánh báo admin.)
         n = _STICKER_COUNT.get(psid, 0) + 1
         if len(_STICKER_COUNT) > _STICKER_COUNT_MAX:   # ponytail: chặn phình, xoá sạch (thô nhưng đủ)
             _STICKER_COUNT.clear()
         _STICKER_COUNT[psid] = n
-        if n == 1:
+        # Khách ĐÃ gõ chữ rồi thì câu chào "Bác đang quan tâm hạng mục nào" là bot quên sạch hội
+        # thoại: ca thật 37 lần/tuần, có ca bắn ngay sau PHIẾU YÊU CẦU đã chốt xong nhu cầu +
+        # SĐT. Thả tim giữa/cuối hội thoại là khách tán thành, không phải mở lời mới -> im.
+        if n == 1 and await _off(brain.is_new_customer, psid):
             await send_text(psid, _STICKER_REPLY)
             await brain.ghi_luot_async(psid, "", _STICKER_REPLY)
         elif n == 2:
@@ -1387,6 +1433,7 @@ async def _process_inner(psid: str, text: str, user_at: str | None = None) -> No
             doi_ngung = forced == _LY_DO_DOI_NGUNG
             kho_chiu = forced in _LY_DO_KHO_CHIU
             stats.log_event("khach_kho_chiu" if kho_chiu else "handoff", psid)
+            await _off(state.danh_dau_handoff, psid, kho_chiu)
             # Khách đang gắt: câu mời để lại SĐT lúc này chỉ đổ thêm dầu -> xoa dịu rồi im.
             # force: tin xoa dịu là tin ĐẶT RA cái khoá, không được tự chặn chính nó.
             # Nhánh này THOÁT SỚM (không qua brain.answer): số khách gõ trong chính tin này phải
@@ -1435,6 +1482,7 @@ async def _process_inner(psid: str, text: str, user_at: str | None = None) -> No
         if pause_reason:
             # Khách khó chịu: gửi NỐT tin xoa dịu (im bặt giữa chừng còn khó chịu hơn), rồi im.
             stats.log_event("khach_kho_chiu", psid)
+            await _off(state.danh_dau_handoff, psid, True)
             await _off(_pause_bot, psid, pause_reason)
             if reply:
                 await send_text(psid, reply, force=True)   # tin cuối, gửi trước khi khoá có hiệu lực
@@ -1450,6 +1498,7 @@ async def _process_inner(psid: str, text: str, user_at: str | None = None) -> No
             # Ảnh phải gửi ở đây: bot vẫn giữ cuộc chat sau handoff, bỏ ảnh là khách hỏi mẫu
             # xong chỉ nhận chữ trơn đúng lúc đang quan tâm nhất.
             stats.log_event("handoff", psid, duration_s=time.monotonic() - t0)
+            await _off(state.danh_dau_handoff, psid)
             if reply:
                 await send_text(psid, reply)
             await _send_images(psid, imgs)

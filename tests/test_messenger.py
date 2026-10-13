@@ -302,6 +302,61 @@ def test_danh_gia_token():
     assert messenger.danh_gia_token({}, now), "thiếu is_valid phải coi là chết, không im lặng"
 
 
+def test_sticker_khong_chao_lai_khach_dang_chat():
+    """Khách ĐÃ gõ chữ rồi thả tim -> KHÔNG bắn lại câu chào "quan tâm hạng mục nào".
+
+    Ca thật 07/09/2026: 37 lần/tuần, có ca chào lại ngay sau PHIẾU YÊU CẦU đã chốt nhu cầu +
+    SĐT, khách đọc ra ngay là bot quên sạch hội thoại."""
+    import asyncio
+    import brain
+    import returning
+    import stats
+
+    goc = dict(sticker=messenger._sticker_decision, send=messenger.send_text,
+               ghi=brain.ghi_luot_async, moi=brain.is_new_customer,
+               admin=messenger.notify_admins, quay=returning.xu_ly_khach_quay_lai,
+               log=stats.log_event)
+    da_gui = []
+
+    async def _im(*a, **kw):
+        return None
+
+    async def chay(khach_moi: bool):
+        async def gui(psid, t, **kw):
+            da_gui.append(t)
+
+        messenger._sticker_decision = lambda psid: ("welcome", {})
+        messenger.send_text = gui
+        brain.ghi_luot_async = _im
+        brain.is_new_customer = lambda psid: khach_moi
+        messenger.notify_admins = _im
+        returning.xu_ly_khach_quay_lai = _im
+        stats.log_event = lambda *a, **kw: None
+        await messenger._process_inner("PSID_STICKER", messenger._STICKER_EVENT)
+
+    try:
+        messenger._STICKER_COUNT.pop("PSID_STICKER", None)
+        asyncio.run(chay(khach_moi=False))
+        assert not da_gui, f"khách đang chat mà bot vẫn chào lại: {da_gui}"
+
+        messenger._STICKER_COUNT.pop("PSID_STICKER", None)
+        asyncio.run(chay(khach_moi=True))
+        assert da_gui == [messenger._STICKER_REPLY], f"like đầu tiên phải được chào: {da_gui}"
+
+        # Đếm phải TĂNG qua từng sticker: bản cũ gán về 0 ngay trước khi +1 nên n luôn = 1,
+        # bot chào lại mãi và không bao giờ tới nhánh báo admin.
+        asyncio.run(chay(khach_moi=True))
+        assert messenger._STICKER_COUNT["PSID_STICKER"] == 2, "bộ đếm sticker bị reset"
+        assert da_gui == [messenger._STICKER_REPLY], f"like lần 2 phải im: {da_gui}"
+    finally:
+        messenger._sticker_decision, messenger.send_text = goc["sticker"], goc["send"]
+        brain.ghi_luot_async, brain.is_new_customer = goc["ghi"], goc["moi"]
+        messenger.notify_admins = goc["admin"]
+        returning.xu_ly_khach_quay_lai = goc["quay"]
+        stats.log_event = goc["log"]
+        messenger._STICKER_COUNT.pop("PSID_STICKER", None)
+
+
 if __name__ == "__main__":
     test_signature()
     test_verify_webhook()
@@ -316,4 +371,5 @@ if __name__ == "__main__":
     test_ai_quyet_gui_anh()
     test_bo_marker_thua()
     test_danh_gia_token()
+    test_sticker_khong_chao_lai_khach_dang_chat()
     print("OK - all messenger self-checks passed")

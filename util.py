@@ -11,6 +11,11 @@ def safe_psid(psid) -> str:
 
 _PHONE_RE = re.compile(r"(?<!\d)(?:\+?84|0)\d{9,10}(?!\d)")
 _PHONE_SEP_RE = re.compile(r"[\s.\-()]")
+# Cùng dạng SĐT nhưng GIỮ NGUYÊN vị trí (cho phép dấu cách/chấm/gạch ở giữa) -> thay tại chỗ.
+# Nuốt luôn chữ "số/sđt/zalo" đứng trước: thay trần thì ra "gọi qua số số của Bác".
+_PHONE_INLINE_RE = re.compile(
+    r'(?:\b(?:s(?:ố|o)|sđt|sdt|zalo)\s+)?(?<![\d+])(?:\+?84|0)[\s.\-]?\d(?:[\s.\-]?\d){8,9}(?!\d)',
+    re.I)
 
 
 def tim_sdt(text: str) -> str:
@@ -25,6 +30,17 @@ def tim_sdt(text: str) -> str:
         return ""
     so = m.group(0).lstrip("+")
     return "0" + so[2:] if so.startswith("84") else so
+
+
+def che_sdt(text: str, thay: str = "số của Bác") -> str:
+    """Bỏ mọi SĐT ra khỏi tin GỬI CHO KHÁCH.
+
+    Messenger VN quét tin gửi đi, thấy chuỗi 10 số là tự gắn thẻ "Transfer requested" kèm tên
+    ngân hàng + "account number <số>". Khách đọc thành bên mình đòi chuyển tiền khi chưa gặp
+    mặt -> mất tin ngay (ca thật 29/08/2026: "Chưa gặp gỡ giao dịch đã cần tài khoản là sao").
+    Thẻ đó do client Messenger dựng, API không tắt được -> cách duy nhất là đừng gửi chữ số.
+    """
+    return _PHONE_INLINE_RE.sub(thay, text or "")
 
 
 def write_json_atomic(path: Path, obj) -> None:

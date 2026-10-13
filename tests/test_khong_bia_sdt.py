@@ -97,18 +97,37 @@ def test_lead_khong_lay_sdt_tu_loi_bot(monkeypatch):
     assert lead["tinh"] == "Bắc Ninh"
 
 
+def test_lead_khong_lay_sdt_rac_tu_ho_so(monkeypatch):
+    """REGRESSION: AI trích hồ sơ điền ô SĐT bằng chữ ("Zalo", "chưa cho") -> log không có
+    số nào nhưng _sdt_khach rơi xuống profile['sdt'] và khách chưa cho số vẫn lên CRM."""
+    hist = [{"role": "user", "content": "Cho xem mau mo don"},
+            {"role": "assistant", "content": "Bác cho em xin số Zalo ạ"},
+            {"role": "user", "content": "nhan qua zalo nay luon"}]
+    monkeypatch.setattr(brain, "_load_hist", lambda psid: hist)
+    monkeypatch.setattr(brain, "_doc_profile", lambda psid: brain._clean_profile({}))
+    monkeypatch.setattr(brain, "_ghi_profile", lambda psid, p: None)
+    for rac in ("Zalo", "zalo này", "chưa cho", "0979655XXX"):
+        monkeypatch.setattr(brain, "_sinh_json", lambda *a, rac=rac, **kw: {"sdt": rac})
+        assert brain._extract_lead_sync("psid-4", deep=False) is None, f"'{rac}' không phải SĐT"
+    assert brain._clean_profile({"sdt": "+84 912 345 678"})["sdt"] == "0912345678"
+
+
 if __name__ == "__main__":
     class _MP:
         def setattr(self, obj, name, val): setattr(obj, name, val)
 
     goc = (alerts.alert, brain._load_hist, brain._profile_from_history_sync,
-           brain._get_client, brain._generate)
+           brain._get_client, brain._generate, brain._doc_profile, brain._ghi_profile,
+           brain._sinh_json)
     try:
         test_prompt_noi_ro_chua_co_sdt()
         test_chan_tin_bia_sdt(_MP())
         test_khong_chan_nham(_MP())
         test_lead_khong_lay_sdt_tu_loi_bot(_MP())
+        (brain._profile_from_history_sync,) = goc[2:3]
+        test_lead_khong_lay_sdt_rac_tu_ho_so(_MP())
     finally:
         (alerts.alert, brain._load_hist, brain._profile_from_history_sync,
-         brain._get_client, brain._generate) = goc
+         brain._get_client, brain._generate, brain._doc_profile, brain._ghi_profile,
+         brain._sinh_json) = goc
     print("khong bia sdt: OK")

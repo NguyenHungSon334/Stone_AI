@@ -1,5 +1,5 @@
 """
-Quét Lark Base (cột Ảnh) -> ghi cột "Có ảnh" (TRUE/FALSE) vào Danh_Muc_San_Pham.csv.
+Quét Lark Base (các cột ảnh) -> ghi cột "Có ảnh" (TRUE/FALSE) vào Danh_Muc_San_Pham.csv.
 
 Chạy lại mỗi khi bổ sung ảnh vào Base:
   python bot_tools/sync_anh_flag.py            # ghi CSV
@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import config
 from bot_tools.find_by_price import CSV
 from bot_tools.lark_image import _la_anh, _tenant_token, base_code, request_retry
+from bot_tools.sync_bang_hang import phang
 
 FLAG_COL = "Có ảnh"
 
@@ -30,7 +31,7 @@ def codes_with_image() -> set[str]:
     while True:
         r = request_retry("POST", url + (f"&page_token={page}" if page else ""),
                           headers={"Authorization": f"Bearer {tok}"},
-                          json={"field_names": [config.LARK_PRODUCT_FIELD, config.LARK_IMAGE_FIELD],
+                          json={"field_names": [config.LARK_PRODUCT_FIELD, *config.LARK_IMAGE_FIELDS],
                                 "automatic_fields": False},
                           timeout=30.0)
         d = r.json()
@@ -39,13 +40,10 @@ def codes_with_image() -> set[str]:
         data = d.get("data") or {}
         for item in (data.get("items") or []):
             f = item.get("fields") or {}
-            raw = f.get(config.LARK_PRODUCT_FIELD)
-            # Field text của Bitable có thể là str hoặc list[{text:...}].
-            code = raw if isinstance(raw, str) else "".join(
-                seg.get("text", "") for seg in (raw or []) if isinstance(seg, dict))
+            code = phang(f.get(config.LARK_PRODUCT_FIELD))
             # Chỉ tính ẢNH thật: record chỉ có video .MOV đính kèm mà đánh "Có ảnh" là bot
             # giới thiệu mẫu đó rồi khách không nhận được hình nào.
-            if code and any(_la_anh(a) for a in (f.get(config.LARK_IMAGE_FIELD) or [])):
+            if code and any(_la_anh(a) for c in config.LARK_IMAGE_FIELDS for a in (f.get(c) or [])):
                 out.add(base_code(code))
         page = data.get("page_token") or ""
         if not data.get("has_more") or not page:

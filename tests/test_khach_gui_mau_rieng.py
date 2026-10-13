@@ -40,13 +40,13 @@ class _Resp:
 
 
 def _chay(monkeypatch, tmp_path, text, images):
-    """Gọi thật _answer_sync với model giả trả lời có nhắc mã LD01."""
+    """Gọi thật _answer_sync với model giả trả lời có nhắc mã LĐ01."""
     monkeypatch.setattr(brain, "_HIST_DIR", tmp_path)
     monkeypatch.setattr(brain, "_get_client", lambda: object())
     monkeypatch.setattr(brain, "_model_id", lambda: "fake")
     monkeypatch.setattr(brain, "_cached_handle", lambda c, m: None)
     monkeypatch.setattr(brain, "_gen_answer",
-                        lambda c, m, contents, h: (_Resp("Dạ mẫu LD01 ạ"), h))
+                        lambda c, m, contents, h: (_Resp("Dạ mẫu LĐ01 ạ"), h))
     monkeypatch.setattr(brain, "_refresh_profile_bg", lambda *a, **k: None)
     monkeypatch.setattr(brain, "_summarize_bg", lambda *a, **k: None)
     monkeypatch.setattr(brain.lark_image, "get_image_tokens", lambda code: ["tok1"])
@@ -56,8 +56,8 @@ def _chay(monkeypatch, tmp_path, text, images):
 
 def test_luot_co_anh_thi_khong_gui_anh_mau(monkeypatch, tmp_path):
     """REGRESSION: khách gửi ảnh + gõ kèm mã cũng KHÔNG được dội ảnh mẫu bên em."""
-    khong_anh = _chay(monkeypatch, tmp_path, "cho xem ảnh LD01", None)
+    khong_anh = _chay(monkeypatch, tmp_path, "cho xem ảnh LĐ01", None)
     assert "<<IMG:tok1>>" in khong_anh, "khách XIN mẫu bằng chữ thì vẫn gửi ảnh như cũ"
 
-    co_anh = _chay(monkeypatch, tmp_path, "làm giống mẫu này LD01", [(b"x", "image/jpeg")])
+    co_anh = _chay(monkeypatch, tmp_path, "làm giống mẫu này LĐ01", [(b"x", "image/jpeg")])
     assert "<<IMG:" not in co_anh, "khách gửi mẫu riêng -> cấm dội ảnh mẫu bên em"

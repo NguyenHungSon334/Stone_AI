@@ -9,6 +9,7 @@ Ví dụ:
   python bot_tools/find_by_price.py --max 200tr --min 100tr --stone "xanh rêu"
   python bot_tools/find_by_price.py --kind "Long đình" --max 150tr
   python bot_tools/find_by_price.py --q "mộ tròn"
+  python bot_tools/find_by_price.py --size 81x127 --stone "xanh đen"
   python bot_tools/find_by_price.py --selftest
 """
 import argparse
@@ -49,7 +50,9 @@ def fmt_money(v: float) -> str:
     return f"{v / 1e6:.1f}tr".replace(".0tr", "tr")
 
 
-_MA_HOP_LE = re.compile(r"^[A-Za-z]{1,4}\d{1,3}(\.\d+)?$")   # M01, LD03, TP02, M01.2
+# Chữ cái CÓ DẤU cũng hợp lệ: bảng hàng mới dùng LĐ01, CĐ02, ĐĐ03, LHĐ04 - regex
+# [A-Za-z] cũ loại sạch 24 mã có chữ Đ.
+_MA_HOP_LE = re.compile(r"^[^\W\d_]{1,4}\d{1,3}(\.\d+)?$")   # M01, LĐ03, TP02, M01.2
 
 
 def _ma_hong(row) -> bool:
@@ -128,13 +131,65 @@ def _uu_tien(header, r) -> tuple[int, int]:
     return (0 if (i_bc >= 0 and _cell(r, i_bc)) else 1, 0 if _co_anh(header, r) else 1)
 
 
+# Kích thước khách nói theo thước Lỗ Ban, đơn vị cm ("81x127", "89 x 147") - bảng hàng ghi mm
+# (1270x810). Số < _CM_NGUONG coi là cm -> x10. Dài/rộng KHÔNG cố định thứ tự: khách gõ
+# "81x127" (rộng trước), CSV ghi Dài=1270 Rộng=810 -> so sánh cặp đã sắp giảm dần cả hai phía.
+_SIZE_RE = re.compile(r"(\d{2,4})\s*[x×*]\s*(\d{2,4})")
+_SO_RE = re.compile(r"\d{2,4}")
+_CM_NGUONG = 300          # 81 -> 810mm; 810 giữ nguyên
+# Bậc Lỗ Ban liền kề chỉ cách 20mm (790/810 rộng, 1450/1470 dài) -> dung sai phải NHỎ hơn 20,
+# nới rộng là 81x127 kéo về cả nhóm 79x127 và báo sai hạng kích thước.
+_SIZE_TOL = 10
+
+
+def parse_size(s: str | None) -> tuple[float, float] | None:
+    """'81x127' / '810 x 1270mm' / '127*81' -> (1270.0, 810.0). Không đọc được -> None."""
+    m = _SIZE_RE.search(str(s or ""))
+    if not m:
+        return None
+    a, b = (float(x) for x in m.groups())
+    a, b = (a * 10 if a < _CM_NGUONG else a), (b * 10 if b < _CM_NGUONG else b)
+    return (max(a, b), min(a, b))
+
+
+def _cap_size(text: str) -> list[tuple[float, float]]:
+    """Các cặp số ĐỨNG CẠNH NHAU trong ô kích thước chữ tay, mỗi cặp sắp giảm dần.
+
+    'KT: D1270xR790xC760mm' -> [(1270,790), (790,760)]. Ghép cạnh nhau chứ không lấy bừa hai số
+    bất kỳ trong ô: cuốn thư ghi 'Thân 834x1255x150mm Đế 1370x240mm' - bốc số rời rạc là 1255
+    khớp nhầm với mộ 1270."""
+    so = [float(x) for x in _SO_RE.findall(text or "")]
+    return [(max(a, b), min(a, b)) for a, b in zip(so, so[1:])]
+
+
+def _khop_size(header, r, want: tuple[float, float]) -> bool:
+    """Mẫu này có đúng cỡ khách xin không?
+
+    Ưu tiên 2 cột số Chieu_Dai/Chieu_Rong (55/116 mã có). Mã thiếu cột số thì dò ô 'Kích thước'
+    chữ tay ('KT: 970x1470mm') - định dạng ô đó do người gõ nên không parse cứng được."""
+    dai, rong = want
+    d, rg = _cell(r, _col(header, "Chieu_Dai")), _cell(r, _col(header, "Chieu_Rong"))
+    if d and rg:
+        try:
+            a, b = float(d), float(rg)
+        except ValueError:
+            return False
+        return abs(max(a, b) - dai) <= _SIZE_TOL and abs(min(a, b) - rong) <= _SIZE_TOL
+    return any(abs(a - dai) <= _SIZE_TOL and abs(b - rong) <= _SIZE_TOL
+               for a, b in _cap_size(_cell(r, _col(header, "Kích thước"))))
+
+
 def search(max_price, min_price=0.0, stone=None, category=None, limit=15, kind=None, q=None,
-           exclude_ids=None):
+           exclude_ids=None, size=None):
     """Lọc bảng hàng. max_price=None -> không giới hạn trần (dùng khi chỉ lọc kind/q).
 
     THỨ TỰ: bán chạy trước, có ảnh trước, rồi giá tăng dần (xem _uu_tien). Tool chỉ trả 3 mẫu
     cho bot nên sort thuần theo giá là mẫu bán chạy/có ảnh rơi khỏi top - khách nhận mẫu rẻ
     nhất thay vì mẫu dễ chốt và xem được hình.
+
+    size: kích thước khách xin ('81x127'). Lọc theo cột Dài/Rộng của bảng hàng - đây là đường
+    DUY NHẤT tra được theo cỡ: q chỉ dò Tên + Thể Loại, nên khách xin 81x127 mà lọc bằng
+    q='mộ đơn' là ra nhóm 97x147 (ca thật: khách bỏ đi vì bot báo sai hạng kích thước).
 
     exclude_ids: bỏ các mã ĐÃ giới thiệu. Kết quả sort rồi cắt [:limit] nên cùng bộ lọc luôn ra
     đúng ngần ấy mã; khách đòi 'mẫu khác' mà không loại mã cũ là bot đưa lại y hệt."""
@@ -147,10 +202,12 @@ def search(max_price, min_price=0.0, stone=None, category=None, limit=15, kind=N
     if stone and not cols:
         return []  # loai da khong khop cot nao
     kind_f = fold(kind) if kind else ""
+    size_w = parse_size(size)
     # Khách/AI gõ "mộ tròn" -> mọi từ phải có mặt trong tên. Bỏ dấu cả hai phía: bảng hàng ghi
     # có dấu, khách Messenger gõ không dấu rất nhiều.
     q_words = [w for w in fold(q).split() if w] if q else []
-    out = []
+    khong_chan_gia = max_price == float("inf") and min_price <= 0
+    out, rieng = [], []
     for r in data:
         if not r or not r[0].strip():
             continue
@@ -159,6 +216,8 @@ def search(max_price, min_price=0.0, stone=None, category=None, limit=15, kind=N
         if category and category.strip().lower() not in _cell(r, i_dm).lower():
             continue
         if kind_f and kind_f not in fold(_cell(r, i_tl)):
+            continue
+        if size_w and not _khop_size(header, r, size_w):
             continue
         if q_words:
             hay = fold(_cell(r, i_ten) + " " + _cell(r, i_tl))
@@ -172,9 +231,22 @@ def search(max_price, min_price=0.0, stone=None, category=None, limit=15, kind=N
                 continue
             if min_price <= v <= max_price and (best is None or v < best[0]):
                 best = (v, header[i].strip())
+        # Mã chưa gắn giá = hàng THIẾT KẾ RIÊNG (bát hương, lư hương, đèn đá...). Vẫn chào
+        # khách kèm ảnh rồi để chuyên gia báo giá - giấu luôn mẫu là mất khách.
+        # Xét TOÀN BỘ cột đá, không chỉ cột khách lọc: mã có giá xanh đen mà trống ô GRN là
+        # "không bán loại đá đó", khác hẳn hàng thiết kế riêng chưa có giá nào.
         if best:
             out.append((best[0], best[1], r, bool(stone)) if stone else (best[0], best[1], r))
-    out.sort(key=lambda x: _uu_tien(header, x[2]) + (x[0],))
+        elif not any(parse_money(r[i]) > 0 for i in stone_cols if i < len(r)):
+            rieng.append((0.0, "", r, bool(stone)) if stone else (0.0, "", r))
+    # Khách NÊU tầm giá thì mẫu chưa có giá không được trộn vào (không biết giá thì không
+    # được hứa nó nằm trong ngân sách). Nhưng lọc xong TRẮNG tay thì vẫn đưa ra, thay vì trả
+    # "không có mẫu nào" - khách hỏi bát hương mà nghe hết hàng là mất luôn khách.
+    if rieng and (khong_chan_gia or not out):
+        out += rieng
+    # Mã chưa có giá xuống CUỐI nhóm: giá 0 mà sort thẳng theo giá thì nó nhảy lên đầu như
+    # hàng rẻ nhất, khách nhận toàn mẫu không báo được giá.
+    out.sort(key=lambda x: _uu_tien(header, x[2]) + (0 if x[0] > 0 else 1, x[0]))
     return out[:limit]
 
 
@@ -255,7 +327,13 @@ def _spec(header, r) -> str:
         parts.append("KT " + " x ".join(x for x in (d, rg, c) if x) + "mm")
     if hop:
         parts.append(f"hộp thờ {hop}mm")
-    if tan:
+    # Trọng lượng <=0 = CHƯA CÂN, không phải nhẹ bằng 0. Cùng lối với giá 0 ở _prices: 11 mã
+    # trong bảng ghi '0.000' và bot đọc thẳng cho khách thành "mộ này 0 tấn".
+    try:
+        co_tan = float(str(tan).replace(",", ".")) > 0
+    except ValueError:
+        co_tan = bool(tan)          # ô ghi chữ ("~2 tấn") -> giữ nguyên văn
+    if tan and co_tan:
         parts.append(f"{tan} tấn")
     return ", ".join(parts)
 
@@ -282,19 +360,24 @@ def render(results) -> str:
     for item in results:
         price, stone_name, r = item[:3]
         only_stone = stone_name if len(item) > 3 and item[3] else None
-        head = f"{r[0]} | {_cell(r, i_ten)} | {_cell(r, i_dm)}"
+        # Ô trống BỎ hẳn thay vì để ' | | ': 43 mã thiết kế riêng chưa gắn Danh mục, in ra
+        # thành dấu gạch rỗng là bot đọc lệch cột khi tóm tắt lại cho khách.
+        phan = [r[0], _cell(r, i_ten), _cell(r, i_dm)]
         if _cell(r, i_bc):                   # cột 'Bán chạy' - persona ưu tiên giới thiệu trước
-            head += " | BÁN CHẠY"
-        if _spec(header, r):
-            head += f" | {_spec(header, r)}"
+            phan.append("BÁN CHẠY")
+        phan.append(_spec(header, r))
         if _cell(r, i_gc):
-            head += f" | ghi chú: {_cell(r, i_gc)}"
+            phan.append(f"ghi chú: {_cell(r, i_gc)}")
+        head = " | ".join(x for x in phan if x)
         lines.append(head)
         # Giá 0 trong bảng = CHƯA CẬP NHẬT, không phải miễn phí. Phải ghi ra chữ: search() lọc
         # theo tầm giá nên không bao giờ trả mã giá 0, nhưng rows_by_ids() (khách hỏi đích danh
         # mã) thì trả -> bot đọc "0tr" thành "0 đồng" cho khách là mất mặt + mất đơn.
         gia = _prices(header, stone_cols, r, only_stone)
-        lines.append(f"    giá: {gia}" if gia else "    giá: CHƯA CÓ GIÁ - chuyên gia báo riêng")
+        lines.append(f"    giá: {gia}" if gia else "    giá: HÀNG THIẾT KẾ RIÊNG - "
+                     "không có giá niêm yết. Nói với khách đây là mẫu làm riêng theo công "
+                     "trình, chuyên gia sẽ gọi tư vấn và báo giá; nếu hồ sơ CHƯA CÓ SĐT thì "
+                     "mời khách để lại SĐT/Zalo. CẤM tự đoán ra một con số giá.")
     return "\n".join(lines)
 
 
@@ -327,7 +410,7 @@ def _selftest():
         # Mã trống SẠCH mọi cột đá mới được nói 'chưa có giá'; trống 1 cột thì vẫn phải báo giá
         # các loại đá còn lại, không được im.
         if not any(parse_money(_zero[0][i]) > 0 for i in _cols if i < len(_zero[0])):
-            assert "CHƯA CÓ GIÁ" in out, f"mã không có giá nào mà không báo: {out}"
+            assert "THIẾT KẾ RIÊNG" in out, f"mã không có giá nào mà không báo: {out}"
 
     # Bỏ CSV khỏi prompt -> tool là đường DUY NHẤT lấy thông số. Thiếu = bot bịa với khách.
     _i_dai, _i_rong, _i_cao = (_col(_hdr, n) for n in ("Chieu_Dai", "Chieu_Rong", "Chieu_Cao"))
@@ -377,6 +460,33 @@ def _selftest():
     assert not search(None, q="mộ tròn bay lơ lửng"), "mọi từ phải khớp, không khớp lỏng"
     # Thể loại nằm ngoài tên sản phẩm (TP01 tên 'Trấn phong', Thể Loại 'Cuốn thư') vẫn tìm ra.
     assert search(None, q="cuốn thư"), "q phải dò cả cột Thể Loại"
+    # Lọc theo kích thước khách nêu (thước Lỗ Ban, cm) - q chỉ dò TÊN nên không thay thế được.
+    assert parse_size("81x127") == (1270.0, 810.0), "cm -> mm sai"
+    assert parse_size("810 x 1270mm") == (1270.0, 810.0), "mm giữ nguyên"
+    assert parse_size("127*81") == (1270.0, 810.0), "thứ tự dài/rộng không được đổi kết quả"
+    assert parse_size("mộ đơn") is None
+    _i_dai2, _i_rong2 = _col(_hdr, "Chieu_Dai"), _col(_hdr, "Chieu_Rong")
+    _co81 = search(None, size="81x127", limit=500)
+    assert _co81, "mất nhóm 1270x810"
+    for _p, _s, _r in _co81:
+        _d, _rg = _cell(_r, _i_dai2), _cell(_r, _i_rong2)
+        if _d and _rg:
+            assert {float(_d), float(_rg)} == {1270.0, 810.0}, f"lọt mẫu sai cỡ: {_r[0]} {_d}x{_rg}"
+    # Bậc Lỗ Ban cạnh nhau chỉ cách 20mm: 81x127 KHÔNG được kéo theo bậc bên cạnh. Bảng hàng
+    # có lúc không sẵn cả 2 bậc -> kiểm bằng nhóm KHÁC cỡ chắc chắn có (97x147), cộng thêm
+    # ràng buộc dung sai trên chính hàm khớp để không phụ thuộc mã cụ thể.
+    _ma81 = {r[0].strip() for _, _, r in _co81}
+    _ma97 = {r[0].strip() for _, _, r in search(None, size="97x147", limit=500)}
+    assert _ma97 and not _ma81 & _ma97, f"81x127 lẫn sang 97x147: {_ma81 & _ma97}"
+    assert _SIZE_TOL < 20, "dung sai >=20mm là gộp nhầm 2 bậc Lỗ Ban cạnh nhau"
+    # Mã thiếu cột số phải dò được ô 'Kích thước' chữ tay, nhưng chỉ theo CẶP số đứng cạnh nhau
+    # (cuốn thư ghi 'Thân 834x1255x150mm' - bốc số rời là 1255 khớp nhầm mộ 1270).
+    assert _cap_size("KT: D1270xR790xC760mm") == [(1270.0, 790.0), (790.0, 760.0)]
+    assert not any(abs(a - 1270) <= _SIZE_TOL and abs(b - 810) <= _SIZE_TOL
+                   for a, b in _cap_size("Thân cuốn thư: 834x1255x150mm Đế: 1370x240mm"))
+    _gia_row = [""] * (_i_kt + 1); _gia_row[0] = "X01"; _gia_row[_i_kt] = "KT: 970x1470mm"
+    assert _khop_size(_hdr, _gia_row, (1470.0, 970.0)), "ô chữ tay 970x1470 phải khớp 97x147"
+
     # Lọc chồng: thể loại + trần giá
     # alias granite/G20 maps to GRN, including product-id lookups from image matches.
     grn = search(None, stone="granite", limit=1)
@@ -402,19 +512,20 @@ def main():
     ap.add_argument("--category", help="Danh mục, vd 'Trường Tồn'")
     ap.add_argument("--kind", help=f"Thể loại, vd {kinds_available()}")
     ap.add_argument("--q", help="Từ khoá tên sản phẩm, vd 'mộ tròn'")
+    ap.add_argument("--size", help="Kích thước khách nêu, vd '81x127' (cm) hoặc '810x1270' (mm)")
     ap.add_argument("--limit", type=int, default=15)
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
     if a.selftest:
         _selftest()
         return
-    if not (a.max or a.kind or a.q):
-        ap.error("cần ít nhất --max, --kind hoặc --q")
+    if not (a.max or a.kind or a.q or a.size):
+        ap.error("cần ít nhất --max, --kind, --q hoặc --size")
     mx = parse_money(a.max) if a.max else None
     if a.max and mx <= 0:
         ap.error(f"không đọc được --max '{a.max}'")
     mn = parse_money(a.min)
-    print(render(search(mx, max(mn, 0.0), a.stone, a.category, a.limit, a.kind, a.q)))
+    print(render(search(mx, max(mn, 0.0), a.stone, a.category, a.limit, a.kind, a.q, None, a.size)))
 
 
 if __name__ == "__main__":
